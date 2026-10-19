@@ -1,0 +1,153 @@
+//! `mailsync` — headless driver for the sync engine. Mainly for benchmarking strategies:
+//!
+//!     MAIL_PASSWORD=app-password cargo run --release -p mail-cli -- bench you@gmail.com
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand};
+use mail_core::model::{CoreEvent, SyncPhase};
+use mail_core::sync::{STRATEGIES, SyncOptions, strategy_by_name};
+use mail_core::{Core, NewAccount, Secrets};
+
+mod probe;
+
+#[derive(Parser)]
+#[command(name = "mailsync")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Sync an account from scratch into a fresh directory and report timings.
+    Bench {
+        email: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        /// Header strategy to use.
+        #[arg(long, default_value = "chunked")]
+        strategy: String,
+        /// Headers per chunk.
+        #[arg(long, default_value_t = 5000)]
+        chunk: u32,
+        /// Also download message bodies for this many seconds after headers finish.
+        #[arg(long, default_value_t = 0)]
+        bodies_secs: u64,
+        /// Background body connections.
+        #[arg(long, default_value_t = 3)]
+        body_workers: usize,
+        /// Keep the synced data here instead of a temporary directory.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// List available header strategies.
+    Strategies,
+    /// Diagnose one message: raw IMAP responses for its structure and body-only fetch.
+    /// Uses the password the app stored in the system keychain.
+    Probe {
+        email: String,
+        #[arg(long, default_value = "[Gmail]/All Mail")]
+        folder: String,
+        #[arg(long)]
+        uid: u32,
+        #[arg(long, default_value = "imap.gmail.com")]
+        host: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
+        .init();
+
+    match Cli::parse().cmd {
+        Cmd::Probe { email, folder, uid, host } => probe::run(&email, &folder, uid, &host).await,
+        Cmd::Strategies => {
+            for s in STRATEGIES {
+                println!("{s}");
+            }
+            Ok(())
+        }
+        Cmd::Bench { email, host, port, strategy, chunk, bodies_secs, body_workers, data_dir } => {
+            let strat = strategy_by_name(&strategy, chunk).ok_or_else(|| anyhow!("unknown strategy {strategy}"))?;
+            let password = match std::env::var("MAIL_PASSWORD") {
+                Ok(p) => p,
+                Err(_) => rpassword::prompt_password(format!("Password for {email}: "))?,
+            };
+            let dir = data_dir.unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("mailsync-bench-{}", std::process::id()))
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+            let options = SyncOptions { body_workers, download_bodies: bodies_secs > 0, ..Default::default() };
+            let core = Core::with_strategy(&dir, Secrets::memory(), strat, options)?;
+            let mut events = core.subscribe();
+
+            let t0 = Instant::now();
+            let account = core
+                .add_account(NewAccount { email, password, display_name: None, imap_host: host, imap_port: port })
+                .await?;
+            println!("strategy={strategy} chunk={chunk} provider={:?} data={}", account.provider, dir.display());
+            println!("{:>8.2}s  connected + authenticated", t0.elapsed().as_secs_f64());
+
+            let mut saw_folders = false;
+            let mut saw_inbox = false;
+            let mut last_print = Instant::now();
+            let headers_done = loop {
+                let ev = tokio::time::timeout(Duration::from_secs(600), events.recv()).await??;
+                match ev {
+                    CoreEvent::FoldersChanged { .. } if !saw_folders => {
+                        saw_folders = true;
+                        let n = core.folders(account.id)?.len();
+                        println!("{:>8.2}s  folder list ({n} folders)", t0.elapsed().as_secs_f64());
+                    }
+                    CoreEvent::MessagesChanged { .. } if !saw_inbox => {
+                        saw_inbox = true;
+                        println!("{:>8.2}s  first headers stored", t0.elapsed().as_secs_f64());
+                    }
+                    CoreEvent::Sync(s) => match s.phase {
+                        SyncPhase::Headers if last_print.elapsed() > Duration::from_millis(500) => {
+                            last_print = Instant::now();
+                            let name = core
+                                .folders(account.id)?
+                                .into_iter()
+                                .find(|f| Some(f.id) == s.folder_id)
+                                .map(|f| f.raw_name)
+                                .unwrap_or_default();
+                            println!("{:>8.2}s  {name}: {}/{}", t0.elapsed().as_secs_f64(), s.done, s.total);
+                        }
+                        SyncPhase::Idle => break t0.elapsed(),
+                        SyncPhase::Error => println!("error: {}", s.message.unwrap_or_default()),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            };
+            let total_msgs: u32 = core.folders(account.id)?.iter().map(|f| f.synced_count).sum();
+            println!(
+                "{:>8.2}s  all headers in sync ({total_msgs} folder entries, {:.0} entries/s)",
+                headers_done.as_secs_f64(),
+                total_msgs as f64 / headers_done.as_secs_f64()
+            );
+
+            if bodies_secs > 0 {
+                let start = Instant::now();
+                let (_, before) = core.store.count_missing_bodies(account.id)?;
+                tokio::time::sleep(Duration::from_secs(bodies_secs)).await;
+                let (total, after) = core.store.count_missing_bodies(account.id)?;
+                let n = after - before;
+                println!(
+                    "bodies: {n} downloaded in {:.1}s ({:.1}/s), {after}/{total} local",
+                    start.elapsed().as_secs_f64(),
+                    n as f64 / start.elapsed().as_secs_f64()
+                );
+            }
+            Ok(())
+        }
+    }
+}

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/mail-core", "crates/mail-cli", "app/src-tauri"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

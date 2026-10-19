@@ -1,0 +1,535 @@
+import { on, createEffect, createMemo, createSelector, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { createVirtualizer } from '@tanstack/solid-virtual';
+import { api, type Folder, type MessageSummary, type SearchField, type ThreadSummary } from '../api';
+import { createPagedList } from '../lib/messageList';
+import { fmtNum, smartDate } from '../lib/format';
+import { highlightParts, highlightRegex } from '../lib/query';
+import {
+  accounts,
+  conversationScope,
+  setConversationScope,
+  includeTrash,
+  folderById,
+  searchActive,
+  searchQuery,
+  searchScope,
+  searchFields,
+  toggleSearchField,
+  setSearchQuery,
+  setSearchScope,
+  selectedMessageId,
+  selectedThreadId,
+  selectMessage,
+  selectThread,
+  setThreaded,
+} from '../state';
+import { CheckIcon, FlagIcon, PaperclipIcon } from './Icons';
+import { ViewMenuButton } from './ViewMenu';
+
+type Item = MessageSummary | ThreadSummary;
+
+export const ROW_HEIGHT = 72;
+
+function isTypingTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false;
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT';
+}
+
+function SkeletonRow() {
+  return (
+    <div class="row-inner skeleton" aria-hidden="true">
+      <div class="sk-line sk-a" />
+      <div class="sk-line sk-b" />
+      <div class="sk-line sk-c" />
+    </div>
+  );
+}
+
+/** Text with matched query words wrapped in <mark>. */
+function Hl(props: { text: string; re: RegExp | null }) {
+  return (
+    <Show when={props.re} fallback={props.text}>
+      <For each={highlightParts(props.text, props.re)}>{(p) => (p.hit ? <mark>{p.t}</mark> : p.t)}</For>
+    </Show>
+  );
+}
+
+function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: RegExp | null; folderTag?: string }) {
+  return (
+    <div class="row-inner">
+      <span class="unread-dot" />
+      <div class="row-line1">
+        <span class="row-from">
+          <Hl text={props.m.fromName || props.m.fromAddr} re={props.re ?? null} />
+        </span>
+        <Show when={props.folderTag}>
+          <span class="folder-tag">{props.folderTag}</span>
+        </Show>
+        <span class="row-icons">
+          <Show when={props.m.hasAttachments}>
+            <PaperclipIcon size={13} class="icon clip" />
+          </Show>
+          <Show when={props.m.flagged}>
+            <FlagIcon size={12} class="icon flag" />
+          </Show>
+        </span>
+        <span class="row-date">{smartDate(props.m.date)}</span>
+      </div>
+      <div class="row-line2">
+        <span class="row-subject">
+          <Hl text={props.m.subject || '(no subject)'} re={props.subjRe ?? props.re ?? null} />
+        </span>
+        <Show when={props.m.snippet}>
+          <span class="row-snippet"> — {props.m.snippet}</span>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+const FIELD_LABEL: Record<SearchField, string> = { sender: 'Sender', recipients: 'Recipients', subject: 'Subject' };
+
+export interface SearchSpec {
+  accountId: number;
+  /** null = all folders of the account */
+  folderId: number | null;
+  query: string;
+  /** null = all fields */
+  fields: SearchField[] | null;
+}
+
+function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: string } | undefined }) {
+  const people = () =>
+    props.t.participants
+      .map((p) => (props.me && (p === props.me.name || p.toLowerCase() === props.me.email.toLowerCase()) ? 'me' : p))
+      .join(', ');
+  return (
+    <div class="row-inner">
+      <span class="unread-dot" />
+      <div class="row-line1">
+        <span class="row-from">{people() || '(no sender)'}</span>
+        <Show when={props.t.messageCount > 1}>
+          <span class="thread-count">{props.t.messageCount}</span>
+        </Show>
+        <span class="row-icons">
+          <Show when={props.t.hasAttachments}>
+            <PaperclipIcon size={13} class="icon clip" />
+          </Show>
+          <Show when={props.t.flagged}>
+            <FlagIcon size={12} class="icon flag" />
+          </Show>
+        </span>
+        <span class="row-date">{smartDate(props.t.date)}</span>
+      </div>
+      <div class="row-line2">
+        <span class="row-subject">{props.t.subject || '(no subject)'}</span>
+        <Show when={props.t.snippet}>
+          <span class="row-snippet"> — {props.t.snippet}</span>
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Virtualized folder list. `threaded` is fixed for the component's lifetime
+ * (the parent remounts on toggle): rows are conversations from `list_threads`
+ * or single messages from `list_messages`.
+ */
+export function MessageList(props: {
+  folder: Folder;
+  threaded: boolean;
+  onOpen: () => void;
+  /** When set, this instance shows search results (flat messages) instead of the folder. */
+  search?: SearchSpec;
+}) {
+  /** Search mode is fixed per instance; the spec itself changes while it stays mounted. */
+  const search = !!props.search;
+  const threaded = props.threaded && !search;
+  const rowPrefix = search ? 'sr-row' : 'row';
+  /** The spec whose results are on screen (swapped in together with the rows). */
+  const [applied, setApplied] = createSignal<SearchSpec | undefined>(props.search);
+  const plainIn = (f: SearchField) => {
+    const fs = applied()?.fields;
+    return !fs || fs.includes(f);
+  };
+  const hlRe = createMemo(() => {
+    const sp = applied();
+    return sp ? highlightRegex(sp.query, 'from', plainIn('sender')) : null;
+  });
+  const hlSubjRe = createMemo(() => {
+    const sp = applied();
+    return sp ? highlightRegex(sp.query, 'subject', plainIn('subject')) : null;
+  });
+  const searchFetcher = (sp: SearchSpec) => (offset: number, limit: number) =>
+    api
+      .searchMessages(sp.accountId, sp.folderId, sp.query, offset, limit, sp.fields)
+      .then((r) => ({ total: r.total, items: r.messages as Item[] }));
+  const selectedId = threaded ? selectedThreadId : selectedMessageId;
+  const select = (it: Item) => (threaded ? selectThread(it as ThreadSummary) : selectMessage(it as MessageSummary));
+  let scrollEl!: HTMLDivElement;
+  const [selIndex, setSelIndex] = createSignal(-1);
+  /** Set when keyboard moves onto a row whose page hasn't loaded yet. */
+  let pendingSelect = false;
+
+  /** First visible message before a live update; used to keep the viewport visually still. */
+  let anchor: { id: number; index: number } | null = null;
+
+  const folderId = props.folder.id;
+  const fetcher = props.search
+    ? searchFetcher(props.search)
+    : threaded
+    ? (offset: number, limit: number) =>
+        // Options read at fetch time; a change invalidates the pages (effect below).
+        api.listThreads(folderId, offset, limit, conversationScope(), includeTrash()).then((r) => ({ total: r.total, items: r.threads as Item[] }))
+    : (offset: number, limit: number) =>
+        api.listMessages(folderId, offset, limit).then((r) => ({ total: r.total, items: r.messages as Item[] }));
+
+  const model = createPagedList<Item>(search ? null : folderId, fetcher, {
+    onReset() {
+      // New search results applied: top of list, keep selection only if still present.
+      if (pendingSpec) setApplied(pendingSpec);
+      pendingSelect = false;
+      scrollEl.scrollTop = 0;
+      const id = untrack(selectedId);
+      const k = id == null ? -1 : model.indexOfId(id);
+      setSelIndex(k);
+      if (id != null && k < 0) selectMessage(null);
+    },
+    onInvalidate() {
+      anchor = null;
+      if (scrollEl.scrollTop <= 0) return; // at the top: let new mail appear
+      const index = Math.ceil(scrollEl.scrollTop / ROW_HEIGHT);
+      const m = model.row(index);
+      if (m) anchor = { id: m.id, index };
+    },
+    onPageLoaded() {
+      untrack(() => {
+        if (anchor) {
+          const j = model.indexOfId(anchor.id);
+          if (j >= 0) {
+            if (j !== anchor.index) scrollEl.scrollTop += (j - anchor.index) * ROW_HEIGHT;
+            anchor = null;
+          }
+        }
+        // Keep selection pinned to the same message id.
+        const id = selectedId();
+        if (id == null) return;
+        if (model.row(selIndex())?.id === id) return;
+        const k = model.indexOfId(id);
+        if (k >= 0) setSelIndex(k);
+      });
+    },
+  });
+
+  /** Spec of the reset in flight; becomes `applied` when its rows land. */
+  let pendingSpec: SearchSpec | undefined;
+  if (search) {
+    // Spec changed (query / scope / fields / account): keep old rows until the new ones land.
+    let lastKey = JSON.stringify(props.search);
+    createEffect(() => {
+      const sp = props.search;
+      const key = JSON.stringify(sp);
+      if (!sp || key === lastKey) return;
+      lastKey = key;
+      untrack(() => model.reset(searchFetcher(sp)));
+      pendingSpec = sp;
+    });
+  }
+  // Before the first page answers, show a plausible number of skeleton rows.
+  if (threaded) {
+    // Summaries depend on the conversation options: refetch visible pages, keep scroll + selection.
+    createEffect(on([conversationScope, includeTrash], () => model.invalidate(), { defer: true }));
+  }
+
+  const count = () => model.state.total ?? (search ? 0 : threaded ? Math.min(props.folder.total, 40) : props.folder.total);
+  const me = () => {
+    const a = (accounts() ?? []).find((x) => x.id === props.folder.accountId);
+    return a ? { name: a.displayName, email: a.email } : undefined;
+  };
+
+  const virt = createVirtualizer({
+    get count() {
+      return count();
+    },
+    getScrollElement: () => scrollEl,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 10,
+  });
+
+  createEffect(() => {
+    const items = virt.getVirtualItems();
+    const first = items[0]?.index ?? 0;
+    const last = items[items.length - 1]?.index ?? 0;
+    untrack(() => model.setVisibleRange(first, last));
+  });
+
+  // Resolve a pending keyboard selection once its page arrives.
+  createEffect(() => {
+    const i = selIndex();
+    const m = model.row(i);
+    if (pendingSelect && m) {
+      pendingSelect = false;
+      select(m);
+    }
+  });
+
+  const isSelected = createSelector(selectedId);
+
+  function selectIndex(i: number, scroll = true) {
+    const n = count();
+    if (n === 0) return;
+    const idx = Math.max(0, Math.min(n - 1, i));
+    setSelIndex(idx);
+    const m = model.row(idx);
+    if (m) {
+      pendingSelect = false;
+      select(m);
+    } else {
+      pendingSelect = true;
+    }
+    if (scroll) virt.scrollToIndex(idx, { align: 'auto' });
+  }
+
+  function pageRows() {
+    return Math.max(1, Math.floor(scrollEl.clientHeight / ROW_HEIGHT) - 1);
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTypingTarget(e.target)) return;
+    if (document.querySelector('.modal-backdrop')) return;
+    // Only one list drives the keyboard: results while searching, the folder otherwise.
+    if (!!search !== searchActive()) return;
+    const cur = selIndex();
+    switch (e.key) {
+      case 'j':
+      case 'ArrowDown':
+        selectIndex(cur < 0 ? 0 : cur + 1);
+        break;
+      case 'k':
+      case 'ArrowUp':
+        selectIndex(cur < 0 ? 0 : cur - 1);
+        break;
+      case 'Home':
+        selectIndex(0);
+        break;
+      case 'End':
+        selectIndex(count() - 1);
+        break;
+      case 'PageDown':
+        selectIndex((cur < 0 ? 0 : cur) + pageRows());
+        break;
+      case 'PageUp':
+        selectIndex((cur < 0 ? 0 : cur) - pageRows());
+        break;
+      case 'Enter':
+      case 'o':
+        if (cur < 0) selectIndex(0);
+        props.onOpen();
+        break;
+      case 't':
+        if (search) return;
+        setThreaded(!threaded);
+        break;
+      case 'a':
+        if (search) return;
+        setConversationScope(conversationScope() === 'all' ? 'folder' : 'all');
+        break;
+      case 'Escape':
+        if (search) setSearchQuery('');
+        else scrollEl.focus({ preventScroll: true });
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  }
+
+  onMount(() => {
+    window.addEventListener('keydown', onKey);
+    // Results mount while the user types; don't steal focus from the search field.
+    if (!search) scrollEl.focus({ preventScroll: true });
+  });
+  onCleanup(() => window.removeEventListener('keydown', onKey));
+
+
+  return (
+    <section class="list" aria-label={search ? 'Search results' : 'Messages'}>
+      <Show when={props.search}>
+        {(sp) => (
+          <header class="list-head search-head">
+            <div class="search-head-row">
+            <div class="list-title">
+              {/* The query itself is already in the search field; show only the outcome. */}
+              <div class="list-sub search-count">
+                <span>
+                  <Show when={model.state.total != null} fallback="Searching…">
+                    {model.state.total === 0
+                      ? 'No results'
+                      : `${fmtNum(model.state.total ?? 0)} ${model.state.total === 1 ? 'result' : 'results'}`}
+                  </Show>
+                </span>
+                {/* Reserved slot: visible while a newer query is pending, no layout shift. */}
+                <span
+                  class="spinner small search-pending"
+                  classList={{
+                    on: model.state.pending || model.state.total == null || searchQuery().trim() !== sp().query,
+                  }}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+            <div class="segmented" role="radiogroup" aria-label="Search scope">
+              <button
+                role="radio"
+                aria-checked={searchScope() === 'all'}
+                classList={{ on: searchScope() === 'all' }}
+                onClick={() => setSearchScope('all')}
+              >
+                All folders
+              </button>
+              <button
+                role="radio"
+                aria-checked={searchScope() === 'folder'}
+                classList={{ on: searchScope() === 'folder' }}
+                onClick={() => setSearchScope('folder')}
+                title={props.folder.displayName}
+              >
+                {props.folder.displayName}
+              </button>
+            </div>
+            </div>
+            <div class="search-fields" role="group" aria-label="Search in">
+              <span class="search-fields-label">Search in</span>
+              <For each={['sender', 'recipients', 'subject'] as SearchField[]}>
+                {(f) => (
+                  <button
+                    class="chip-toggle field-chip"
+                    classList={{ on: searchFields().includes(f) }}
+                    aria-pressed={searchFields().includes(f)}
+                    title={`Match plain words in ${FIELD_LABEL[f].toLowerCase()} · ⌥/Alt-click: only ${FIELD_LABEL[f].toLowerCase()}`}
+                    onClick={(e) => toggleSearchField(f, e.altKey)}
+                  >
+                    <span class="chip-check" aria-hidden="true">
+                      <CheckIcon size={10} />
+                    </span>
+                    {FIELD_LABEL[f]}
+                  </button>
+                )}
+              </For>
+            </div>
+          </header>
+        )}
+      </Show>
+      <Show when={!search}>
+      <header class="list-head" data-tauri-drag-region>
+        <div class="list-title" data-tauri-drag-region>
+          <h2>{props.folder.displayName}</h2>
+          <div class="list-sub">
+            <Show when={threaded}>
+              <span>
+                {fmtNum(props.folder.syncedCount)} {props.folder.syncedCount === 1 ? 'message' : 'messages'}
+              </span>
+              <span class="dot-sep">·</span>
+            </Show>
+            <span>
+              <Show when={model.state.total != null} fallback={threaded ? 'Conversations' : `${fmtNum(count())} messages`}>
+                {fmtNum(model.state.total ?? 0)} {threaded ? (model.state.total === 1 ? 'conversation' : 'conversations') : 'messages'}
+              </Show>
+            </span>
+            <Show when={props.folder.unread > 0}>
+              <span class="dot-sep">·</span>
+              <span>{fmtNum(props.folder.unread)} unread</span>
+            </Show>
+          </div>
+        </div>
+        <ViewMenuButton />
+      </header>
+      </Show>
+      <div
+        class="list-scroll"
+        ref={scrollEl}
+        tabIndex={0}
+        role="listbox"
+        aria-label={`${props.folder.displayName} messages`}
+        aria-activedescendant={selIndex() >= 0 ? `${rowPrefix}-${selIndex()}` : undefined}
+      >
+        <Show when={model.state.total === 0}>
+          <Show
+            when={search}
+            fallback={
+              <div class="list-empty">
+                <div class="list-empty-title">No messages</div>
+                <div class="list-empty-sub">This folder is empty.</div>
+              </div>
+            }
+          >
+            <div class="list-empty">
+              <div class="list-empty-title">No results</div>
+              <div class="list-empty-sub search-hint">
+                <Show when={applied()?.fields}>
+                  <div class="search-hint-fields">
+                    Only searching {applied()!.fields!.map((f) => FIELD_LABEL[f].toLowerCase()).join(' and ')}.
+                  </div>
+                </Show>
+                Try <code>from:</code>, <code>to:</code>, <code>subject:</code>, <code>"exact phrase"</code> or{' '}
+                <code>-exclude</code>
+              </div>
+            </div>
+          </Show>
+        </Show>
+        <Show when={model.state.error && model.state.total == null}>
+          <div class="list-empty">
+            <div class="list-empty-title">Couldn’t load messages</div>
+            <div class="list-empty-sub">{model.state.error}</div>
+          </div>
+        </Show>
+        <div class="list-canvas" style={{ height: `${virt.getTotalSize()}px` }}>
+          <For each={virt.getVirtualItems()}>
+            {(item) => {
+              const m = () => model.row(item.index);
+              return (
+                <div
+                  id={`${rowPrefix}-${item.index}`}
+                  role="option"
+                  class="row"
+                  classList={{
+                    selected: !!m() && isSelected(m()!.id),
+                    unread: !!m()?.unread,
+                  }}
+                  aria-selected={!!m() && isSelected(m()!.id)}
+                  style={{ transform: `translateY(${item.start}px)` }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    selectIndex(item.index, false);
+                  }}
+                  onDblClick={() => props.onOpen()}
+                >
+                  <Show when={m()} fallback={<SkeletonRow />}>
+                    {(it) =>
+                      threaded ? (
+                        <ThreadRowContent t={it() as ThreadSummary} me={me()} />
+                      ) : (
+                        <RowContent
+                          m={it() as MessageSummary}
+                          re={hlRe()}
+                          subjRe={hlSubjRe()}
+                          folderTag={
+                            search && applied()?.folderId == null
+                              ? folderById((it() as MessageSummary).folderId)?.displayName
+                              : undefined
+                          }
+                        />
+                      )
+                    }
+                  </Show>
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </div>
+    </section>
+  );
+}
