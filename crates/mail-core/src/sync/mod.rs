@@ -172,6 +172,9 @@ struct Shared {
     refresh: Notify,
     /// A STATUS sweep of all folder counts is due (run by the headers task between steps).
     counts_due: std::sync::atomic::AtomicBool,
+    /// Folders whose contents changed since their counts were last fetched; recounted
+    /// individually between steps (cheap, unlike a full sweep over every folder).
+    counts_dirty: Mutex<HashSet<i64>>,
     urgent: mpsc::UnboundedSender<Job>,
     options: SyncOptions,
 }
@@ -254,6 +257,7 @@ impl AccountSync {
             dirty: Mutex::new(HashSet::new()),
             refresh: Notify::new(),
             counts_due: std::sync::atomic::AtomicBool::new(true),
+            counts_dirty: Mutex::new(HashSet::new()),
             urgent: urgent_tx.clone(),
             options,
         });
@@ -390,10 +394,15 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
     let mut focus = shared.focus.clone();
     let account = &shared.account;
     let mut first_step_done = false;
+    let mut first_pass = true;
+    let mut last_full_sweep: Option<tokio::time::Instant> = None;
 
     loop {
-        // Folder structure first, every pass, so new/renamed folders appear promptly.
-        shared.set_status(SyncPhase::Folders, None, 0, 0, None);
+        // Folder structure first, every pass, so new/renamed folders appear promptly. Only the
+        // first pass after connecting is reported: routine re-checks aren't news.
+        if first_pass {
+            shared.set_status(SyncPhase::Folders, None, 0, 0, None);
+        }
         let listed = conn.list_folders().await?;
         shared.store.sync_folder_list(account.id, &listed)?;
         shared.emit(CoreEvent::FoldersChanged { account_id: account.id });
@@ -401,13 +410,27 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         let mut done: HashSet<i64> = HashSet::new();
         let mut started: HashSet<i64> = HashSet::new();
         let refresh = tokio::time::Instant::now() + shared.options.refresh_interval;
-        shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Full count sweep (one STATUS per folder; ~15 s for 150 folders) at most every
+        // FULL_SWEEP_INTERVAL. In between, pushes keep the Inbox and focused folder current and
+        // folders that sync saw change are recounted individually.
+        if last_full_sweep.is_none_or(|t| t.elapsed() >= FULL_SWEEP_INTERVAL) {
+            shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        first_pass = false;
 
         loop {
             // Counts: after the first step (so the focused folder's new mail isn't delayed
             // at startup), or whenever there's nothing else to do.
-            if first_step_done && shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                sweep_counts(&shared, &mut conn).await?;
+            if first_step_done {
+                if shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    sweep_counts(&shared, &mut conn, None).await?;
+                    last_full_sweep = Some(tokio::time::Instant::now());
+                } else {
+                    let dirty: HashSet<i64> = std::mem::take(&mut *shared.counts_dirty.lock().unwrap());
+                    if !dirty.is_empty() {
+                        sweep_counts(&shared, &mut conn, Some(&dirty)).await?;
+                    }
+                }
             }
             let folders = shared.store.folders(account.id)?;
             let label_folders = gmail_label_map(&folders);
@@ -423,7 +446,13 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
             }
             let Some(&next) = plan.iter().find(|id| !done.contains(id)) else {
                 if shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                    sweep_counts(&shared, &mut conn).await?;
+                    sweep_counts(&shared, &mut conn, None).await?;
+                    last_full_sweep = Some(tokio::time::Instant::now());
+                    continue;
+                }
+                let dirty: HashSet<i64> = std::mem::take(&mut *shared.counts_dirty.lock().unwrap());
+                if !dirty.is_empty() {
+                    sweep_counts(&shared, &mut conn, Some(&dirty)).await?;
                     continue;
                 }
                 // Everything is in sync: wait for the user to switch folders or the refresh timer.
@@ -446,13 +475,13 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
             let report = |p: Progress| match p {
                 Progress::Changed(ids) => {
                     shared.new_headers.notify_waiters();
+                    shared.counts_dirty.lock().unwrap().extend(ids.iter().copied());
                     shared.emit(CoreEvent::MessagesChanged { folder_ids: ids });
                 }
                 Progress::Headers { folder_id, done, total } => {
                     shared.set_status(SyncPhase::Headers, Some(folder_id), done, total, None);
                 }
                 Progress::NewMail { folder_id, uids } => {
-                    shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
                     if let Ok(ids) = shared.store.message_ids_for_uids(folder_id, &uids) {
                         for id in ids {
                             let _ = shared.urgent.send(Job::Body(id));
@@ -491,10 +520,15 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
     }
 }
 
-/// STATUS sweep: total/unread for every selectable folder, on the caller's connection.
-async fn sweep_counts(shared: &Shared, conn: &mut Connection) -> Result<()> {
+/// How often every folder's counts are refreshed with STATUS (changed folders sooner).
+const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// STATUS sweep: total/unread for every selectable folder (or just `only`), on the caller's
+/// connection.
+async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&HashSet<i64>>) -> Result<()> {
     let folders = shared.store.folders(shared.account.id)?;
-    for (i, f) in folders.iter().filter(|f| f.selectable).enumerate() {
+    let wanted = folders.iter().filter(|f| f.selectable && only.is_none_or(|o| o.contains(&f.id)));
+    for (i, f) in wanted.enumerate() {
         match conn.status(&f.raw_name).await {
             Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,
             Err(e) => tracing::debug!(folder = f.raw_name, "STATUS failed: {e:#}"),
@@ -581,6 +615,8 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
     let report = |p: Progress| match p {
         Progress::Changed(ids) => {
             shared.new_headers.notify_waiters();
+            // Other folders touched (e.g. Gmail labels) are recounted by the headers task.
+            shared.counts_dirty.lock().unwrap().extend(ids.iter().copied().filter(|&id| id != folder_id));
             shared.emit(CoreEvent::MessagesChanged { folder_ids: ids });
         }
         Progress::NewMail { folder_id, uids } => {
@@ -609,7 +645,9 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
     let unread = conn.session.search("UNSEEN").await?.len() as u32;
     shared.store.set_folder_counts(folder_id, mb.exists, unread)?;
     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
-    shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
+    if !shared.counts_dirty.lock().unwrap().is_empty() {
+        shared.refresh.notify_one();
+    }
     Ok(())
 }
 
