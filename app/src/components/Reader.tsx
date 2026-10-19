@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from 'solid-js';
 import { api, errorMessage, type Addr, type Attachment, type MessageDetail } from '../api';
+import { analyzePlain, collapseHtmlQuotes, QUOTE_FRAME_CSS, type QNode } from '../lib/quotes';
 import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } from '../lib/body';
 import { avatarColor, fmtSize, initials, linkify, longDate } from '../lib/format';
 import { selectedMessageId, selectedSummary } from '../state';
@@ -7,7 +8,9 @@ import { FileIcon, ImageIcon, MailIcon, PaperclipIcon } from './Icons';
 
 // ------------------------------------------------------------- srcdoc
 
-export function buildSrcdoc(html: string, allowRemote: boolean, extraCss = ''): string {
+export function buildSrcdoc(rawHtml: string, allowRemote: boolean, extraCss = ''): string {
+  // Collapse a trailing reply history behind a pill — only when it is unambiguous.
+  const html = collapseHtmlQuotes(rawHtml);
   const csp =
     `default-src 'none'; img-src data: cid:${allowRemote ? ' https: http:' : ''}; ` +
     `style-src 'unsafe-inline'${allowRemote ? ' https:' : ''}; font-src data:${allowRemote ? ' https:' : ''}`;
@@ -20,8 +23,13 @@ html{background:#fff;color:#1d1d1f;-webkit-text-size-adjust:100%}
 body{margin:0;padding:20px 24px 32px;font:14px/1.5 -apple-system,"SF Pro Text","Inter",system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;overflow-wrap:break-word}
 img{max-width:100%}
 pre{white-space:pre-wrap}
-blockquote{margin-left:0}
+blockquote{margin:.6em 0;padding:0 0 0 12px;border-left:2px solid #c3c8d1;color:#4b5058}
+blockquote blockquote{border-left-color:#d9bd84}
+blockquote blockquote blockquote{border-left-color:#9fc5a8}
+blockquote blockquote blockquote blockquote{border-left-color:#c3c8d1}
+.moz-cite-prefix,.gmail_attr{color:#6b7078}
 a{color:#0a64d6}
+${QUOTE_FRAME_CSS}
 ${extraCss}
 </style></head><body>${html}</body></html>`;
 }
@@ -108,21 +116,58 @@ export function AttachmentChip(props: { a: Attachment }) {
   );
 }
 
-export function PlainBody(props: { text: string }) {
+function LinkifiedText(props: { text: string }) {
   const parts = createMemo(() => linkify(props.text));
   return (
+    <For each={parts()}>
+      {(p) =>
+        p.t === 'link' ? (
+          <a href={p.href} target="_blank" rel="noopener noreferrer">
+            {p.v}
+          </a>
+        ) : (
+          p.v
+        )
+      }
+    </For>
+  );
+}
+
+/** Plain-text quote tree: text runs and nested quote blocks (">" markers stripped). */
+function QuoteNodes(props: { nodes: QNode[] }) {
+  return (
+    <For each={props.nodes}>
+      {(n) =>
+        n.t === 'text' ? (
+          <span class="pt">
+            <LinkifiedText text={n.text} />
+          </span>
+        ) : (
+          <div class="pq">
+            <QuoteNodes nodes={n.children} />
+          </div>
+        )
+      }
+    </For>
+  );
+}
+
+export function PlainBody(props: { text: string }) {
+  const res = createMemo(() => analyzePlain(props.text));
+  return (
     <div class="plain" tabIndex={-1}>
-      <For each={parts()}>
-        {(p) =>
-          p.t === 'link' ? (
-            <a href={p.href} target="_blank" rel="noopener noreferrer">
-              {p.v}
-            </a>
-          ) : (
-            p.v
-          )
-        }
-      </For>
+      <QuoteNodes nodes={res().head} />
+      <Show when={res().collapsed}>
+        {(c) => (
+          <details class="mail-quote">
+            <summary>
+              <span class="mq-show">⋯ Show quoted text</span>
+              <span class="mq-hide">Hide quoted text</span>
+            </summary>
+            <QuoteNodes nodes={c()} />
+          </details>
+        )}
+      </Show>
     </div>
   );
 }

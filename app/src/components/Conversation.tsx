@@ -65,6 +65,8 @@ function AutoHeightFrame(props: { doc: string }) {
       ro.observe(doc.documentElement);
       if (doc.body) ro.observe(doc.body);
       ro.observe(f); // width changes (pane resize) reflow the content
+      // Expanding/collapsing quoted history (native <details>): 'toggle' doesn't bubble, so capture.
+      doc.addEventListener('toggle', measure, true);
       doc.querySelectorAll('img').forEach((img) => {
         if (!img.complete) {
           img.addEventListener('load', measure);

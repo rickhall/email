@@ -153,8 +153,18 @@ export const AlertIcon = (p: P) => (
 
 export const ThreadIcon = (p: P) => (
   <Svg {...p}>
-    <path d="M2.5 4.25A1.75 1.75 0 0 1 4.25 2.5h5.5a1.75 1.75 0 0 1 1.75 1.75v3a1.75 1.75 0 0 1-1.75 1.75H6L3.5 11V9H4.25" />
-    <path d="M11.5 5.5h.25a1.75 1.75 0 0 1 1.75 1.75v3A1.75 1.75 0 0 1 11.75 12H11v1.75L8.75 12h-2.5A1.75 1.75 0 0 1 4.6 10.9" />
+    {/* Back bubble (upper left), drawn only where the front bubble doesn't cover it. */}
+    <path d="M10.5 6V4a1.75 1.75 0 0 0-1.75-1.75h-5A1.75 1.75 0 0 0 2 4v2.5a1.75 1.75 0 0 0 1.75 1.75H4V10l1.75-1.75" />
+    {/* Front bubble (lower right) with its tail. */}
+    <path d="M7.25 6h5A1.75 1.75 0 0 1 14 7.75v2.5A1.75 1.75 0 0 1 12.25 12H12v1.75L10.25 12h-3A1.75 1.75 0 0 1 5.5 10.25v-2.5A1.75 1.75 0 0 1 7.25 6z" />
+  </Svg>
+);
+
+export const SlidersIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2.5 5h5.75M11.75 5h1.75M2.5 11h1.75M7.75 11h5.75" />
+    <circle cx="10" cy="5" r="1.75" />
+    <circle cx="6" cy="11" r="1.75" />
   </Svg>
 );
 

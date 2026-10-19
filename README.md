@@ -27,7 +27,7 @@ Data lives in `~/.local/share/dev.mailclient.desktop/` on Linux (`~/Library/Appl
 
 - **Conversations:** grouped by Message-ID / In-Reply-To / References (no subject matching), across folders. By default a conversation shows only the current folder's messages; the View menu in the message list switches the app-wide default to *All mail* and/or *Include Trash*, and each conversation offers a temporary "Show N more messages in other folders / in Trash".
 - **Quick search** (`/` or Ctrl+F): SQLite FTS5 over sender, recipients and subject, prefix-matched as you type. Syntax: `"phrase"`, `from:`, `to:`, `subject:`, `-exclude`. Scope is the whole account or the current folder; Sender / Recipients / Subject chips limit plain words.
-- **Reader:** sanitized HTML in a sandboxed iframe; remote images blocked until "Load images", which is remembered per message. Opening a message marks it read.
+- **Reader:** sanitized HTML in a sandboxed iframe; remote images blocked until "Load images", which is remembered per message. Opening a message marks it read. Quoted replies get a bar per level (HTML `blockquote` and plain-text `>` lines alike). Trailing quoted history collapses behind "Show quoted text" only when it's safe: exactly one quote, nothing written after it, text before it, and no Outlook-style history in the message itself — inline and bottom-posted replies never collapse (`app/src/lib/quotes.ts`; `node app/scripts/quotes-selfcheck.mjs` checks the plain-text rules).
 - **Sync status:** one fixed summary row at the bottom of the sidebar, with per-account details in a popover. Nothing in the folder tree or headers moves because of background activity.
 - **Window:** size (and position, where the platform allows) is restored at launch, in logical units so GNOME fractional scaling works.
 
@@ -39,6 +39,8 @@ MAIL_PASSWORD='xxxx xxxx xxxx xxxx' cargo run --release -p mail-cli --bin mailsy
 #   --bodies-secs 30      also measure body download rate
 #   --strategy chunked    see `mailsync strategies`
 ```
+
+`mailsync render --data-dir <app data dir> --id N --out file.html` writes a stored message's sanitized HTML (what the reader renders), for diagnosing display issues.
 
 To diagnose a single message that won't download, `mailsync probe you@example.com --uid N [--folder NAME]` prints the server's raw response sizes, timings and BODYSTRUCTURE (never bodies or credentials), using the password stored in the keychain.
 

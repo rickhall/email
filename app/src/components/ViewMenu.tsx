@@ -8,7 +8,7 @@ import {
   setThreaded,
   threaded,
 } from '../state';
-import { CheckIcon, ThreadIcon } from './Icons';
+import { CheckIcon, SlidersIcon } from './Icons';
 
 // Module-level so the menu stays open while the list remounts on "Group by conversation".
 const [open, setOpen] = createSignal(false);
@@ -26,7 +26,7 @@ export function ViewMenuButton() {
   return (
     <button
       class="icon-btn toggle view-menu-btn"
-      classList={{ on: threaded(), open: open() }}
+      classList={{ open: open() }}
       aria-haspopup="menu"
       aria-expanded={open()}
       title="View options"
@@ -36,7 +36,7 @@ export function ViewMenuButton() {
         setOpen((v) => !v);
       }}
     >
-      <ThreadIcon />
+      <SlidersIcon />
     </button>
   );
 }

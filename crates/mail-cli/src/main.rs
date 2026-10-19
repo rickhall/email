@@ -47,6 +47,17 @@ enum Cmd {
     },
     /// List available header strategies.
     Strategies,
+    /// Write a stored message's sanitized HTML (what the reader renders) to a file.
+    Render {
+        /// App data directory (holds mail.db and bodies.db).
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Internal message id.
+        #[arg(long)]
+        id: i64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Diagnose one message: raw IMAP responses for its structure and body-only fetch.
     /// Uses the password the app stored in the system keychain.
     Probe {
@@ -68,6 +79,14 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Probe { email, folder, uid, host } => probe::run(&email, &folder, uid, &host).await,
+        Cmd::Render { data_dir, id, out } => {
+            let store = mail_core::store::Store::open(&data_dir)?;
+            let raw = store.body(id)?.ok_or_else(|| anyhow!("no body stored for message {id}"))?;
+            let detail = mail_core::mime::render(id, &raw, 0).ok_or_else(|| anyhow!("could not parse message"))?;
+            std::fs::write(&out, detail.html.unwrap_or_default())?;
+            println!("wrote {}", out.display());
+            Ok(())
+        }
         Cmd::Strategies => {
             for s in STRATEGIES {
                 println!("{s}");

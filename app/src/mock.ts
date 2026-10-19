@@ -345,6 +345,114 @@ function stripRemote(html: string): { html: string; had: boolean } {
   return { html: out, had };
 }
 
+
+// ---------------------------------------------------------------- quoted-reply samples
+
+const LONG_HISTORY_HTML = `<p>Hi Elena,</p>
+<p>Thanks for pulling this together. Before we lock the plan, can you double-check three things for me?</p>
+<ol><li>The Q4 hiring numbers still assume two backend engineers.</li><li>The vendor contract renews on December 1st, not January.</li><li>Marketing gets the launch assets by the 20th.</li></ol>
+<p>If all of that holds, I'm happy to sign off on option B.</p>
+<blockquote type="cite"><div class="moz-cite-prefix">On 10/14/26 4:02 PM, Elena Rossi wrote:</div>
+<p>Here's the first draft of the plan. Option A is cheaper but slower; option B gets us to launch three weeks earlier.</p></blockquote>
+<p>Best,<br>Rick</p>`;
+
+interface QuoteSample {
+  label: string;
+  from: Person;
+  html?: string;
+  text?: string;
+}
+
+const QUOTE_SAMPLES: QuoteSample[] = [
+  {
+    label: '(a) Thunderbird top-post',
+    from: { name: 'Elena Rossi', addr: 'elena.rossi@studio-rossi.it' },
+    html: `<p>Hi Rick,</p><p>All three check out — hiring stays at two, renewal is Dec 1, assets by the 20th. Option B it is. I'll update the doc tonight.</p><p>Cheers,<br>Elena</p>
+<div class="moz-cite-prefix">On 10/16/26 9:14 AM, Rick Hall wrote:<br></div>
+<blockquote type="cite">${LONG_HISTORY_HTML}</blockquote>`,
+  },
+  {
+    label: '(b) inline reply',
+    from: { name: 'Tom Becker', addr: 'tbecker@globex.com' },
+    html: `<div class="moz-cite-prefix">On 10/16/26 9:14 AM, Rick Hall wrote:</div>
+<blockquote type="cite">The Q4 hiring numbers still assume two backend engineers.</blockquote>
+<p>Yes — still two. Finance confirmed this morning.</p>
+<blockquote type="cite">The vendor contract renews on December 1st, not January.</blockquote>
+<p>Correct, Dec 1. I've set a reminder for the 15th to renegotiate.</p>
+<blockquote type="cite">Marketing gets the launch assets by the 20th.</blockquote>
+<p>That one is at risk; I'll know by Friday.</p><p>Tom</p>`,
+  },
+  {
+    label: '(c) bottom-posted reply',
+    from: { name: 'Hannah Müller', addr: 'hannah.mueller@bergwerk.de' },
+    html: `<div class="moz-cite-prefix">Am 16.10.26 um 09:14 schrieb Rick Hall:</div>
+<blockquote type="cite"><p>Can you send me the final numbers for the Berlin office? I need them for the board deck on Monday, ideally with the headcount split by team and the projected costs for next year.</p><p>Thanks!<br>Rick</p></blockquote>
+<p>Hi Rick, here they are: 42 people (18 eng, 9 sales, 15 ops), projected cost €3.1M for 2027. Full sheet attached tomorrow.</p><p>Viele Grüße,<br>Hannah</p>`,
+  },
+  {
+    label: '(d) Gmail top-post',
+    from: { name: 'Ben Carter', addr: 'ben.carter@hey.com' },
+    html: `<div dir="ltr">Works for me — Thursday at 2pm, I'll book the room.<div><br></div><div>Ben</div></div><br>
+<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Fri, Oct 16, 2026 at 3:02 PM Rick Hall &lt;rick.hall@gmail.com&gt; wrote:<br></div>
+<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div dir="ltr">Hey Ben,<div><br></div><div>Can we move the design review to later in the week? Tuesday is packed with the launch prep and I'd rather give it proper attention. Thursday afternoon or Friday morning both work for me.</div><div><br></div><div>Rick</div></div><br>
+<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Thu, Oct 15, 2026 at 11:20 AM Ben Carter &lt;ben.carter@hey.com&gt; wrote:<br></div>
+<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div dir="ltr">Design review is set for Tuesday 10am. Agenda to follow.</div></blockquote></div></blockquote></div>`,
+  },
+  {
+    label: '(e) Outlook history',
+    from: { name: 'James Whitfield', addr: 'james@whitfield.law' },
+    html: `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt">Approved. Please proceed with the filing.<br><br>James</div>
+<div id="appendonsend"></div>
+<hr style="display:inline-block;width:98%" tabindex="-1">
+<div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" style="font-size:11pt"><b>From:</b> Rick Hall &lt;rick.hall@gmail.com&gt;<br><b>Sent:</b> Friday, October 16, 2026 9:30 AM<br><b>To:</b> James Whitfield &lt;james@whitfield.law&gt;<br><b>Subject:</b> Filing</font><div>&nbsp;</div></div>
+<div>Hi James, the paperwork is ready. Can you approve so we can file before the deadline next Wednesday? All three signatures are in.<br><br>Rick</div>`,
+  },
+  {
+    label: '(f) plain top-post',
+    from: { name: 'Ravi Patel', addr: 'ravi@patel.consulting' },
+    text: `Hi Rick,
+
+Sounds good — I'll send the revised estimate by Monday. See https://docs.example.com/est for the working copy.
+
+Ravi
+
+-- 
+Ravi Patel · Patel Consulting
+
+On Thu, Oct 15, 2026 at 4:20 PM Rick Hall <rick.hall@gmail.com> wrote:
+> Hi Ravi,
+>
+> The client asked for a revised estimate that includes the migration work.
+> Can you take a pass at it this week?
+>
+> > Ravi wrote earlier:
+> > The original estimate covered phases one and two only.
+>
+> Thanks,
+> Rick
+`,
+  },
+  {
+    label: '(g) plain inline',
+    from: { name: 'Zoe Lindqvist', addr: 'zoe.lindqvist@nordlys.se' },
+    text: `On Thu, Oct 15, 2026 at 4:20 PM Rick Hall <rick.hall@gmail.com> wrote:
+> Are we still on for the offsite on the 28th?
+
+Yes, confirmed with the venue yesterday.
+
+> And can you share the agenda draft?
+
+Here: https://docs.example.com/offsite-agenda
+
+> > Last time we ran out of time for the retro.
+
+Agreed — I gave it a full hour this time.
+
+Zoe
+`,
+  },
+];
+
 // ---------------------------------------------------------------- backend state
 
 interface Meta {
@@ -423,6 +531,8 @@ export function createMockBackend(): Backend {
   const folderMsgs = new Map<number, MessageSummary[]>();
   const byId = new Map<number, MessageSummary>();
   const remoteAllowed = new Set<number>();
+  /** message id -> quoted-reply sample used as its body */
+  const quoteSampleFor = new Map<number, QuoteSample>();
   /** Last search result set; any messages-changed invalidates it. */
   let searchCache: { key: string; results: MessageSummary[] } | null = null;
   /** threadId -> every message of the conversation (any folder) */
@@ -767,7 +877,11 @@ export function createMockBackend(): Backend {
     const seed = md?.seed ?? m.id;
     let html: string | null = null;
     let text: string | null = null;
-    switch (md?.kind ?? 'person') {
+    const qs = quoteSampleFor.get(m.id);
+    if (qs) {
+      html = qs.html ?? null;
+      text = qs.text ?? null;
+    } else switch (md?.kind ?? 'person') {
       case 'person':
         text = personText({ name: m.fromName, addr: m.fromAddr }, me, m.snippet ?? PERSON_SNIPPETS[0]!, seed);
         break;
@@ -814,6 +928,27 @@ export function createMockBackend(): Backend {
   if (!startEmpty) {
     const g = createAccount('rick.hall@gmail.com', 'Rick Hall', 'gmail', GMAIL_FOLDERS);
     const w = createAccount('rick@hallworks.dev', 'Hallworks', 'imap', IMAP_FOLDERS);
+    // Quoted-reply samples: single-message conversations near the top of the Inbox.
+    {
+      const inbox = [...folders.values()].find((f) => f.accountId === g.id && f.role === 'inbox');
+      const list = inbox ? folderMsgs.get(inbox.id) ?? [] : [];
+      const free = list.filter((m, i) => i >= 6 && !threads.has(threadOf(m)) && meta.get(m.id)?.kind === 'person');
+      QUOTE_SAMPLES.forEach((qs, i) => {
+        const m = free[i];
+        if (!m) return;
+        quoteSampleFor.set(m.id, qs);
+        m.fromName = qs.from.name;
+        m.fromAddr = qs.from.addr;
+        m.subject = `Re: Quote test ${qs.label}`;
+        m.snippet = (qs.text ?? qs.html ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+        m.hasAttachments = false;
+        downloaded.add(m.id);
+        m.hasBody = true;
+        // Bring them right under the newest mail so they're easy to find.
+        m.date = (list[1]?.date ?? m.date) - (i + 1) * 90;
+      });
+      list.sort((x, y) => y.date - x.date);
+    }
     setTimeout(() => void simulateSync(g, 48_000, 'imap.gmail.com'), 300);
     const params = new URLSearchParams(location.search);
     if (params.has('error')) {

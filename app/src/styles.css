@@ -556,7 +556,8 @@ body.resizing iframe {
 .row-inner {
   position: relative;
   height: 100%;
-  padding: 11px 14px 0 24px;
+  /* Content is 56px (20px line + 2px gap + two 17px lines); centre it in the row. */
+  padding: calc((var(--row-h) - 56px) / 2) 14px 0 24px;
   border-radius: 8px;
   overflow: hidden;
 }
@@ -591,7 +592,8 @@ body.resizing iframe {
 .unread-dot {
   position: absolute;
   left: 9px;
-  top: 17px;
+  /* Vertically centred on the 20px first line. */
+  top: calc((var(--row-h) - 56px) / 2 + 6px);
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -2266,4 +2268,83 @@ body.resizing iframe {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* ==========================================================================
+   Plain-text quotes (">" history) — same bars as the HTML iframe, theme-aware
+   ========================================================================== */
+
+:root {
+  --quote-1: #c3c8d1;
+  --quote-2: #d9bd84;
+  --quote-3: #9fc5a8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --quote-1: #4d535e;
+    --quote-2: #8c7646;
+    --quote-3: #4f7d5c;
+  }
+}
+.plain .pt {
+  white-space: pre-wrap;
+}
+.plain .pq {
+  margin: 0.35em 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--quote-1);
+  color: var(--text-2);
+}
+.plain .pq .pq {
+  border-left-color: var(--quote-2);
+}
+.plain .pq .pq .pq {
+  border-left-color: var(--quote-3);
+}
+.plain .pq .pq .pq .pq {
+  border-left-color: var(--quote-1);
+}
+.plain details.mail-quote {
+  margin: 0.8em 0 0;
+  white-space: normal;
+}
+.plain details.mail-quote > *:not(summary) {
+  white-space: pre-wrap;
+}
+.plain details.mail-quote > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.plain details.mail-quote > summary:hover {
+  background: var(--bg-active);
+  color: var(--text-2);
+}
+.plain details.mail-quote > summary::-webkit-details-marker {
+  display: none;
+}
+.plain details.mail-quote > summary::marker {
+  content: '';
+}
+.plain .mq-hide {
+  display: none;
+}
+.plain details.mail-quote[open] > summary .mq-show {
+  display: none;
+}
+.plain details.mail-quote[open] > summary .mq-hide {
+  display: inline;
+}
+.plain details.mail-quote[open] > summary {
+  margin-bottom: 0.6em;
 }
