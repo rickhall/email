@@ -17,7 +17,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: cargo test --workspace
+      # The Tauri crate needs the built frontend (app/dist) to compile; it's built in
+      # the bundle job. The tests live in the core and CLI crates.
+      - run: cargo test --workspace --exclude mail-app
 
   bundle:
     needs: test
