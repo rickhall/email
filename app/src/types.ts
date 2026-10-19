@@ -117,7 +117,7 @@ export interface ThreadPage {
   threads: ThreadSummary[];
 }
 
-export type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error' | 'auth';
+export type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error' | 'auth' | 'limited';
 
 export interface SyncStatus {
   accountId: number;

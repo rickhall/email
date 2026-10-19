@@ -2348,3 +2348,17 @@ body.resizing iframe {
 .plain details.mail-quote[open] > summary {
   margin-bottom: 0.6em;
 }
+
+/* Temporary server refusal (connection limit): amber, not the red "needs attention". */
+.sf-row.warn .sf-icon,
+.sf-row.warn .sf-text {
+  color: var(--flag);
+}
+.sp-error.warn {
+  color: var(--text-2);
+}
+.acct-flag-warn {
+  display: grid;
+  place-items: center;
+  color: var(--flag);
+}

@@ -222,6 +222,15 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // One instance per machine: a second launch focuses the existing window instead of
+        // starting another sync engine on the same database and accounts.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             create_main_window(app)?;

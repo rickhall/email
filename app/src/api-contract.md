@@ -70,7 +70,8 @@ interface ThreadView {
 }
 
 type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error'
-               | 'auth'; // credentials rejected: sync paused until update_password
+               | 'auth'     // credentials rejected: sync paused until update_password
+               | 'limited'; // server refused a connection temporarily (connection limit); retrying on its own
 interface SyncStatus {
   accountId: number; phase: SyncPhase; folderId: number | null;
   done: number; total: number; message: string | null;

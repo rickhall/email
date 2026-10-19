@@ -32,9 +32,54 @@ pub fn is_auth_error(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<AuthFailed>())
 }
 
+/// The server refused the sign-in for a temporary reason (too many simultaneous connections,
+/// bandwidth limits), not because of the credentials. Retry later; don't ask for a password.
+#[derive(Debug)]
+pub struct ConnectionLimit(pub String);
+
+impl std::fmt::Display for ConnectionLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Too many simultaneous connections to this account. Other mail apps or devices are using \
+             the server's connection limit (Gmail allows 15 per account); retrying. Server said: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ConnectionLimit {}
+
+pub fn is_limit_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<ConnectionLimit>())
+}
+
+/// Classify a refused sign-in. Temporary refusals are recognized by RFC 5530 response codes and
+/// Gmail's wording; everything else is treated as a credentials problem.
+pub fn classify_sign_in_refusal(message: &str) -> anyhow::Error {
+    let m = message.to_ascii_lowercase();
+    let temporary = [
+        "too many simultaneous",
+        "too many connections",
+        "maximum number of connections",
+        "connection limit",
+        "[limit]",
+        "[unavailable]",
+        "[inuse]",
+        "[overquota]",
+        "bandwidth",
+        "try again later",
+    ];
+    if temporary.iter().any(|t| m.contains(t)) {
+        ConnectionLimit(message.trim().to_string()).into()
+    } else {
+        AuthFailed(message.trim().to_string()).into()
+    }
+}
+
 fn auth_error(e: async_imap::error::Error) -> anyhow::Error {
     match e {
-        async_imap::error::Error::No(m) | async_imap::error::Error::Bad(m) => AuthFailed(m).into(),
+        async_imap::error::Error::No(m) | async_imap::error::Error::Bad(m) => classify_sign_in_refusal(&m),
         other => anyhow!("sign-in failed: {other}"),
     }
 }
@@ -518,6 +563,19 @@ mod tests {
         assert_eq!(decode_mutf7("&ZeVnLIqe-"), "日本語");
         assert_eq!(decode_mutf7("Tom &- Jerry"), "Tom & Jerry");
         assert_eq!(decode_mutf7("Entw&APw-rfe"), "Entwürfe");
+    }
+
+    #[test]
+    fn sign_in_refusals() {
+        let limit = |m| is_limit_error(&classify_sign_in_refusal(m));
+        let auth = |m| is_auth_error(&classify_sign_in_refusal(m));
+        assert!(limit("[ALERT] Too many simultaneous connections. (Failure)"));
+        assert!(limit("[UNAVAILABLE] Server busy, try again later"));
+        assert!(limit("[OVERQUOTA] Account exceeded bandwidth limits"));
+        assert!(auth("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"));
+        assert!(auth("[ALERT] Application-specific password required"));
+        assert!(auth("LOGIN failed."));
+        assert!(!limit("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"));
     }
 
     #[test]

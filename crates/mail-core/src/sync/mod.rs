@@ -4,13 +4,16 @@
 //!
 //! * **headers**  – walks folders in priority order, calling a pluggable [`HeaderSync`]
 //!   strategy one step (one chunk) at a time, so a folder switch preempts within a chunk.
-//! * **counts**   – STATUS sweep for total/unread on every folder.
+//!   Also runs the STATUS sweep for folder counts between steps.
 //! * **interactive** – downloads bodies the user explicitly opened, immediately.
-//! * **bodies ×N** – background download of every remaining body, newest first,
-//!   preferring the folder on screen.
-//! * **idle ×2**  – IMAP IDLE on the Inbox and on the folder on screen. A server push marks
-//!   the folder dirty so the headers task re-syncs it at once; bodies of new messages go
-//!   straight to the interactive connection.
+//! * **bodies ×N** – background download of every remaining body, newest first, preferring
+//!   the folder on screen. Connected only while there is something to download.
+//! * **idle ×2**  – IMAP IDLE on the Inbox and on the folder on screen (the latter connected
+//!   only while that folder isn't the Inbox). A push is handled on the IDLE connection itself,
+//!   including that folder's counts; bodies of new mail go to the interactive connection.
+//!
+//! Steady state is 3 connections per account (4 while a non-Inbox folder is on screen);
+//! the download workers add up to N more only while bodies are pending.
 //!
 //! Header strategies live in submodules; `chunked::ChunkedNewestFirst` is the default.
 
@@ -165,9 +168,10 @@ struct Shared {
     new_headers: Notify,
     /// Folders the server told us changed (IDLE); the headers task re-syncs them first.
     dirty: Mutex<HashSet<i64>>,
-    /// Wakes the headers and counts tasks when `dirty` gains entries.
+    /// Wakes the headers task (dirty folders, count sweep requests).
     refresh: Notify,
-    refresh_counts: Notify,
+    /// A STATUS sweep of all folder counts is due (run by the headers task between steps).
+    counts_due: std::sync::atomic::AtomicBool,
     urgent: mpsc::UnboundedSender<Job>,
     options: SyncOptions,
 }
@@ -249,14 +253,13 @@ impl AccountSync {
             new_headers: Notify::new(),
             dirty: Mutex::new(HashSet::new()),
             refresh: Notify::new(),
-            refresh_counts: Notify::new(),
+            counts_due: std::sync::atomic::AtomicBool::new(true),
             urgent: urgent_tx.clone(),
             options,
         });
 
         let mut tasks = vec![
             tokio::spawn(supervise("headers", shared.clone(), |s| Box::pin(header_task(s)))),
-            tokio::spawn(supervise("counts", shared.clone(), |s| Box::pin(counts_task(s)))),
             tokio::spawn(interactive_task(shared.clone(), urgent_rx)),
             tokio::spawn(status_task(shared.clone())),
             tokio::spawn(supervise("idle-inbox", shared.clone(), |s| Box::pin(idle_task(s, false)))),
@@ -356,8 +359,20 @@ where
             Ok(()) => return,
             Err(e) => {
                 tracing::warn!(account = shared.account.email, task = name, "sync error: {e:#}");
+                let limited = imap::is_limit_error(&e);
                 if name == "headers" && !imap::is_auth_error(&e) {
-                    shared.set_status(SyncPhase::Error, None, 0, 0, Some(format!("{e:#}")));
+                    let phase = if limited { SyncPhase::Limited } else { SyncPhase::Error };
+                    shared.set_status(phase, None, 0, 0, Some(format!("{e:#}")));
+                }
+                if limited {
+                    // Connections are scarce: wait longer, with jitter so several of our
+                    // instances (or tasks) don't all retry at the same moment.
+                    backoff = backoff.max(Duration::from_secs(15));
+                    let jitter = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_millis() as u64 * 10)
+                        .unwrap_or(0);
+                    tokio::time::sleep(Duration::from_millis(jitter)).await;
                 }
             }
         }
@@ -374,6 +389,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
     let mut conn = shared.connect().await?;
     let mut focus = shared.focus.clone();
     let account = &shared.account;
+    let mut first_step_done = false;
 
     loop {
         // Folder structure first, every pass, so new/renamed folders appear promptly.
@@ -385,8 +401,14 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         let mut done: HashSet<i64> = HashSet::new();
         let mut started: HashSet<i64> = HashSet::new();
         let refresh = tokio::time::Instant::now() + shared.options.refresh_interval;
+        shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
 
         loop {
+            // Counts: after the first step (so the focused folder's new mail isn't delayed
+            // at startup), or whenever there's nothing else to do.
+            if first_step_done && shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                sweep_counts(&shared, &mut conn).await?;
+            }
             let folders = shared.store.folders(account.id)?;
             let label_folders = gmail_label_map(&folders);
             let current_focus = *focus.borrow_and_update();
@@ -400,6 +422,10 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 plan.insert(0, *id);
             }
             let Some(&next) = plan.iter().find(|id| !done.contains(id)) else {
+                if shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    sweep_counts(&shared, &mut conn).await?;
+                    continue;
+                }
                 // Everything is in sync: wait for the user to switch folders or the refresh timer.
                 shared.set_status(SyncPhase::Idle, None, 0, 0, None);
                 tokio::select! {
@@ -426,7 +452,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                     shared.set_status(SyncPhase::Headers, Some(folder_id), done, total, None);
                 }
                 Progress::NewMail { folder_id, uids } => {
-                    shared.refresh_counts.notify_one();
+                    shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
                     if let Ok(ids) = shared.store.message_ids_for_uids(folder_id, &uids) {
                         for id in ids {
                             let _ = shared.urgent.send(Job::Body(id));
@@ -445,6 +471,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
             let step = tokio::time::timeout(STEP_TIMEOUT, shared.strategy.step(&mut conn, &ctx))
                 .await
                 .map_err(|_| anyhow::anyhow!("timed out syncing {}", folder.raw_name))?;
+            first_step_done = true;
             match step {
                 Ok(Step::Done) => {
                     done.insert(next);
@@ -464,42 +491,29 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
     }
 }
 
-async fn counts_task(shared: Arc<Shared>) -> Result<()> {
-    let mut conn = shared.connect().await?;
-    loop {
-        let folders = shared.store.folders(shared.account.id)?;
-        if folders.is_empty() {
-            // Header task hasn't listed folders yet.
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            continue;
+/// STATUS sweep: total/unread for every selectable folder, on the caller's connection.
+async fn sweep_counts(shared: &Shared, conn: &mut Connection) -> Result<()> {
+    let folders = shared.store.folders(shared.account.id)?;
+    for (i, f) in folders.iter().filter(|f| f.selectable).enumerate() {
+        match conn.status(&f.raw_name).await {
+            Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,
+            Err(e) => tracing::debug!(folder = f.raw_name, "STATUS failed: {e:#}"),
         }
-        for (i, f) in folders.iter().filter(|f| f.selectable).enumerate() {
-            match conn.status(&f.raw_name).await {
-                Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,
-                Err(e) => tracing::debug!(folder = f.raw_name, "STATUS failed: {e:#}"),
-            }
-            if i % 10 == 9 {
-                shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
-            }
-        }
-        shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
-        tokio::select! {
-            _ = tokio::time::sleep(shared.options.refresh_interval) => {}
-            _ = shared.refresh_counts.notified() => {}
+        if i % 10 == 9 {
+            shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
         }
     }
+    shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
+    Ok(())
 }
 
 /// IMAP IDLE on one folder: the Inbox (`follow_focus == false`) or the folder on screen.
-/// Any server push (new mail, expunge, flag change) marks it dirty for the headers task.
-/// IDLE is restarted every 25 minutes, under the 29-minute limit servers enforce.
+/// A push is handled right here (see `sync_pushed_folder`). IDLE is restarted every 25
+/// minutes, under the 29-minute limit servers enforce. The focus watcher holds a connection
+/// only while the folder on screen isn't the Inbox (which has its own watcher).
 async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
     let mut focus = shared.focus.clone();
-    let mut conn = shared.connect().await?;
-    if !conn.caps.idle {
-        tracing::info!("server has no IDLE; relying on polling");
-        return Ok(());
-    }
+    let mut conn: Option<Connection> = None;
     loop {
         let inbox = shared
             .store
@@ -508,12 +522,14 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             .find(|f| f.role == Some(FolderRole::Inbox));
         let current = *focus.borrow_and_update();
         let target = if follow_focus {
-            // The Inbox already has its own watcher.
             current.filter(|f| Some(*f) != inbox.as_ref().map(|i| i.id))
         } else {
             inbox.as_ref().map(|i| i.id)
         };
         let Some(folder_id) = target else {
+            if let Some(c) = conn.take() {
+                c.logout().await;
+            }
             tokio::select! {
                 r = focus.changed() => { r?; }
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -522,8 +538,18 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
         };
         let Some((_, raw)) = shared.store.folder(folder_id)? else { continue };
 
-        conn.select(&raw).await?;
-        let imap::Connection { session, caps, .. } = conn;
+        let mut c = match conn.take() {
+            Some(c) => c,
+            None => shared.connect().await?,
+        };
+        if !c.caps.idle {
+            tracing::info!("server has no IDLE; relying on polling");
+            c.logout().await;
+            std::future::pending::<()>().await;
+            unreachable!();
+        }
+        c.select(&raw).await?;
+        let imap::Connection { session, caps, .. } = c;
         let mut handle = session.idle();
         handle.init().await?;
         let (wait, stop) = handle.wait_with_timeout(Duration::from_secs(25 * 60));
@@ -533,15 +559,16 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
         };
         drop(stop);
         let session = handle.done().await?;
-        conn = imap::Connection { session, caps, selected: Some(raw.clone()) };
+        let mut c = imap::Connection { session, caps, selected: Some(raw.clone()) };
 
         if pushed {
             let t = std::time::Instant::now();
-            // Handle the push right here (new mail, expunges, flag changes) rather than waiting
-            // for the headers task, which may be busy with a long step elsewhere.
-            sync_pushed_folder(&shared, &mut conn, folder_id).await?;
+            // Handle the push right here (new mail, expunges, flag changes, counts) rather than
+            // waiting for the headers task, which may be busy with a long step elsewhere.
+            sync_pushed_folder(&shared, &mut c, folder_id).await?;
             tracing::info!(folder = raw, ms = t.elapsed().as_millis() as u64, "IDLE push handled");
         }
+        conn = Some(c);
     }
 }
 
@@ -576,7 +603,13 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
     tokio::time::timeout(STEP_TIMEOUT, shared.strategy.step(conn, &ctx))
         .await
         .map_err(|_| anyhow::anyhow!("timed out handling push for {}", folder.raw_name))??;
-    shared.refresh_counts.notify_one();
+    // This folder's counts, now, on this connection (re-SELECT for EXISTS, then count UNSEEN);
+    // the other folders catch up in the headers task's next sweep.
+    let mb = conn.select(&folder.raw_name).await?;
+    let unread = conn.session.search("UNSEEN").await?.len() as u32;
+    shared.store.set_folder_counts(folder_id, mb.exists, unread)?;
+    shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
+    shared.counts_due.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
@@ -795,7 +828,8 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_BODY_FAILURES: u32 = 3;
 
 async fn body_task(shared: Arc<Shared>) -> Result<()> {
-    let mut conn = shared.connect().await?;
+    // Connected only while there is work; closed as soon as the queue is empty.
+    let mut conn: Option<Connection> = None;
     loop {
         let focus = *shared.focus.borrow();
         let preferred = preferred_body_folder(&shared);
@@ -833,12 +867,25 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
         };
 
         if batch.is_empty() {
+            if let Some(c) = conn.take() {
+                c.logout().await;
+            }
             tokio::select! {
                 _ = shared.new_headers.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {}
             }
             continue;
         }
+        if conn.is_none() {
+            match shared.connect().await {
+                Ok(c) => conn = Some(c),
+                Err(e) => {
+                    shared.inflight.lock().unwrap().retain(|id| !batch.contains(id));
+                    return Err(e);
+                }
+            }
+        }
+        let c = conn.as_mut().unwrap();
 
         // A message that already failed once is fetched whole (no BODYSTRUCTURE).
         let whole = {
@@ -846,7 +893,7 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
             batch.iter().any(|id| failures.contains_key(id))
         };
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(BODY_TIMEOUT, download(&shared, &mut conn, &batch, preferred, false, whole))
+        let result = tokio::time::timeout(BODY_TIMEOUT, download(&shared, c, &batch, preferred, false, whole))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("no progress for {}s; connection stalled", BODY_TIMEOUT.as_secs())));
         {

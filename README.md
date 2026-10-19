@@ -19,7 +19,7 @@ npm run dev              # UI only, in a browser, against an in-memory mock back
 
 Gmail currently signs in with an [app password](https://myaccount.google.com/apppasswords) (requires 2-Step Verification). Google Workspace and Microsoft 365 custom domains are detected from the domain's MX records. Passwords are kept in the system keychain (Secret Service on Linux, Keychain on macOS); if the server rejects one, the account's sync pauses and the sidebar asks for a new one.
 
-The browser mock takes URL flags: `?empty` (onboarding), `?auth` (rejected password), `?error` (sync error), `?many` (six accounts); they can be combined.
+The browser mock takes URL flags: `?empty` (onboarding), `?auth` (rejected password), `?limited` (connection limit), `?error` (sync error), `?many` (six accounts); they can be combined.
 
 Data lives in `~/.local/share/dev.mailclient.desktop/` on Linux (`~/Library/Application Support/dev.mailclient.desktop/` on macOS): `mail.db` (accounts, folders, headers, threads, search index) and `bodies.db` (raw messages). Window size is in `~/.config/dev.mailclient.desktop/window.json`.
 
@@ -54,6 +54,8 @@ To diagnose a single message that won't download, `mailsync probe you@example.co
 - **Bodies (attachments omitted for now):** `BODYSTRUCTURE` decides what to fetch. Messages without attachments come down whole. Others fetch only text parts and inline images under 2 MB, and are rebuilt into a valid MIME message tagged `X-Mail-Partial`. Omitted attachments are recorded (`messages.omitted`) and still listed in the reader. Stored in `bodies.db`, newest first, preferring the folder on screen, over 3 background connections. A message you open is fetched immediately on a dedicated, pre-connected connection.
 - **Robustness:** a batch with no progress for 60 s is abandoned and its connection replaced (Gmail stalls connections during bulk downloads). A message that fails is retried alone and fetched whole without `BODYSTRUCTURE` (some malformed structures make the IMAP parser wait forever); after 3 failures it's skipped for the session.
 - **Resumable:** the header cursor and every body are committed as they arrive, so quitting mid-sync loses at most one chunk.
+- **Connections:** 3 per account when synced (sync, interactive, Inbox IDLE), 4 while a non-Inbox folder is on screen; the 3 download workers connect only while bodies are pending. Folder counts are swept on the sync connection; a push also recounts its own folder.
+- **Connection limits:** a sign-in refused as temporary (Gmail's "Too many simultaneous connections", `[LIMIT]`, `[UNAVAILABLE]`, `[INUSE]`, `[OVERQUOTA]`) shows as "Connection limit · retrying" and is retried with jittered backoff; only genuine credential failures pause the account and ask for a password. One app instance runs per machine (a second launch focuses the first).
 - **Strategies are pluggable:** implement `mail_core::sync::HeaderSync` and register it in `strategy_by_name` to compare approaches with `mailsync bench`.
 
 ## HTML email

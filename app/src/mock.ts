@@ -1,7 +1,8 @@
 // In-memory fake backend so `npm run dev` works in a plain browser.
 // Implements the exact command/event surface from api-contract.md.
 // Append `?empty` to the URL to start with no accounts (onboarding flow).
-// Append `?auth` to simulate the server rejecting the second account's saved password.
+// Append `?auth` to simulate the server rejecting the second account's saved password,
+// or `?limited` for a connection-limit refusal.
 
 import type {
   Account,
@@ -954,6 +955,9 @@ export function createMockBackend(): Backend {
     if (params.has('error')) {
       // `?error`: the second account fails to connect (demonstrates the error footer row).
       setTimeout(() => setStatus(w.id, 'error', null, 0, 0, 'Connection to mail.hallworks.dev:993 timed out'), 900);
+    } else if (params.has('limited')) {
+      // `?limited`: the second account is refused for too many connections (amber, retrying).
+      setTimeout(() => setStatus(w.id, 'limited', null, 0, 0, 'Too many simultaneous connections to this account. Other mail apps or devices are using the server\'s connection limit (Gmail allows 15 per account); retrying. Server said: [ALERT] Too many simultaneous connections. (Failure)'), 900);
     } else if (params.has('auth')) {
       setTimeout(() => setStatus(w.id, 'auth', null, 0, 0, 'The server rejected the password: [AUTHENTICATIONFAILED] Invalid credentials'), 900);
     } else {

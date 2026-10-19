@@ -115,6 +115,8 @@ function syncLabel(s: SyncStatus): string {
       return 'Sync error';
     case 'auth':
       return 'Password needed';
+    case 'limited':
+      return 'Connection limit · retrying';
     default:
       return 'Up to date';
   }
@@ -150,6 +152,8 @@ function throttled<T>(src: () => T, ms: number): () => T {
 }
 
 const isAttention = (p: string | undefined) => p === 'error' || p === 'auth';
+/** Temporary server refusal (connection limit): shown as a warning, resolves on its own. */
+const isWarning = (p: string | undefined) => p === 'limited';
 
 /** Fixed-size 14px status glyph shared by the summary and the popover rows. */
 function StatusGlyph(props: { phase: string }) {
@@ -159,7 +163,7 @@ function StatusGlyph(props: { phase: string }) {
         <Match when={ACTIVE_PHASES.has(props.phase)}>
           <span class="spinner small" />
         </Match>
-        <Match when={props.phase === 'error'}>
+        <Match when={props.phase === 'error' || props.phase === 'limited'}>
           <AlertIcon size={13} />
         </Match>
         <Match when={props.phase === 'auth'}>
@@ -193,7 +197,7 @@ function SyncPopoverRow(props: { account: Account; status: SyncStatus | undefine
   };
   return (
     <div class="sp-item">
-      <div class="sf-row sp-row" classList={{ error: isAttention(phase()), active: active() }}>
+      <div class="sf-row sp-row" classList={{ error: isAttention(phase()), warn: isWarning(phase()), active: active() }}>
         <StatusGlyph phase={phase()} />
         <span class="sf-email" title={props.account.email}>
           {props.account.email}
@@ -208,8 +212,8 @@ function SyncPopoverRow(props: { account: Account; status: SyncStatus | undefine
         </span>
         <ProgressTrack active={active()} pct={pct()} />
       </div>
-      <Show when={phase() === 'error' && props.status?.message}>
-        <div class="sp-error">{props.status?.message}</div>
+      <Show when={(phase() === 'error' || phase() === 'limited') && props.status?.message}>
+        <div class="sp-error" classList={{ warn: phase() === 'limited' }}>{props.status?.message}</div>
       </Show>
     </div>
   );
@@ -239,6 +243,15 @@ function SyncFooter() {
       return {
         phase: list.find((x) => x.status?.phase === 'auth') ? 'auth' : 'error',
         text: attention === 1 ? '1 account needs attention' : `${attention} accounts need attention`,
+        active: false,
+        pct: null as number | null,
+      };
+    }
+    const limited = list.filter((x) => isWarning(x.status?.phase)).length;
+    if (limited > 0) {
+      return {
+        phase: 'limited',
+        text: limited === 1 ? 'Connection limit · retrying' : `${limited} accounts at connection limit`,
         active: false,
         pct: null as number | null,
       };
@@ -296,7 +309,7 @@ function SyncFooter() {
       <button
         ref={rowEl}
         class="sf-row sf-summary"
-        classList={{ error: isAttention(summary().phase), active: summary().active, open: open() }}
+        classList={{ error: isAttention(summary().phase), warn: isWarning(summary().phase), active: summary().active, open: open() }}
         aria-expanded={open()}
         aria-label={`Sync status: ${summary().text}`}
         title={summary().text}
@@ -435,6 +448,11 @@ function AccountSection(props: { account: Account }) {
           </Show>
           <Show when={status()?.phase === 'error'}>
             <AlertIcon size={12} />
+          </Show>
+          <Show when={status()?.phase === 'limited'}>
+            <span class="acct-flag-warn" title="Connection limit reached · retrying">
+              <AlertIcon size={12} />
+            </span>
           </Show>
         </span>
         <Show when={collapsed() && totalUnread() > 0}>

@@ -230,6 +230,9 @@ pub enum SyncPhase {
     Error,
     /// The server rejected the stored credentials; sync is paused until they're updated.
     Auth,
+    /// The server refused a connection for a temporary reason (connection limit reached by
+    /// other apps/devices, bandwidth); sync retries on its own.
+    Limited,
 }
 
 #[derive(Debug, Clone, Serialize)]

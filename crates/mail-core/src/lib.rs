@@ -210,6 +210,13 @@ impl Core {
             Err(e) if imap::is_auth_error(&e) => {
                 return Err(anyhow!("That password was rejected. Check it and try again."));
             }
+            Err(e) if imap::is_limit_error(&e) => {
+                return Err(anyhow!(
+                    "The server refused the connection because this account has too many simultaneous \
+                     connections (other mail apps or devices). The password wasn't checked; close another \
+                     mail app or wait a minute and try again."
+                ));
+            }
             Err(e) => return Err(e),
         }
         self.secrets.set(&account.email, &password)?;
