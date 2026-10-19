@@ -189,7 +189,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let saved = window_state::load(app);
     let requested = saved.as_ref().map(|s| (s.width, s.height)).unwrap_or((1360.0, 860.0));
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-        .title("Mail")
+        .title("Email")
         .inner_size(1360.0, 860.0)
         .min_inner_size(900.0, 560.0);
     if let Some(state) = &saved {

@@ -157,7 +157,7 @@ export function Onboarding(props: { onAdded: (a: Account) => void }) {
           <div class="hero-icon">
             <MailIcon size={28} />
           </div>
-          <h1>Welcome to Mail</h1>
+          <h1>Welcome to Email</h1>
           <p>Add an IMAP account to get started. Your mail is synced and stored on this device.</p>
         </div>
         <AddAccountForm onAdded={props.onAdded} autofocus />

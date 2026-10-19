@@ -1,4 +1,4 @@
-# Mail
+# Email
 
 A fast, local-first desktop email client: a Rust core (IMAP sync, SQLite cache, MIME) behind a Tauri v2 + SolidJS UI.
 
