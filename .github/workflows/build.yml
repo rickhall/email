@@ -27,10 +27,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Built on an older Ubuntu so the binaries also run on newer distributions
+          # (the artifact has .rpm for Fedora, .deb for Debian/Ubuntu, and an AppImage).
           - os: ubuntu-22.04
+            platform: linux
             args: ""
             bundle: target/release/bundle
           - os: macos-latest
+            platform: macos
             args: "--target universal-apple-darwin"
             bundle: target/universal-apple-darwin/release/bundle
     runs-on: ${{ matrix.os }}
@@ -66,7 +70,7 @@ jobs:
       # APPLE_* secrets; see https://v2.tauri.app/distribute/sign/macos/
       - uses: actions/upload-artifact@v7
         with:
-          name: email-${{ matrix.os }}
+          name: email-${{ matrix.platform }}
           path: |
             ${{ matrix.bundle }}/deb/*.deb
             ${{ matrix.bundle }}/rpm/*.rpm
