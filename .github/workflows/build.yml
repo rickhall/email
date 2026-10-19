@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Linux dependencies
@@ -35,9 +35,9 @@ jobs:
             bundle: target/universal-apple-darwin/release/bundle
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -64,7 +64,7 @@ jobs:
 
       # Unsigned builds. macOS signing/notarization needs an Apple Developer account and
       # APPLE_* secrets; see https://v2.tauri.app/distribute/sign/macos/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: email-${{ matrix.os }}
           path: |
