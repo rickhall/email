@@ -186,6 +186,7 @@ export interface CommandMap {
   };
   get_sync_status: { args: undefined; ret: SyncStatus[] };
   set_read: { args: { id: number; read: boolean }; ret: void };
+  message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };
 }

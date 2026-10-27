@@ -94,6 +94,7 @@ interface SyncStatus {
 | `get_sync_status` | – | `SyncStatus[]` |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |
 | `set_allow_remote` | `{ id, allow }` | `void` — remembers the "Load images" choice per message |
+| `message_in_folder` | `{ id, folderId }` | `boolean` — whether message `id` is (still) in folder `folderId`; `folderId: null` = whether it still exists anywhere in its account. Used to drop a selection that was archived/deleted elsewhere |
 | `set_read` | `{ id, read }` | `void` — updates locally at once (emits `messages-changed` + `folders-changed`), then syncs `\Seen` to the server |
 
 ## Events (`listen(name, cb)`)

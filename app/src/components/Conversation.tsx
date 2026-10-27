@@ -9,6 +9,8 @@ import {
   folderById,
   includeTrash,
   selectedThread,
+  selectedThreadId,
+  selectThread,
 } from '../state';
 import { ImageIcon, PaperclipIcon } from './Icons';
 import { AddrList, AttachmentChip, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
@@ -267,6 +269,13 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
       const view = await api.getThread(t.id, t.folderId, scope, trash);
       if (my !== token) return;
       const list = view.messages;
+      // The core reports folderId = this folder for every message still in it. None left
+      // (archived/deleted elsewhere) → the conversation left this folder: blank the reader,
+      // regardless of reveals or All mail / Include Trash (those only add other folders).
+      if (!list.some((m) => m.folderId === t.folderId)) {
+        if (selectedThreadId() === t.id) selectThread(null);
+        return;
+      }
       // Reveal/hide inserts or removes cards above the reader's eye line: keep it still.
       const anchor = opts.reveal && initialized ? captureAnchor() : null;
       batch(() => {

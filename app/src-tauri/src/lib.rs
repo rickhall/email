@@ -123,6 +123,11 @@ async fn search_messages(
 }
 
 #[tauri::command]
+async fn message_in_folder(core: State<'_, Arc<Core>>, id: i64, folder_id: Option<i64>) -> Res<bool> {
+    core.message_in_folder(id, folder_id).map_err(err)
+}
+
+#[tauri::command]
 async fn get_sync_status(core: State<'_, Arc<Core>>) -> Res<Vec<SyncStatus>> {
     Ok(core.sync_status())
 }
@@ -262,6 +267,7 @@ pub fn run() {
             get_thread,
             update_password,
             search_messages,
+            message_in_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

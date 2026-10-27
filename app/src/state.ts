@@ -185,6 +185,34 @@ export async function onAccountAdded(acc: Account): Promise<void> {
   if (inbox) selectFolder(inbox.id);
 }
 
+/**
+ * Single-message selection (flat list or search results) that was archived/deleted elsewhere:
+ * clear it so the reader goes blank. Flat: must still be in the open folder. Search: results
+ * span folders, so only a message that no longer exists at all is dropped.
+ */
+let selCheckTimer: ReturnType<typeof setTimeout> | undefined;
+function checkSelectedMessage(changed: number[]) {
+  if (threaded() && !searchActive()) return; // conversations check themselves (Conversation.tsx)
+  const id = selectedMessageId();
+  const folderId = selectedFolderId();
+  if (id == null || folderId == null) return;
+  const inSearch = searchActive();
+  if (!inSearch && !changed.includes(folderId)) return;
+  clearTimeout(selCheckTimer);
+  selCheckTimer = setTimeout(() => {
+    api
+      .messageInFolder(id, inSearch ? null : folderId)
+      .then((still) => {
+        // Only act if nothing changed meanwhile (same message, folder and mode).
+        if (still || selectedMessageId() !== id || selectedFolderId() !== folderId || searchActive() !== inSearch) return;
+        selectMessage(null);
+      })
+      .catch(() => {
+        /* core without message_in_folder: keep the selection */
+      });
+  }, 60);
+}
+
 let started = false;
 export async function initApp(): Promise<void> {
   if (started) return;
@@ -200,6 +228,7 @@ export async function initApp(): Promise<void> {
       .then(() => ensureFolderSelected())
       .catch((e) => console.error('list_folders', e));
   });
+  void events.onMessagesChanged(({ folderIds }) => checkSelectedMessage(folderIds));
   void events.onSyncStatus((s) => {
     setSyncByAccount(s.accountId, s);
   });

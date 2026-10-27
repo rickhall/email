@@ -101,6 +101,9 @@ export const api = {
     includeTrash: boolean,
   ): Promise<ThreadView> => call('get_thread', { threadId, folderId, scope, includeTrash }),
   getSyncStatus: (): Promise<SyncStatus[]> => call('get_sync_status', undefined),
+  /** Is message `id` still in `folderId` (null = still exists at all)? */
+  messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
+    call('message_in_folder', { id, folderId }),
   setRead: (id: number, read: boolean): Promise<void> => call('set_read', { id, read }),
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
   updatePassword: (accountId: number, password: string): Promise<void> =>

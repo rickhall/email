@@ -1015,6 +1015,39 @@ export function createMockBackend(): Backend {
     return out.sort((a, b) => b.date - a.date);
   }
 
+  // ---- `?archive` / `?archive=partial`: simulate another device archiving what you're reading.
+  // ~3s after a conversation (or, in the flat list, a message) is opened from the Inbox, it is
+  // moved to All Mail / Archive. `partial` archives only the conversation's newest Inbox
+  // message, so the conversation stays (with fewer cards) when it has others in the Inbox.
+  const archiveMode =
+    typeof location !== 'undefined' ? new URLSearchParams(location.search).get('archive') : null;
+  const archiveHandled = new Set<number>();
+  function moveMessage(m: MessageSummary, to: Folder) {
+    const from = folders.get(m.folderId);
+    if (!from || from.id === to.id) return;
+    const src = folderMsgs.get(from.id) ?? [];
+    const i = src.indexOf(m);
+    if (i >= 0) src.splice(i, 1);
+    const dst = folderMsgs.get(to.id) ?? [];
+    dst.push(m);
+    dst.sort((a, b) => b.date - a.date);
+    m.folderId = to.id;
+    recount(from);
+    recount(to);
+    emit('messages-changed', { folderIds: [from.id, to.id] });
+    emit('folders-changed', { accountId: from.accountId });
+  }
+  function archiveTarget(f: Folder | undefined) {
+    if (!f || f.role !== 'inbox') return undefined;
+    return [...folders.values()].find((x) => x.accountId === f.accountId && (x.role === 'all' || x.role === 'archive'));
+  }
+  function scheduleArchive(ms: MessageSummary[]) {
+    if (archiveMode == null || ms.length === 0) return;
+    const to = archiveTarget(folders.get(ms[0]!.folderId));
+    if (!to) return;
+    setTimeout(() => ms.forEach((m) => moveMessage(m, to)), 3000);
+  }
+
   const latency = () => sleep(8 + Math.random() * 25);
 
   const handlers: { [K in CommandName]: (args: CommandMap[K]['args']) => Promise<CommandMap[K]['ret']> } = {
@@ -1084,6 +1117,13 @@ export function createMockBackend(): Backend {
     async get_thread({ threadId, folderId, scope, includeTrash }) {
       await latency();
       const shown = selectMembers(threadId, folderId, scope, includeTrash);
+      if (archiveMode != null && !archiveHandled.has(threadId) && folders.get(folderId)?.role === 'inbox') {
+        archiveHandled.add(threadId);
+        const members = threadMembers(threadId);
+        members.forEach((m) => archiveHandled.add(-m.id)); // cards' get_message must not re-trigger
+        const inInbox = members.filter((m) => m.folderId === folderId);
+        scheduleArchive(archiveMode === 'partial' ? inInbox.slice(-1) : inInbox);
+      }
       const ids = new Set(shown.map((m) => m.id));
       let hiddenOther = 0;
       let hiddenTrash = 0;
@@ -1099,6 +1139,11 @@ export function createMockBackend(): Backend {
       await sleep(6);
       const m = byId.get(id);
       if (!m) return null;
+      // Flat list: archive the opened message itself (conversation cards are handled above).
+      if (archiveMode != null && !archiveHandled.has(-id)) {
+        archiveHandled.add(-id);
+        scheduleArchive([m]);
+      }
       if (!downloaded.has(id)) {
         if (!pendingDownloads.has(id)) {
           pendingDownloads.add(id);
@@ -1126,6 +1171,12 @@ export function createMockBackend(): Backend {
       await sleep(3);
       if (allow) remoteAllowed.add(id);
       else remoteAllowed.delete(id);
+    },
+    async message_in_folder({ id, folderId }) {
+      await sleep(3);
+      const m = byId.get(id);
+      if (!m) return false;
+      return folderId == null || m.folderId === folderId;
     },
     async set_read({ id, read }) {
       await sleep(4);
