@@ -95,13 +95,32 @@ CREATE TABLE IF NOT EXISTS bodies (
     message_id INTEGER PRIMARY KEY,
     raw        BLOB NOT NULL
 );
+-- Bodies of messages that disappeared from every folder, kept briefly by identity: on servers
+-- without Gmail labels a move is an expunge plus a new copy elsewhere, and if the expunge is
+-- seen first the new copy picks the body up from here instead of downloading it again.
+CREATE TABLE IF NOT EXISTS stash (
+    account_id      INTEGER NOT NULL,
+    identity        TEXT NOT NULL,
+    raw             BLOB NOT NULL,
+    snippet         TEXT,
+    has_attachments INTEGER NOT NULL,
+    omitted         TEXT,
+    allow_remote    INTEGER NOT NULL,
+    created         INTEGER NOT NULL,
+    PRIMARY KEY (account_id, identity)
+);
 "#;
+
+/// How long a stashed body waits for its message to reappear in another folder.
+const STASH_TTL_SECS: i64 = 7 * 24 * 3600;
 
 /// Header data for one message as fetched from a folder.
 #[derive(Debug, Clone)]
 pub struct HeaderRecord {
     pub uid: u32,
     pub gm_msgid: Option<u64>,
+    /// RFC 8474 EMAILID (servers with OBJECTID), identical for every copy of a message.
+    pub email_id: Option<String>,
     pub gm_labels: Option<Vec<String>>,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
@@ -146,12 +165,26 @@ pub struct ListedFolder {
 }
 
 /// Message-IDs mentioned in In-Reply-To / References, without angle brackets.
+/// Cross-folder identity of a message on servers without Gmail ids: the server's EMAILID
+/// (RFC 8474) when it has one, else Message-ID plus size (copies of a message are byte-for-byte
+/// identical). Gmail messages use `gm_msgid` instead; messages with neither stay per-folder.
+pub fn message_identity(rec: &HeaderRecord) -> Option<String> {
+    if rec.gm_msgid.is_some() {
+        return None;
+    }
+    if let Some(e) = &rec.email_id {
+        return Some(format!("e:{e}"));
+    }
+    rec.message_id.as_ref().filter(|m| !m.is_empty()).map(|m| format!("m:{m}:{}", rec.size))
+}
+
+/// Stored id lists are clean (see `mime::parse_msg_ids`): space-separated ids. Brackets are
+/// tolerated in case a caller passes header-style values.
 fn referenced_ids(in_reply_to: Option<&str>, refs: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for s in [refs, in_reply_to].into_iter().flatten() {
-        for tok in s.split(|c: char| c.is_whitespace() || c == ',') {
-            let id = tok.trim().trim_matches(['<', '>']);
-            if !id.is_empty() && !out.iter().any(|o| o == id) {
+        for id in s.split_whitespace().map(|t| t.trim_matches(['<', '>'])).filter(|t| !t.is_empty()) {
+            if !out.iter().any(|o| o == id) {
                 out.push(id.to_string());
             }
         }
@@ -205,6 +238,48 @@ fn assign_thread(
     for r in &referenced {
         ins.execute(params![account_id, r, id])?;
     }
+    Ok(())
+}
+
+/// v2: references used to be split on whitespace, so damaged headers produced junk ids
+/// (`org`, `(Your`, encoded-words) that glued unrelated conversations together. Re-parse every
+/// message's references from its stored headers (first 64 KB of the raw message; headers come
+/// first) and rebuild all conversations. Messages without a body get their stored lists cleaned.
+fn rethread(db: &mut Connection, bodies: &Connection) -> Result<()> {
+    let started = std::time::Instant::now();
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, bool)> = {
+        let mut stmt = db.prepare("SELECT id, message_id, in_reply_to, refs, has_body FROM messages")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut head = bodies.prepare("SELECT substr(raw, 1, 65536) FROM bodies WHERE message_id = ?1")?;
+    let tx = db.transaction()?;
+    {
+        let mut update =
+            tx.prepare("UPDATE messages SET message_id = ?2, in_reply_to = ?3, refs = ?4 WHERE id = ?1")?;
+        let clean = |s: &Option<String>| -> Option<String> {
+            s.as_deref().map(crate::mime::clean_stored_ids).filter(|v| !v.is_empty()).map(|v| v.join(" "))
+        };
+        for (id, mid, irt, refs, has_body) in &rows {
+            let raw: Option<Vec<u8>> =
+                if *has_body { head.query_row([id], |r| r.get(0)).optional()? } else { None };
+            let (mid, irt, refs) = match raw {
+                Some(raw) => {
+                    let p = crate::mime::parse_header_block(&raw);
+                    (p.message_id.or_else(|| mid.clone()), p.in_reply_to, p.refs)
+                }
+                None => (mid.clone(), clean(irt), clean(refs)),
+            };
+            update.execute(params![id, mid, irt, refs])?;
+        }
+        tx.execute_batch("DELETE FROM msgrefs; UPDATE messages SET thread_id = NULL;")?;
+    }
+    tx.commit()?;
+    backfill_threads(db)?;
+    tracing::info!(n = rows.len(), ms = started.elapsed().as_millis() as u64, "rebuilt conversations from cleaned references");
     Ok(())
 }
 
@@ -288,8 +363,8 @@ pub struct Store {
     bodies_read: Mutex<Connection>,
 }
 
-/// Bump to force a header resync (keeps messages and downloaded bodies).
-const SYNC_VERSION: i64 = 1;
+// Schema/data versions (PRAGMA user_version): 1 = Gmail label resync, 2 = conversations
+// rebuilt from cleaned references.
 
 fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -306,17 +381,18 @@ impl Store {
         let mut db = open(&dir.join("mail.db"))?;
         db.execute_batch(SCHEMA)?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < SYNC_VERSION {
+        if version < 1 {
             // v1: Gmail system labels were mis-parsed, dropping label-derived memberships.
-            db.execute_batch(&format!(
+            db.execute_batch(
                 "UPDATE folders SET top_uid=0, low_uid=0, complete=0, highest_modseq=0;
-                 PRAGMA user_version={SYNC_VERSION};"
-            ))?;
+                 PRAGMA user_version=1;",
+            )?;
         }
         for (column, ddl) in [
             ("omitted", "ALTER TABLE messages ADD COLUMN omitted TEXT"),
             ("allow_remote", "ALTER TABLE messages ADD COLUMN allow_remote INTEGER NOT NULL DEFAULT 0"),
             ("thread_id", "ALTER TABLE messages ADD COLUMN thread_id INTEGER"),
+            ("identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
         ] {
             let exists = db
                 .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?1")?
@@ -339,6 +415,8 @@ impl Store {
         db.execute_batch(
             "CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
              CREATE INDEX IF NOT EXISTS messages_msgid ON messages(account_id, message_id);
+             CREATE UNIQUE INDEX IF NOT EXISTS messages_identity ON messages(account_id, identity)
+                 WHERE identity IS NOT NULL;
              CREATE INDEX IF NOT EXISTS entries_thread ON entries(folder_id, thread_id, date);
              CREATE TRIGGER IF NOT EXISTS entries_thread_ins AFTER INSERT ON entries BEGIN
                  UPDATE entries SET thread_id=(SELECT thread_id FROM messages WHERE id=NEW.message_id)
@@ -383,6 +461,14 @@ impl Store {
         }
         let bodies = open(&dir.join("bodies.db"))?;
         bodies.execute_batch(BODY_SCHEMA)?;
+        bodies.execute(
+            "DELETE FROM stash WHERE created < unixepoch() - ?1",
+            [STASH_TTL_SECS],
+        )?;
+        if version < 2 {
+            rethread(&mut db, &bodies)?;
+            db.execute_batch("PRAGMA user_version=2;")?;
+        }
         Ok(Store {
             db: Mutex::new(db),
             read: Mutex::new(open(&dir.join("mail.db"))?),
@@ -456,6 +542,7 @@ impl Store {
         drop(db);
         let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
         let tx = bodies.unchecked_transaction()?;
+        tx.execute("DELETE FROM stash WHERE account_id=?1", [account_id])?;
         for id in ids {
             tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
         }
@@ -611,18 +698,25 @@ impl Store {
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
+        // New rows whose body may be waiting in the stash (moved between folders).
+        let mut restore: Vec<(i64, String)> = Vec::new();
         let mut db = self.db();
         let tx = db.transaction()?;
         {
             let mut by_gm = tx.prepare_cached(
                 "SELECT id FROM messages WHERE account_id=?1 AND gm_msgid=?2",
             )?;
+            let mut by_identity =
+                tx.prepare_cached("SELECT id FROM messages WHERE account_id=?1 AND identity=?2")?;
+            let mut uid_here = tx.prepare_cached(
+                "SELECT uid FROM entries WHERE folder_id=?1 AND message_id=?2 AND uid IS NOT NULL",
+            )?;
             let mut by_uid =
                 tx.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
             let mut insert = tx.prepare_cached(
                 "INSERT INTO messages (account_id, gm_msgid, message_id, in_reply_to, refs, subject,
-                    from_name, from_addr, to_addrs, date, size, flags, has_attachments)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                    from_name, from_addr, to_addrs, date, size, flags, has_attachments, identity)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             )?;
             let mut update_flags = tx.prepare_cached("UPDATE messages SET flags=?2 WHERE id=?1")?;
             let mut entry = tx.prepare_cached(
@@ -630,9 +724,34 @@ impl Store {
                  ON CONFLICT(folder_id, message_id) DO UPDATE SET uid=coalesce(excluded.uid, entries.uid)",
             )?;
             for rec in records {
+                let mut identity = message_identity(rec);
                 let existing: Option<i64> = match rec.gm_msgid {
                     Some(gm) => by_gm.query_row(params![account_id, gm as i64], |r| r.get(0)).optional()?,
-                    None => by_uid.query_row(params![folder_id, rec.uid], |r| r.get(0)).optional()?,
+                    None => match by_uid.query_row(params![folder_id, rec.uid], |r| r.get(0)).optional()? {
+                        Some(id) => Some(id),
+                        None => match &identity {
+                            Some(key) => {
+                                let found: Option<i64> =
+                                    by_identity.query_row(params![account_id, key], |r| r.get(0)).optional()?;
+                                // Two copies in the *same* folder (a duplicate delivery) can't share a
+                                // row: each needs its own UID entry. Keep this one separate.
+                                let dup_here = match found {
+                                    Some(id) => uid_here
+                                        .query_row(params![folder_id, id], |r| r.get::<_, u32>(0))
+                                        .optional()?
+                                        .is_some_and(|u| u != rec.uid),
+                                    None => false,
+                                };
+                                if dup_here {
+                                    identity = None;
+                                    None
+                                } else {
+                                    found
+                                }
+                            }
+                            None => None,
+                        },
+                    },
                 };
                 let id = match existing {
                     Some(id) => {
@@ -654,8 +773,12 @@ impl Store {
                             rec.size,
                             rec.flags,
                             rec.has_attachments,
+                            identity,
                         ])?;
                         let id = tx.last_insert_rowid();
+                        if let Some(key) = identity {
+                            restore.push((id, key));
+                        }
                         assign_thread(
                             &tx,
                             account_id,
@@ -675,7 +798,54 @@ impl Store {
             }
         }
         tx.commit()?;
+        drop(db);
+        if !restore.is_empty() {
+            self.restore_stashed(account_id, &restore)?;
+        }
         Ok(changed.into_iter().collect())
+    }
+
+    /// Give newly inserted messages the bodies of identical messages that recently left
+    /// another folder (a move seen as expunge-then-new), instead of downloading them again.
+    fn restore_stashed(&self, account_id: i64, new_rows: &[(i64, String)]) -> Result<()> {
+        let mut found = Vec::new();
+        {
+            let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
+            let tx = bodies.unchecked_transaction()?;
+            {
+                let mut get = tx.prepare_cached(
+                    "SELECT snippet, has_attachments, omitted, allow_remote FROM stash
+                     WHERE account_id=?1 AND identity=?2",
+                )?;
+                let mut take = tx.prepare_cached(
+                    "INSERT OR REPLACE INTO bodies (message_id, raw)
+                     SELECT ?3, raw FROM stash WHERE account_id=?1 AND identity=?2",
+                )?;
+                let mut del = tx.prepare_cached("DELETE FROM stash WHERE account_id=?1 AND identity=?2")?;
+                for (id, key) in new_rows {
+                    let meta: Option<(Option<String>, bool, Option<String>, bool)> = get
+                        .query_row(params![account_id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                        .optional()?;
+                    if let Some(meta) = meta {
+                        take.execute(params![account_id, key, id])?;
+                        del.execute(params![account_id, key])?;
+                        found.push((*id, meta));
+                    }
+                }
+            }
+            tx.commit()?;
+        }
+        if !found.is_empty() {
+            let db = self.db();
+            let mut set = db.prepare_cached(
+                "UPDATE messages SET has_body=1, snippet=?2, has_attachments=?3, omitted=?4, allow_remote=?5
+                 WHERE id=?1",
+            )?;
+            for (id, (snippet, att, omitted, remote)) in found {
+                set.execute(params![id, snippet, att, omitted, remote])?;
+            }
+        }
+        Ok(())
     }
 
     /// Apply flag (and Gmail label) changes for UIDs already known in this folder.
@@ -722,6 +892,10 @@ impl Store {
                 "SELECT 1 FROM entries WHERE message_id=?1 AND uid IS NOT NULL LIMIT 1",
             )?;
             let mut del_msg = tx.prepare_cached("DELETE FROM messages WHERE id=?1")?;
+            let mut meta = tx.prepare_cached(
+                "SELECT account_id, identity, has_body, snippet, has_attachments, omitted, allow_remote
+                 FROM messages WHERE id=?1",
+            )?;
             for uid in uids {
                 let Some(id): Option<i64> =
                     find.query_row(params![folder_id, uid], |r| r.get(0)).optional()?
@@ -731,8 +905,12 @@ impl Store {
                 del.execute(params![folder_id, uid])?;
                 // Message still physically present in some other folder?
                 if has_uid_entry.query_row([id], |_| Ok(())).optional()?.is_none() {
+                    let m: (i64, Option<String>, bool, Option<String>, bool, Option<String>, bool) =
+                        meta.query_row([id], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                        })?;
                     del_msg.execute([id])?;
-                    orphans.push(id);
+                    orphans.push((id, m));
                 }
             }
         }
@@ -741,7 +919,16 @@ impl Store {
         if !orphans.is_empty() {
             let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
             let tx = bodies.unchecked_transaction()?;
-            for id in orphans {
+            for (id, (account_id, identity, has_body, snippet, att, omitted, remote)) in orphans {
+                // Possibly moved to a folder we haven't seen yet: keep the body for a while.
+                if let (Some(key), true) = (identity, has_body) {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO stash
+                             (account_id, identity, raw, snippet, has_attachments, omitted, allow_remote, created)
+                         SELECT ?2, ?3, raw, ?4, ?5, ?6, ?7, unixepoch() FROM bodies WHERE message_id=?1",
+                        params![id, account_id, key, snippet, att, omitted, remote],
+                    )?;
+                }
                 tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
             }
             tx.commit()?;
@@ -949,6 +1136,17 @@ impl Store {
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
     }
 
+    /// Whether message `id` is still in `folder_id`, or (with `None`) still exists at all.
+    pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
+        let db = self.rdb();
+        Ok(match folder_id {
+            Some(f) => db
+                .prepare_cached("SELECT 1 FROM entries WHERE message_id=?1 AND folder_id=?2")?
+                .exists(params![id, f])?,
+            None => db.prepare_cached("SELECT 1 FROM messages WHERE id=?1")?.exists([id])?,
+        })
+    }
+
     pub fn message_ids_for_uids(&self, folder_id: i64, uids: &[u32]) -> Result<Vec<i64>> {
         let db = self.rdb();
         let mut stmt = db.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
@@ -1132,6 +1330,7 @@ mod tests {
         HeaderRecord {
             uid,
             gm_msgid: Some(gm),
+            email_id: None,
             gm_labels: Some(labels.iter().map(|s| s.to_string()).collect()),
             message_id: None,
             in_reply_to: None,
@@ -1240,6 +1439,50 @@ mod tests {
     }
 
     #[test]
+    fn non_gmail_copies_share_one_message_and_moves_keep_bodies() {
+        let dir = std::env::temp_dir().join(format!("mail-core-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@example.com", "x", Provider::Imap, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store
+            .sync_folder_list(acct.id, &[lf("INBOX", Some(FolderRole::Inbox)), lf("Archive", Some(FolderRole::Archive))])
+            .unwrap();
+        let folders = store.folders(acct.id).unwrap();
+        let id = |n: &str| folders.iter().find(|f| f.raw_name == n).unwrap().id;
+        let (inbox, archive) = (id("INBOX"), id("Archive"));
+        let msg = |uid: u32, mid: &str| HeaderRecord {
+            gm_msgid: None,
+            gm_labels: None,
+            message_id: Some(mid.into()),
+            ..rec(uid, 0, &[])
+        };
+        let none = HashMap::new();
+        let total = |s: &Store| s.count_missing_bodies(acct.id).unwrap().0;
+
+        // A copy in Archive joins the Inbox message: one row, one download.
+        store.upsert_headers(acct.id, inbox, &[msg(1, "a@x")], &none).unwrap();
+        store.upsert_headers(acct.id, archive, &[msg(7, "a@x")], &none).unwrap();
+        assert_eq!(total(&store), 1);
+        // A duplicate delivery in the same folder stays separate (each UID needs an entry).
+        store.upsert_headers(acct.id, inbox, &[msg(2, "a@x")], &none).unwrap();
+        assert_eq!(total(&store), 2);
+        assert_eq!(store.list_messages(inbox, 0, 10).unwrap().total, 2);
+
+        // Move b@x from Inbox to Archive, seeing the Inbox expunge first: the body survives.
+        store.upsert_headers(acct.id, inbox, &[msg(3, "b@x")], &none).unwrap();
+        let b = store.message_ids_for_uids(inbox, &[3]).unwrap()[0];
+        store.store_body(b, b"Subject: b\r\n\r\nbody b", Some("body b"), false, None).unwrap();
+        store.remove_uids(inbox, &[3]).unwrap();
+        store.upsert_headers(acct.id, archive, &[msg(8, "b@x")], &none).unwrap();
+        let moved = store.message_ids_for_uids(archive, &[8]).unwrap()[0];
+        assert_eq!(store.body(moved).unwrap().as_deref(), Some(&b"Subject: b\r\n\r\nbody b"[..]));
+        let page = store.list_messages(archive, 0, 10).unwrap();
+        assert!(page.messages.iter().any(|m| m.id == moved && m.has_body && m.snippet.as_deref() == Some("body b")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn quick_search() {
         let dir = std::env::temp_dir().join(format!("mail-core-search-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1305,6 +1548,31 @@ mod tests {
                 println!("search {:<28} {:>7} hits  {:>6.1?}", q, r.total, t.elapsed());
             }
         }
+    }
+
+    /// Rethread a copy of a real mail.db against a real bodies.db (opened read-only):
+    /// MAIL_DB_COPY=/copy/mail.db BODIES_DB=/live/bodies.db cargo test -p mail-core real_rethread -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_rethread() {
+        let mut db = Connection::open(std::env::var("MAIL_DB_COPY").unwrap()).unwrap();
+        let bodies = Connection::open_with_flags(
+            std::env::var("BODIES_DB").unwrap(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let stats = |db: &Connection| -> (i64, Vec<i64>) {
+            let junk: i64 = db.query_row("SELECT count(*) FROM msgrefs WHERE instr(ref_msgid,'@')=0", [], |r| r.get(0)).unwrap();
+            let mut stmt = db.prepare("SELECT count(*) c FROM messages GROUP BY thread_id ORDER BY c DESC LIMIT 5").unwrap();
+            (junk, stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect())
+        };
+        println!("before: junk refs {:?}", stats(&db));
+        let t = std::time::Instant::now();
+        rethread(&mut db, &bodies).unwrap();
+        println!("rethread took {:?}", t.elapsed());
+        println!("after:  junk refs {:?}", stats(&db));
+        let threads: i64 = db.query_row("SELECT count(DISTINCT thread_id) FROM messages", [], |r| r.get(0)).unwrap();
+        println!("conversations: {threads}");
     }
 
     #[test]

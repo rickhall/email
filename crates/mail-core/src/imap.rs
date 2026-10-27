@@ -1,10 +1,16 @@
 //! IMAP connection handling: TLS, authentication, folder listing and fetch-response parsing.
 
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::{Context as TaskContext, Poll};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_imap::types::{Fetch, Flag, NameAttribute};
 use futures::TryStreamExt;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -14,7 +20,87 @@ use crate::mime;
 use crate::model::{FolderRole, flags};
 use crate::store::{HeaderRecord, ListedFolder};
 
-pub type Session = async_imap::Session<TlsStream<TcpStream>>;
+pub type Session = async_imap::Session<Tracked<TlsStream<TcpStream>>>;
+
+/// When data last moved on a connection, in either direction. Timeouts are based on this
+/// (no progress for N seconds) rather than on total duration, so a large download on a slow
+/// link isn't cut off while it's still arriving.
+#[derive(Debug, Clone, Default)]
+pub struct Activity(Arc<AtomicU64>);
+
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+impl Activity {
+    pub fn touch(&self) {
+        self.0.store(now_ms(), Ordering::Relaxed);
+    }
+
+    pub fn idle_for(&self) -> Duration {
+        Duration::from_millis(now_ms().saturating_sub(self.0.load(Ordering::Relaxed)))
+    }
+}
+
+/// A stream that records [`Activity`] on every read or write that moves bytes.
+#[derive(Debug)]
+pub struct Tracked<S> {
+    inner: S,
+    activity: Activity,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(r, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.activity.touch();
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, data: &[u8]) -> Poll<std::io::Result<usize>> {
+        let r = Pin::new(&mut self.inner).poll_write(cx, data);
+        if matches!(r, Poll::Ready(Ok(n)) if n > 0) {
+            self.activity.touch();
+        }
+        r
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Run `fut`, failing if the connection goes `limit` without moving any data. The outer
+/// `Result` is the stall; the inner value is whatever `fut` produced.
+pub async fn stall_timeout<T>(
+    activity: &Activity,
+    limit: Duration,
+    what: &str,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    activity.touch();
+    tokio::pin!(fut);
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            r = &mut fut => return Ok(r),
+            _ = tick.tick() => {
+                if activity.idle_for() > limit {
+                    return Err(anyhow!("no data from the server for {}s while {what}; connection stalled", limit.as_secs()));
+                }
+            }
+        }
+    }
+}
 
 /// The server rejected our credentials (as opposed to a network or protocol failure).
 #[derive(Debug)]
@@ -119,6 +205,8 @@ pub struct Caps {
     pub qresync: bool,
     pub idle: bool,
     pub special_use: bool,
+    /// RFC 8474: stable server-assigned EMAILID per message, shared by its copies.
+    pub objectid: bool,
 }
 
 pub struct Connection {
@@ -126,6 +214,7 @@ pub struct Connection {
     pub caps: Caps,
     /// Currently selected mailbox (raw name), to avoid redundant SELECTs.
     pub selected: Option<String>,
+    pub activity: Activity,
 }
 
 fn tls_config() -> Arc<ClientConfig> {
@@ -161,7 +250,9 @@ pub async fn connect(cfg: &ServerConfig) -> Result<Connection> {
     let server_name = ServerName::try_from(cfg.host.clone())?;
     let tls = TlsConnector::from(tls_config()).connect(server_name, tcp).await?;
 
-    let mut client = async_imap::Client::new(tls);
+    let activity = Activity::default();
+    activity.touch();
+    let mut client = async_imap::Client::new(Tracked { inner: tls, activity: activity.clone() });
     client.read_response().await?.ok_or_else(|| anyhow!("server closed before greeting"))?;
 
     let mut session = match &cfg.credentials {
@@ -179,8 +270,9 @@ pub async fn connect(cfg: &ServerConfig) -> Result<Connection> {
         qresync: c.has_str("QRESYNC"),
         idle: c.has_str("IDLE"),
         special_use: c.has_str("SPECIAL-USE"),
+        objectid: c.has_str("OBJECTID"),
     };
-    Ok(Connection { session, caps, selected: None })
+    Ok(Connection { session, caps, selected: None, activity })
 }
 
 impl Connection {
@@ -278,13 +370,74 @@ impl Connection {
     pub async fn fetch_headers_seq(&mut self, range: &str) -> Result<Vec<HeaderRecord>> {
         let q = self.header_query();
         let fetches: Vec<Fetch> = self.session.fetch(range, &q).await?.try_collect().await?;
-        Ok(fetches.iter().filter_map(parse_header_fetch).collect())
+        let mut recs: Vec<HeaderRecord> = fetches.iter().filter_map(parse_header_fetch).collect();
+        self.add_email_ids(&mut recs).await?;
+        Ok(recs)
     }
 
     pub async fn fetch_headers_uid(&mut self, uid_range: &str) -> Result<Vec<HeaderRecord>> {
         let q = self.header_query();
         let fetches: Vec<Fetch> = self.session.uid_fetch(uid_range, &q).await?.try_collect().await?;
-        Ok(fetches.iter().filter_map(parse_header_fetch).collect())
+        let mut recs: Vec<HeaderRecord> = fetches.iter().filter_map(parse_header_fetch).collect();
+        self.add_email_ids(&mut recs).await?;
+        Ok(recs)
+    }
+
+    /// On OBJECTID servers, fill in each record's EMAILID (a second, small FETCH: async-imap
+    /// parses EMAILID but doesn't expose it on `Fetch`, so the response is read directly).
+    async fn add_email_ids(&mut self, recs: &mut [HeaderRecord]) -> Result<()> {
+        if !self.caps.objectid || recs.is_empty() {
+            return Ok(());
+        }
+        let uids: Vec<u32> = recs.iter().map(|r| r.uid).collect();
+        let ids = self.fetch_email_ids(&uids).await?;
+        for r in recs {
+            r.email_id = ids.get(&r.uid).cloned();
+        }
+        Ok(())
+    }
+
+    pub async fn fetch_email_ids(&mut self, uids: &[u32]) -> Result<HashMap<u32, String>> {
+        use async_imap::imap_proto::{AttributeValue, Response, Status};
+        let tag = self.session.run_command(format!("UID FETCH {} (UID EMAILID)", uid_set(uids))).await?;
+        let mut out = HashMap::new();
+        loop {
+            let resp = self.session.read_response().await?.ok_or_else(|| anyhow!("connection closed during FETCH"))?;
+            match resp.parsed() {
+                Response::Fetch(_, attrs) => {
+                    let mut uid = None;
+                    let mut email_id = None;
+                    for a in attrs {
+                        match a {
+                            AttributeValue::Uid(u) => uid = Some(*u),
+                            AttributeValue::EmailId(e) => email_id = Some(e.to_string()),
+                            _ => {}
+                        }
+                    }
+                    if let (Some(u), Some(e)) = (uid, email_id) {
+                        out.insert(u, e);
+                    }
+                }
+                Response::Done { tag: t, status, outcome } if *t == tag => {
+                    if *status != Status::Ok {
+                        return Err(anyhow!("FETCH EMAILID failed: {}", outcome.information.as_deref().unwrap_or("")));
+                    }
+                    return Ok(out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// (sequence number, UID) for a sequence range: a cheap way to compare the server's view
+    /// of a folder with ours. Uses `UID SEARCH lo:hi` (a bare range in SEARCH means sequence
+    /// numbers; the answer is UIDs): ~7 bytes per message, a quarter of `FETCH (UID)`. The range
+    /// is contiguous and UIDs ascend with sequence numbers, so the n-th smallest UID is at
+    /// sequence number lo + n.
+    pub async fn fetch_seq_uids(&mut self, lo: u32, hi: u32) -> Result<Vec<(u32, u32)>> {
+        let mut uids: Vec<u32> = self.session.uid_search(format!("{lo}:{hi}")).await?.into_iter().collect();
+        uids.sort_unstable();
+        Ok(uids.into_iter().enumerate().map(|(i, u)| (lo + i as u32, u)).collect())
     }
 
     /// Flags (and labels) changed since `modseq` (CONDSTORE), or all flags when `modseq` is None.
@@ -432,6 +585,7 @@ fn parse_header_fetch(f: &Fetch) -> Option<HeaderRecord> {
     Some(HeaderRecord {
         uid,
         gm_msgid: f.gmail_msg_id().copied(),
+        email_id: None,
         gm_labels: gmail_labels(f),
         message_id: parsed.message_id,
         in_reply_to: parsed.in_reply_to,

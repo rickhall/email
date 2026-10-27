@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::Engine;
-use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders};
+use mail_parser::{Address, MessageParser, MimeHeaders};
 
 use crate::model::{Addr, Attachment, MessageDetail};
 
@@ -42,12 +42,74 @@ fn addr_list(a: Option<&Address>) -> Vec<Addr> {
     .unwrap_or_default()
 }
 
-fn id_list(v: &HeaderValue) -> Option<String> {
-    match v {
-        HeaderValue::Text(t) => Some(t.to_string()),
-        HeaderValue::TextList(l) => Some(l.join(" ")),
-        _ => None,
+/// Message-IDs in a raw Message-ID / In-Reply-To / References value, without angle brackets.
+///
+/// Tolerant of what's found in real archives (after the emailer prototype's parser): only
+/// `<...>`-delimited ids count, so prose like `<id> (Your message of Mon...)` adds nothing;
+/// whitespace and quotes inside an id are removed; RFC 2047 encoded-words are decoded first;
+/// and ids that are really one of the message's own addresses (`<bob@example.com>`) are
+/// ignored. Without any `<`, bare tokens containing `@` are accepted.
+pub fn parse_msg_ids(raw: &str, ignore_addrs: &HashSet<String>) -> Vec<String> {
+    let decoded;
+    let text = if raw.contains("=?") {
+        decoded = raw
+            .split_whitespace()
+            .map(|w| if w.starts_with("=?") { decode_rfc2047(w) } else { w.to_string() })
+            .collect::<Vec<_>>()
+            .join(" ");
+        decoded.as_str()
+    } else {
+        raw
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: String| {
+        if id.len() >= 3 && !ignore_addrs.contains(&id.to_ascii_lowercase()) && !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    if text.contains('<') {
+        let mut start = None;
+        for (i, c) in text.char_indices() {
+            match c {
+                // No nesting: a later '<' restarts the id.
+                '<' => start = Some(i + 1),
+                '>' => {
+                    if let Some(s) = start.take() {
+                        push(text[s..i].chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect());
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        for tok in text.split(|c: char| c.is_whitespace() || c == ',') {
+            let tok = tok.trim_matches(|c: char| c == '"' || c == '\'' || c == '(' || c == ')');
+            if tok.contains('@') {
+                push(tok.to_string());
+            }
+        }
     }
+    out
+}
+
+/// Clean a stored id list from before `parse_msg_ids` existed (space-separated, brackets
+/// already stripped): keep only plausible ids.
+pub fn clean_stored_ids(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in s.split_whitespace() {
+        let tok = tok.trim_matches(['<', '>']);
+        let tok = if tok.starts_with("=?") { decode_rfc2047(tok) } else { tok.to_string() };
+        for id in parse_msg_ids(&tok, &HashSet::new()) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+fn join_ids(ids: Vec<String>) -> Option<String> {
+    (!ids.is_empty()).then(|| ids.join(" "))
 }
 
 /// Decode RFC 2047 encoded-words (`=?UTF-8?B?...?=`), e.g. in attachment filenames.
@@ -78,6 +140,14 @@ pub fn parse_header_block(raw: &[u8]) -> ParsedHeader {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // Broken clients sometimes put an address where a message id belongs; it would glue
+    // together every message to or from that person.
+    let own_addrs: HashSet<String> = [msg.from(), msg.to(), msg.cc(), msg.reply_to()]
+        .into_iter()
+        .flatten()
+        .flat_map(|a| a.iter())
+        .filter_map(|a| a.address().map(|s| s.to_ascii_lowercase()))
+        .collect();
     let likely_attachments = msg
         .content_type()
         .map(|ct| {
@@ -91,9 +161,12 @@ pub fn parse_header_block(raw: &[u8]) -> ParsedHeader {
         from_addr,
         to_addrs,
         date: msg.date().map(|d| d.to_timestamp()),
-        message_id: msg.message_id().map(str::to_string),
-        in_reply_to: id_list(msg.in_reply_to()),
-        refs: id_list(msg.references()),
+        message_id: msg
+            .header_raw("Message-ID")
+            .and_then(|r| parse_msg_ids(r, &HashSet::new()).into_iter().next())
+            .or_else(|| msg.message_id().map(str::to_string)),
+        in_reply_to: msg.header_raw("In-Reply-To").and_then(|r| join_ids(parse_msg_ids(r, &own_addrs))),
+        refs: msg.header_raw("References").and_then(|r| join_ids(parse_msg_ids(r, &own_addrs))),
         likely_attachments,
     }
 }
@@ -149,7 +222,10 @@ pub fn render(id: i64, raw: &[u8], date: i64) -> Option<MessageDetail> {
     } else {
         None
     };
-    let text = msg.body_text(0).map(|t| t.into_owned());
+    let text = msg.body_text(0).map(|t| match flowed_params(&msg) {
+        Some(delsp) => decode_flowed(&t, delsp),
+        None => t.into_owned(),
+    });
     let has_remote_content = html.as_deref().is_some_and(has_remote);
 
     Some(MessageDetail {
@@ -165,6 +241,45 @@ pub fn render(id: i64, raw: &[u8], date: i64) -> Option<MessageDetail> {
         has_remote_content,
         remote_allowed: false,
     })
+}
+
+/// `Some(delsp)` when the first text body part is `text/plain; format=flowed` (RFC 3676).
+fn flowed_params(msg: &mail_parser::Message) -> Option<bool> {
+    let part = msg.part(*msg.text_body.first()?)?;
+    let ct = part.content_type()?;
+    let plain = ct.ctype().eq_ignore_ascii_case("text") && ct.subtype().is_some_and(|s| s.eq_ignore_ascii_case("plain"));
+    if !plain || !ct.attribute("format").is_some_and(|f| f.eq_ignore_ascii_case("flowed")) {
+        return None;
+    }
+    Some(ct.attribute("delsp").is_some_and(|d| d.eq_ignore_ascii_case("yes")))
+}
+
+/// Undo RFC 3676 `format=flowed` soft line breaks (after the emailer prototype's decoder).
+/// A line ending in a space continues on the next line at the same quote depth; space-stuffing
+/// is removed; `delsp=yes` drops the space at each soft break. Quote depth is re-emitted as
+/// `> ` prefixes so the reader's quote rendering still applies.
+pub fn decode_flowed(text: &str, delsp: bool) -> String {
+    let mut paras: Vec<(usize, String)> = Vec::new();
+    let mut continues = false;
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let depth = line.chars().take_while(|&c| c == '>').count();
+        let mut rest = &line[depth..];
+        rest = rest.strip_prefix(' ').unwrap_or(rest);
+        // The signature separator is never a soft break.
+        let soft = rest.ends_with(' ') && rest != "-- ";
+        let piece = if soft && delsp { &rest[..rest.len() - 1] } else { rest };
+        match paras.last_mut() {
+            Some((d, p)) if continues && *d == depth => p.push_str(piece),
+            _ => paras.push((depth, piece.to_string())),
+        }
+        continues = soft;
+    }
+    paras
+        .into_iter()
+        .map(|(depth, p)| if depth == 0 { p } else { format!("{} {}", ">".repeat(depth), p) })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// mail-parser synthesizes an HTML body from text/plain; we'd rather render real text.
@@ -247,6 +362,64 @@ mod tests {
         assert!(!out.contains("onclick"));
         assert!(!out.contains("alert"));
         assert!(has_remote(&out));
+    }
+
+    /// FLOWED_IDS=1,2,3 BODIES_DB=/path/bodies.db cargo test -p mail-core real_flowed -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_flowed() {
+        let db = rusqlite::Connection::open_with_flags(
+            std::env::var("BODIES_DB").unwrap(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        for id in std::env::var("FLOWED_IDS").unwrap().split(',') {
+            let raw: Vec<u8> = db.query_row("SELECT raw FROM bodies WHERE message_id=?1", [id], |r| r.get(0)).unwrap();
+            let msg = MessageParser::default().parse(&raw).unwrap();
+            let before = msg.body_text(0).unwrap().into_owned();
+            let after = render(0, &raw, 0).unwrap().text.unwrap();
+            let longest = |s: &str| s.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+            println!(
+                "message {id}: flowed={:?} lines {} -> {}, longest line {} -> {} chars, words equal: {}",
+                flowed_params(&msg),
+                before.lines().count(),
+                after.lines().count(),
+                longest(&before),
+                longest(&after),
+                before.split_whitespace().filter(|w| !w.starts_with('>')).collect::<Vec<_>>()
+                    == after.split_whitespace().filter(|w| !w.starts_with('>')).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn flowed_text() {
+        let src = "This is a long \r\nparagraph.\r\n\r\n> quoted \r\n> text\r\n>> deeper\r\n -- \r\n-- \r\nsig";
+        assert_eq!(
+            decode_flowed(src, false),
+            "This is a long paragraph.\n\n> quoted text\n>> deeper\n-- \n-- \nsig"
+        );
+        assert_eq!(decode_flowed("ab \r\ncd", true), "abcd");
+    }
+
+    #[test]
+    fn message_ids_from_damaged_headers() {
+        let none = HashSet::new();
+        assert_eq!(parse_msg_ids("<a@x> <b@y>", &none), vec!["a@x", "b@y"]);
+        // Prose after the id must not become ids.
+        assert_eq!(parse_msg_ids("<a@x> (Your message of Mon, 3 Mar 1998)", &none), vec!["a@x"]);
+        // Folding/quotes inside brackets.
+        assert_eq!(parse_msg_ids("<\"a b\"@x>", &none), vec!["ab@x"]);
+        // Encoded-word ids.
+        assert_eq!(parse_msg_ids("=?utf-8?q?=3CPR=5Fk=40apache=2Eorg=3E?=", &none), vec!["PR_k@apache.org"]);
+        // An address used as an id is ignored.
+        let me: HashSet<String> = ["bob@example.com".to_string()].into();
+        assert_eq!(parse_msg_ids("<Bob@Example.com> <c@z>", &me), vec!["c@z"]);
+        // Bare ids without brackets.
+        assert_eq!(parse_msg_ids("a@x, b@y", &none), vec!["a@x", "b@y"]);
+        assert!(parse_msg_ids("org", &none).is_empty());
+        // Old stored lists: fragments dropped, real ids kept.
+        assert_eq!(clean_stored_ids("a@x org .org (Your b@y"), vec!["a@x", "b@y"]);
     }
 
     #[test]

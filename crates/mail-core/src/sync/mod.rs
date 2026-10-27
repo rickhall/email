@@ -347,9 +347,10 @@ async fn status_task(shared: Arc<Shared>) {
     }
 }
 
-/// Upper bound on one unit of IMAP work; a server that stops responding mid-command would
-/// otherwise stall a task forever. Hitting it drops the connection and reconnects.
-const STEP_TIMEOUT: Duration = Duration::from_secs(300);
+/// A connection that moves no data for this long during a sync step is considered stalled:
+/// it's dropped and reconnected. Measured as inactivity, not total time, so a big chunk on a
+/// slow link is never cut off while it's still arriving.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Run a connection-owning task forever, reconnecting with exponential backoff.
 async fn supervise<F>(name: &'static str, shared: Arc<Shared>, f: F)
@@ -497,9 +498,9 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 first_in_pass: started.insert(next),
                 report: &report,
             };
-            let step = tokio::time::timeout(STEP_TIMEOUT, shared.strategy.step(&mut conn, &ctx))
-                .await
-                .map_err(|_| anyhow::anyhow!("timed out syncing {}", folder.raw_name))?;
+            let activity = conn.activity.clone();
+            let what = format!("syncing {}", folder.raw_name);
+            let step = imap::stall_timeout(&activity, STALL_TIMEOUT, &what, shared.strategy.step(&mut conn, &ctx)).await?;
             first_step_done = true;
             match step {
                 Ok(Step::Done) => {
@@ -583,7 +584,7 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             unreachable!();
         }
         c.select(&raw).await?;
-        let imap::Connection { session, caps, .. } = c;
+        let imap::Connection { session, caps, activity, .. } = c;
         let mut handle = session.idle();
         handle.init().await?;
         let (wait, stop) = handle.wait_with_timeout(Duration::from_secs(25 * 60));
@@ -593,7 +594,7 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
         };
         drop(stop);
         let session = handle.done().await?;
-        let mut c = imap::Connection { session, caps, selected: Some(raw.clone()) };
+        let mut c = imap::Connection { session, caps, selected: Some(raw.clone()), activity };
 
         if pushed {
             let t = std::time::Instant::now();
@@ -636,9 +637,9 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
         first_in_pass: true,
         report: &report,
     };
-    tokio::time::timeout(STEP_TIMEOUT, shared.strategy.step(conn, &ctx))
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out handling push for {}", folder.raw_name))??;
+    let activity = conn.activity.clone();
+    let what = format!("handling a push for {}", folder.raw_name);
+    imap::stall_timeout(&activity, STALL_TIMEOUT, &what, shared.strategy.step(conn, &ctx)).await??;
     // This folder's counts, now, on this connection (re-SELECT for EXISTS, then count UNSEEN);
     // the other folders catch up in the headers task's next sweep.
     let mb = conn.select(&folder.raw_name).await?;
@@ -692,14 +693,15 @@ async fn download(
 
         // Body-only: messages without attachments come down whole in one FETCH; the rest
         // fetch just their text parts (grouped by identical part lists) and are rebuilt.
-        // Some malformed BODYSTRUCTUREs make the parser wait forever instead of failing, so
-        // this step gets a short timeout; the caller retries such messages with `whole`.
+        // Some malformed BODYSTRUCTUREs make the parser wait forever for data that never comes,
+        // so this step gets a short stall timeout; the caller retries such messages with `whole`.
         let plans: HashMap<u32, Option<partial::Plan>> = if whole {
             HashMap::new()
         } else {
-            tokio::time::timeout(Duration::from_secs(20), conn.fetch_plans(&uids))
+            let activity = conn.activity.clone();
+            imap::stall_timeout(&activity, Duration::from_secs(20), "reading BODYSTRUCTURE", conn.fetch_plans(&uids))
                 .await
-                .map_err(|_| anyhow::anyhow!("BODYSTRUCTURE response unreadable (timed out)"))??
+                .map_err(|_| anyhow::anyhow!("BODYSTRUCTURE response unreadable (stalled)"))??
                 .into_iter()
                 .collect()
         };
@@ -814,7 +816,8 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 }
             }
             let c = conn.as_mut().unwrap();
-            let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let activity = c.activity.clone();
+            let result = imap::stall_timeout(&activity, Duration::from_secs(30), "fetching an opened message", async {
                 // Retry with a whole-message fetch if the body-only path fails.
                 if download(&shared, c, &bodies, focus, true, false).await.is_err() {
                     download(&shared, c, &bodies, focus, true, true).await?;
@@ -822,7 +825,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 store_seen(&shared, c, &seen, focus).await
             })
             .await
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
+            .and_then(|r| r);
             match result {
                 Ok(()) => {
                     if !bodies.is_empty() {
@@ -860,9 +863,10 @@ async fn store_seen(
 
 const BODY_BATCH: usize = 40;
 const BODY_BATCH_BYTES: u64 = 8 * 1024 * 1024;
-/// A batch is at most ~8 MB of text; no progress in this long means the connection stalled
-/// (Gmail throttles by going quiet mid-response), so drop it and reconnect.
-const BODY_TIMEOUT: Duration = Duration::from_secs(60);
+/// No data for this long means the connection stalled (Gmail throttles by going quiet
+/// mid-response), so drop it and reconnect. Inactivity, not total time: a large batch on a
+/// slow link keeps going as long as it's arriving.
+const BODY_STALL: Duration = Duration::from_secs(60);
 const MAX_BODY_FAILURES: u32 = 3;
 
 async fn body_task(shared: Arc<Shared>) -> Result<()> {
@@ -931,9 +935,10 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
             batch.iter().any(|id| failures.contains_key(id))
         };
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(BODY_TIMEOUT, download(&shared, c, &batch, preferred, false, whole))
+        let activity = c.activity.clone();
+        let result = imap::stall_timeout(&activity, BODY_STALL, "downloading bodies", download(&shared, c, &batch, preferred, false, whole))
             .await
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("no progress for {}s; connection stalled", BODY_TIMEOUT.as_secs())));
+            .and_then(|r| r);
         {
             let mut inflight = shared.inflight.lock().unwrap();
             for id in &batch {
@@ -971,7 +976,7 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
 /// Look up a header strategy by name (for the benchmark CLI and settings).
 pub fn strategy_by_name(name: &str, chunk: u32) -> Option<Arc<dyn HeaderSync>> {
     match name {
-        "chunked" => Some(Arc::new(chunked::ChunkedNewestFirst { chunk })),
+        "chunked" => Some(Arc::new(chunked::ChunkedNewestFirst::new(chunk))),
         _ => None,
     }
 }

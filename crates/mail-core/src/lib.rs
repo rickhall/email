@@ -258,6 +258,10 @@ impl Core {
         self.store.list_messages(folder_id, offset, limit)
     }
 
+    pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
+        self.store.message_in_folder(id, folder_id)
+    }
+
     pub fn list_threads(&self, folder_id: i64, scope: ThreadScope, offset: u32, limit: u32) -> Result<ThreadPage> {
         self.store.list_threads(folder_id, scope, offset, limit)
     }

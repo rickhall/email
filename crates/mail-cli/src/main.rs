@@ -47,6 +47,18 @@ enum Cmd {
     },
     /// List available header strategies.
     Strategies,
+    /// Compare the incremental expunge walk with a full UID comparison for one folder, against
+    /// the real server (read-only: EXAMINE). Use a copy of the data directory.
+    ReconcileCheck {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        email: String,
+        #[arg(long, default_value = "[Gmail]/All Mail")]
+        folder: String,
+        #[arg(long, default_value_t = 5000)]
+        chunk: u32,
+    },
     /// Write a stored message's sanitized HTML (what the reader renders) to a file.
     Render {
         /// App data directory (holds mail.db and bodies.db).
@@ -79,6 +91,62 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Probe { email, folder, uid, host } => probe::run(&email, &folder, uid, &host).await,
+        Cmd::ReconcileCheck { data_dir, email, folder, chunk } => {
+            use std::collections::HashSet;
+            let store = mail_core::store::Store::open(&data_dir)?;
+            let account = store.accounts()?.into_iter().find(|a| a.email == email).ok_or_else(|| anyhow!("no account {email}"))?;
+            let f = store.folders(account.id)?.into_iter().find(|f| f.raw_name == folder).ok_or_else(|| anyhow!("no folder {folder}"))?;
+            let local = store.local_uids(f.id)?;
+            let password = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let cfg = mail_core::imap::ServerConfig {
+                host: account.imap_host.clone(),
+                port: account.imap_port,
+                user: email.clone(),
+                credentials: mail_core::imap::Credentials::Password(password),
+            };
+            let mut conn = mail_core::imap::connect(&cfg).await?;
+            let mb = conn.session.examine(&folder).await?;
+            println!("{folder}: server {} messages, local {}", mb.exists, local.len());
+
+            let t = Instant::now();
+            let walked = mail_core::sync::chunked::reconcile_walk(
+                &mut conn,
+                &local,
+                mb.exists,
+                chunk,
+                mail_core::sync::chunked::MAX_WALK_STEPS,
+            )
+            .await?;
+            let fell_back = walked.is_none();
+            let (mut gone, mut missing) = match walked {
+                Some(d) => d,
+                None => {
+                    let server: HashSet<u32> = conn.uid_search_all().await?.into_iter().collect();
+                    let mine: HashSet<u32> = local.iter().copied().collect();
+                    (mine.difference(&server).copied().collect(), server.difference(&mine).copied().collect())
+                }
+            };
+            let walk_time = t.elapsed();
+            if fell_back {
+                println!("walk didn't line up within {} steps; used a full comparison", mail_core::sync::chunked::MAX_WALK_STEPS);
+            }
+            gone.sort();
+            missing.sort();
+
+            let t = Instant::now();
+            let server: HashSet<u32> = conn.uid_search_all().await?.into_iter().collect();
+            let full_time = t.elapsed();
+            let mine: HashSet<u32> = local.iter().copied().collect();
+            let mut fgone: Vec<u32> = mine.difference(&server).copied().collect();
+            let mut fmissing: Vec<u32> = server.difference(&mine).copied().collect();
+            fgone.sort();
+            fmissing.sort();
+            println!("walk: {} gone, {} missing in {:?}", gone.len(), missing.len(), walk_time);
+            println!("full: {} gone, {} missing in {:?}", fgone.len(), fmissing.len(), full_time);
+            println!("agree: {}", gone == fgone && missing == fmissing);
+            conn.logout().await;
+            Ok(())
+        }
         Cmd::Render { data_dir, id, out } => {
             let store = mail_core::store::Store::open(&data_dir)?;
             let raw = store.body(id)?.ok_or_else(|| anyhow!("no body stored for message {id}"))?;
