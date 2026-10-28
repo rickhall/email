@@ -14,6 +14,7 @@ import {
 } from './state';
 import { SearchBar } from './components/SearchBar';
 import { ViewMenuPopover } from './components/ViewMenu';
+import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
 import { Sidebar } from './components/Sidebar';
 import { MessageList, type SearchSpec } from './components/MessageList';
@@ -143,6 +144,7 @@ export function App() {
             <Show when={conversationReader()} fallback={<Reader ref={(el) => (readerEl = el)} />}>
               <ConversationReader ref={(el) => (readerEl = el)} />
             </Show>
+            <AttachmentToast />
           </div>
           <ViewMenuPopover />
           <Show when={showAdd()}>

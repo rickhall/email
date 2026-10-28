@@ -193,29 +193,23 @@ pub fn render(id: i64, raw: &[u8], date: i64) -> Option<MessageDetail> {
     let msg = MessageParser::default().parse(raw)?;
     let (from_name, from_addr) = first_addr(msg.from());
 
-    let mut attachments = Vec::new();
     let mut cid_map: HashMap<String, String> = HashMap::new();
     for part in msg.attachments() {
-        let mime = part
-            .content_type()
-            .map(|ct| match ct.subtype() {
-                Some(sub) => format!("{}/{}", ct.ctype(), sub),
-                None => ct.ctype().to_string(),
-            })
-            .unwrap_or_else(|| "application/octet-stream".into());
-        if let Some(cid) = part.content_id() {
-            if mime.starts_with("image/") {
-                let data = base64::engine::general_purpose::STANDARD.encode(part.contents());
-                cid_map.insert(cid.trim_matches(['<', '>']).to_string(), format!("data:{mime};base64,{data}"));
-                continue;
-            }
+        let mime = part_mime(part);
+        if let (Some(cid), true) = (part.content_id(), is_inline_image(part)) {
+            let data = base64::engine::general_purpose::STANDARD.encode(part.contents());
+            cid_map.insert(cid.trim_matches(['<', '>']).to_string(), format!("data:{mime};base64,{data}"));
         }
-        attachments.push(Attachment {
-            name: part.attachment_name().unwrap_or("attachment").to_string(),
-            mime,
-            size: part.contents().len(),
-        });
     }
+    let attachments: Vec<Attachment> = stored_attachments(&msg)
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let name = attachment_name(part);
+            let mime = part_mime(part);
+            Attachment { index, openable: is_openable(&name), name, mime, size: part.contents().len(), downloaded: true }
+        })
+        .collect();
 
     let html = if msg.html_body_count() > 0 && !is_text_only(&msg) {
         msg.body_html(0).map(|h| sanitize_html(&h, &cid_map))
@@ -280,6 +274,117 @@ pub fn decode_flowed(text: &str, delsp: bool) -> String {
         .map(|(depth, p)| if depth == 0 { p } else { format!("{} {}", ">".repeat(depth), p) })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn part_mime(part: &mail_parser::MessagePart) -> String {
+    part.content_type()
+        .map(|ct| match ct.subtype() {
+            Some(sub) => format!("{}/{}", ct.ctype(), sub),
+            None => ct.ctype().to_string(),
+        })
+        .unwrap_or_else(|| "application/octet-stream".into())
+        .to_ascii_lowercase()
+}
+
+fn attachment_name(part: &mail_parser::MessagePart) -> String {
+    match part.attachment_name() {
+        Some(n) => n.to_string(),
+        None if matches!(part.body, mail_parser::PartType::Message(_)) => "forwarded message.eml".into(),
+        None => "attachment".into(),
+    }
+}
+
+/// The attachments shown for a stored message, in order: everything mail-parser reports as an
+/// attachment except inline images (those are rendered in the body). Shared by the reader
+/// and by extraction so an attachment's index means the same thing in both.
+fn stored_attachments<'a>(msg: &'a mail_parser::Message<'a>) -> Vec<&'a mail_parser::MessagePart<'a>> {
+    msg.attachments().filter(|p| !is_inline_image(p)).collect()
+}
+
+/// Decoded bytes of the `index`-th stored attachment: (name, mime, bytes).
+pub fn stored_attachment(raw: &[u8], index: usize) -> Option<(String, String, Vec<u8>)> {
+    let msg = MessageParser::default().parse(raw)?;
+    let part = *stored_attachments(&msg).get(index)?;
+    Some((attachment_name(part), part_mime(part), part.contents().to_vec()))
+}
+
+/// How many attachments are stored in the raw message (omitted ones are numbered after these).
+pub fn stored_attachment_count(raw: &[u8]) -> usize {
+    MessageParser::default().parse(raw).map(|m| stored_attachments(&m).len()).unwrap_or(0)
+}
+
+/// Executable and script types are saved but never opened directly by the app: opening them
+/// with the system's default handler can run them (e.g. `.command` on macOS, `.desktop` on Linux).
+pub fn is_openable(name: &str) -> bool {
+    const RISKY: &[&str] = &[
+        "exe", "com", "bat", "cmd", "scr", "pif", "msi", "msp", "cpl", "hta", "jar", "js", "jse", "vbs",
+        "vbe", "wsf", "wsh", "ps1", "psm1", "lnk", "reg", "sh", "bash", "zsh", "csh", "command", "tool",
+        "app", "pkg", "mpkg", "run", "bin", "desktop", "appimage", "py", "pl", "rb", "scpt", "workflow",
+        "terminal", "action",
+    ];
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    !RISKY.contains(&ext.as_str())
+}
+
+/// A safe file name for writing to disk: no directories, no hidden/dot names, no control or
+/// reserved characters, bounded length (extension kept).
+pub fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let mut s: String = base
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    s = s.trim().trim_start_matches('.').trim().to_string();
+    if s.chars().count() > 150 {
+        let (stem, ext) = match s.rsplit_once('.') {
+            Some((stem, ext)) if ext.len() <= 10 => (stem.to_string(), format!(".{ext}")),
+            _ => (s.clone(), String::new()),
+        };
+        s = stem.chars().take(150 - ext.chars().count()).collect::<String>() + &ext;
+    }
+    if s.is_empty() { "attachment".into() } else { s }
+}
+
+/// Undo a Content-Transfer-Encoding on a fetched MIME part.
+pub fn decode_transfer(data: &[u8], encoding: Option<&str>) -> Vec<u8> {
+    match encoding.map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("base64") => {
+            let clean: Vec<u8> = data.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(&clean)
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(clean.strip_suffix(b"=").unwrap_or(&clean)))
+                .unwrap_or_else(|_| data.to_vec())
+        }
+        Some("quoted-printable") => decode_qp(data),
+        _ => data.to_vec(),
+    }
+}
+
+fn decode_qp(data: &[u8]) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            b'=' if data.get(i + 1) == Some(&b'\r') && data.get(i + 2) == Some(&b'\n') => i += 3,
+            b'=' if data.get(i + 1) == Some(&b'\n') => i += 2,
+            b'=' => match (data.get(i + 1).copied().and_then(hex), data.get(i + 2).copied().and_then(hex)) {
+                (Some(h), Some(l)) => {
+                    out.push(h << 4 | l);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b'=');
+                    i += 1;
+                }
+            },
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// mail-parser synthesizes an HTML body from text/plain; we'd rather render real text.
@@ -390,6 +495,26 @@ mod tests {
                     == after.split_whitespace().filter(|w| !w.starts_with('>')).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn attachment_helpers() {
+        assert_eq!(decode_transfer(b"aGVs\r\nbG8=", Some("base64")), b"hello");
+        assert_eq!(decode_transfer(b"caf=C3=A9 =\r\nok", Some("quoted-printable")), "café ok".as_bytes());
+        assert_eq!(decode_transfer(b"raw", Some("7bit")), b"raw");
+        assert_eq!(safe_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(safe_file_name(".bashrc"), "bashrc");
+        assert_eq!(safe_file_name("a\u{0}b?.pdf"), "a_b_.pdf");
+        assert_eq!(safe_file_name(""), "attachment");
+        assert!(is_openable("Report.PDF") && !is_openable("setup.exe") && !is_openable("run.command"));
+
+        let raw = b"From: a@b.c\r\nSubject: t\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nhi\r\n--X\r\nContent-Type: application/pdf; name=\"r.pdf\"\r\nContent-Disposition: attachment; filename=\"r.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n--X--\r\n";
+        assert_eq!(stored_attachment_count(raw), 1);
+        let (name, mime, bytes) = stored_attachment(raw, 0).unwrap();
+        assert_eq!((name.as_str(), mime.as_str(), bytes.as_slice()), ("r.pdf", "application/pdf", &b"%PDF-"[..]));
+        let d = render(1, raw, 0).unwrap();
+        assert_eq!(d.attachments.len(), 1);
+        assert!(d.attachments[0].downloaded && d.attachments[0].openable && d.attachments[0].index == 0);
     }
 
     #[test]

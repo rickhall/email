@@ -159,14 +159,23 @@ const RECEIPT_SUBJECTS = [
   'Receipt for your purchase',
 ];
 
-const ATTACHMENTS: Attachment[] = [
+type AttachmentSpec = Pick<Attachment, 'name' | 'mime' | 'size'>;
+const ATTACHMENTS: AttachmentSpec[] = [
   { name: 'Q3-roadmap.pdf', mime: 'application/pdf', size: 482_113 },
   { name: 'IMG_2041.jpg', mime: 'image/jpeg', size: 2_841_002 },
   { name: 'budget-2027.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: 61_440 },
   { name: 'contract-v4.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 118_272 },
   { name: 'wireframes.fig', mime: 'application/octet-stream', size: 9_420_800 },
   { name: 'invoice-2291.pdf', mime: 'application/pdf', size: 88_120 },
+  { name: 'setup.exe', mime: 'application/x-msdownload', size: 14_680_064 },
 ];
+const LONG_ATTACHMENTS: AttachmentSpec[] = [
+  { name: 'Final-Board-Presentation-Q4-2026-revised-with-comments-v7.pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', size: 18_350_080 },
+  { name: 'Scan_2026-10-14_signed_lease_agreement_all_pages.pdf', mime: 'application/pdf', size: 3_145_728 },
+  { name: 'photo_from_the_offsite_dinner_by_the_harbour_lights.jpeg', mime: 'image/jpeg', size: 4_718_592 },
+  { name: 'customer-interviews-transcripts-batch-03-anonymised.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 287_744 },
+];
+const NOT_OPENABLE = /\.(exe|msi|bat|cmd|com|scr|ps1|sh|app|jar|vbs|js)$/i;
 
 // ---------------------------------------------------------------- bodies
 
@@ -611,8 +620,15 @@ export function createMockBackend(): Backend {
     };
     const attachments: Attachment[] = [];
     if (hasAttachments) {
-      const k = 1 + Math.floor(rnd() * 3);
-      for (let i = 0; i < k; i++) attachments.push(pick(rnd, ATTACHMENTS));
+      // Mostly 1–3; some long lists (8–11) with long names to exercise truncation.
+      const many = rnd() < 0.15;
+      const k = many ? 8 + Math.floor(rnd() * 4) : 1 + Math.floor(rnd() * 3);
+      for (let i = 0; i < k; i++) {
+        let spec = many && i % 2 === 0 ? pick(rnd, LONG_ATTACHMENTS) : pick(rnd, ATTACHMENTS);
+        // Distinct names within one message (pools are small; suffix repeats).
+        if (attachments.some((x) => x.name === spec.name)) spec = { ...spec, name: spec.name.replace(/(\.[^.]+)$/, `-${i + 1}$1`) };
+        attachments.push({ ...spec, index: i, downloaded: rnd() < 0.5, openable: !NOT_OPENABLE.test(spec.name) });
+      }
     }
     meta.set(id, { kind, seed: Math.floor(rnd() * 1e9), accountId: folder.accountId, attachments, cc: rnd() < 0.3, threadId: id });
     // Most bodies are already local; ~25% must be "downloaded" on demand.
@@ -919,7 +935,7 @@ export function createMockBackend(): Backend {
       date: m.date,
       html,
       text,
-      attachments: md?.attachments ?? [],
+      attachments: (md?.attachments ?? []).map((a) => ({ ...a })),
       hasRemoteContent,
       remoteAllowed: remoteAllowed.has(m.id),
     };
@@ -1048,6 +1064,18 @@ export function createMockBackend(): Backend {
     setTimeout(() => ms.forEach((m) => moveMessage(m, to)), 3000);
   }
 
+  // ---- attachments: not-downloaded parts take ~700ms to fetch from the "server"
+  const savedNames = new Map<string, number>();
+  async function fetchAttachment(messageId: number, index: number): Promise<Attachment> {
+    const a = meta.get(messageId)?.attachments.find((x) => x.index === index);
+    if (!a) throw 'Attachment not found';
+    if (!a.downloaded) {
+      await sleep(700);
+      a.downloaded = true;
+    } else await sleep(60);
+    return a;
+  }
+
   const latency = () => sleep(8 + Math.random() * 25);
 
   const handlers: { [K in CommandName]: (args: CommandMap[K]['args']) => Promise<CommandMap[K]['ret']> } = {
@@ -1171,6 +1199,37 @@ export function createMockBackend(): Backend {
       await sleep(3);
       if (allow) remoteAllowed.add(id);
       else remoteAllowed.delete(id);
+    },
+    async open_attachment({ messageId, index }) {
+      const a = await fetchAttachment(messageId, index);
+      if (!a.openable) throw `${a.name} can't be opened directly — save it instead`;
+      await sleep(120);
+    },
+    async save_attachment({ messageId, index }) {
+      const a = await fetchAttachment(messageId, index);
+      await sleep(80);
+      const dot = a.name.lastIndexOf('.');
+      const n = (savedNames.get(a.name) ?? 0) + 1;
+      savedNames.set(a.name, n);
+      const name = n === 1 ? a.name : `${a.name.slice(0, dot)} (${n - 1})${a.name.slice(dot)}`;
+      return `/home/user/Downloads/${name}`;
+    },
+    async save_all_attachments({ messageId }) {
+      const m = byId.get(messageId);
+      const list = meta.get(messageId)?.attachments ?? [];
+      if (!m || list.length === 0) throw 'This message has no attachments';
+      await sleep(1000);
+      return list.map((a) => {
+        a.downloaded = true;
+        const dot = a.name.lastIndexOf('.');
+        const n = (savedNames.get(a.name) ?? 0) + 1;
+        savedNames.set(a.name, n);
+        const name = n === 1 || dot < 0 ? a.name : `${a.name.slice(0, dot)} (${n - 1})${a.name.slice(dot)}`;
+        return `/home/user/Downloads/${name}`;
+      });
+    },
+    async reveal_path() {
+      await sleep(5);
     },
     async message_in_folder({ id, folderId }) {
       await sleep(3);

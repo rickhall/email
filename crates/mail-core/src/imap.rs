@@ -479,6 +479,43 @@ impl Connection {
             .collect())
     }
 
+    /// Download one attachment that the body-only download left on the server (in the selected
+    /// folder), decoded. `section`/`encoding` come from the stored `OmittedPart`; when missing
+    /// (stored before they were recorded) they're recovered from BODYSTRUCTURE by `ordinal`.
+    pub async fn fetch_omitted_part(
+        &mut self,
+        uid: u32,
+        ordinal: usize,
+        section: Option<&str>,
+        encoding: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let (section, encoding) = match section {
+            Some(s) => (s.to_string(), encoding.map(str::to_string)),
+            None => {
+                let omitted = self
+                    .fetch_plans(&[uid])
+                    .await?
+                    .into_iter()
+                    .find(|(u, _)| *u == uid)
+                    .and_then(|(_, p)| p)
+                    .map(|p| p.omitted)
+                    .unwrap_or_default();
+                let part = omitted
+                    .get(ordinal)
+                    .ok_or_else(|| anyhow!("The attachment wasn't found in the message on the server."))?;
+                (part.section.clone().unwrap_or_else(|| "1".into()), part.encoding.clone())
+            }
+        };
+        let path: Vec<u32> = section.split('.').filter_map(|n| n.parse().ok()).collect();
+        let fetches = self.fetch_items(&[uid], &format!("(UID BODY.PEEK[{section}])")).await?;
+        let data = fetches
+            .iter()
+            .find(|f| f.uid == Some(uid))
+            .and_then(|f| f.section(&imap_proto::SectionPath::Part(path.clone(), None)))
+            .ok_or_else(|| anyhow!("The server returned no data for this attachment."))?;
+        Ok(mime::decode_transfer(data, encoding.as_deref()))
+    }
+
     /// Fetch the given section items for messages sharing one plan shape.
     pub async fn fetch_items(&mut self, uids: &[u32], items: &str) -> Result<Vec<Fetch>> {
         Ok(self.session.uid_fetch(uid_set(uids), items).await?.try_collect().await?)

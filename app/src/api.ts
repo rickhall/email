@@ -104,6 +104,14 @@ export const api = {
   /** Is message `id` still in `folderId` (null = still exists at all)? */
   messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
     call('message_in_folder', { id, folderId }),
+  openAttachment: (messageId: number, index: number): Promise<void> =>
+    call('open_attachment', { messageId, index }),
+  /** Returns the absolute path written in Downloads. */
+  saveAttachment: (messageId: number, index: number): Promise<string> =>
+    call('save_attachment', { messageId, index }),
+  /** Saves every attachment into a new Downloads folder; returns its path. */
+  saveAllAttachments: (messageId: number): Promise<string[]> => call('save_all_attachments', { messageId }),
+  revealPath: (path: string): Promise<void> => call('reveal_path', { path }),
   setRead: (id: number, read: boolean): Promise<void> => call('set_read', { id, read }),
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
   updatePassword: (accountId: number, password: string): Promise<void> =>

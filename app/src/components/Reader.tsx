@@ -1,10 +1,12 @@
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from 'solid-js';
 import { api, errorMessage, type Addr, type Attachment, type MessageDetail } from '../api';
+import { AttachmentControl } from './Attachments';
+export { AttachmentControl };
 import { analyzePlain, collapseHtmlQuotes, QUOTE_FRAME_CSS, type QNode } from '../lib/quotes';
 import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } from '../lib/body';
-import { avatarColor, fmtSize, initials, linkify, longDate } from '../lib/format';
+import { avatarColor, initials, linkify, longDate } from '../lib/format';
 import { selectedMessageId, selectedSummary } from '../state';
-import { FileIcon, ImageIcon, MailIcon, PaperclipIcon } from './Icons';
+import { ImageIcon, MailIcon, PaperclipIcon } from './Icons';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -95,24 +97,6 @@ export function AddrList(props: { label: string; list: Addr[] }) {
         </For>
       </div>
     </Show>
-  );
-}
-
-export function AttachmentChip(props: { a: Attachment }) {
-  const isImage = () => props.a.mime.startsWith('image/');
-  const ext = () => {
-    const m = /\.([a-z0-9]{1,5})$/i.exec(props.a.name);
-    return m?.[1]?.toUpperCase() ?? '';
-  };
-  return (
-    <div class="chip" title={`${props.a.name} · ${props.a.mime}`}>
-      <span class="chip-icon">{isImage() ? <ImageIcon /> : <FileIcon />}</span>
-      <span class="chip-name">{props.a.name}</span>
-      <span class="chip-meta">
-        {ext() ? `${ext()} · ` : ''}
-        {fmtSize(props.a.size)}
-      </span>
-    </div>
   );
 }
 
@@ -364,15 +348,15 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                     <AddrList label="Cc" list={h().cc} />
                   </div>
                 </div>
+                {/* Slot reserved whenever the message has attachments (known from the list row). */}
+                <Show when={h().attachments.length > 0 || selectedSummary()?.hasAttachments}>
+                  <div class="hdr-att">
+                    <Show when={h().attachments.length > 0} fallback={<span class="att-pill-ph" />}>
+                      <AttachmentControl messageId={selectedMessageId()!} list={h().attachments} />
+                    </Show>
+                  </div>
+                </Show>
               </div>
-              <Show when={h().attachments.length > 0}>
-                <div class="chips">
-                  <span class="chips-label">
-                    <PaperclipIcon size={13} /> {h().attachments.length}
-                  </span>
-                  <For each={h().attachments}>{(a) => <AttachmentChip a={a} />}</For>
-                </div>
-              </Show>
             </div>
             <Show when={ready()?.d.hasRemoteContent && !ready()?.remote && !allowRemote()}>
               <div class="remote-banner">

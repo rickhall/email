@@ -258,6 +258,61 @@ impl Core {
         self.store.list_messages(folder_id, offset, limit)
     }
 
+    /// An attachment's (name, mime, bytes): from the stored message, the attachment cache, or
+    /// (for attachments omitted from the body download) fetched from the server and cached.
+    pub async fn attachment(&self, message_id: i64, index: usize) -> Result<(String, String, Vec<u8>)> {
+        let raw = self
+            .store
+            .body(message_id)?
+            .ok_or_else(|| anyhow!("This message hasn't been downloaded yet."))?;
+        let stored = mime::stored_attachment_count(&raw);
+        if index < stored {
+            return mime::stored_attachment(&raw, index).ok_or_else(|| anyhow!("attachment not found"));
+        }
+        let omitted: Vec<partial::OmittedPart> = self
+            .store
+            .omitted(message_id)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+        let ordinal = index - stored;
+        let part = omitted.get(ordinal).ok_or_else(|| anyhow!("attachment not found"))?;
+        if let Some(data) = self.store.cached_attachment(message_id, index)? {
+            return Ok((part.name.clone(), part.mime.clone(), data));
+        }
+        let account_id = self.store.message_account(message_id)?.ok_or_else(|| anyhow!("no such message"))?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let req = sync::PartRequest {
+            message_id,
+            ordinal,
+            section: part.section.clone(),
+            encoding: part.encoding.clone(),
+            reply: tx,
+        };
+        match self.running.lock().unwrap().get(&account_id) {
+            Some(s) => s.fetch_part(req),
+            None => return Err(anyhow!("This account isn't connected.")),
+        }
+        let data = rx.await.map_err(|_| anyhow!("download was cancelled"))??;
+        self.store.cache_attachment(message_id, index, &data)?;
+        Ok((part.name.clone(), part.mime.clone(), data))
+    }
+
+    /// Number of attachments (stored + omitted) and the message subject, for "save all".
+    pub fn attachment_summary(&self, message_id: i64) -> Result<(usize, String)> {
+        let raw = self.store.body(message_id)?.ok_or_else(|| anyhow!("This message hasn't been downloaded yet."))?;
+        let stored = mime::stored_attachment_count(&raw);
+        let omitted: Vec<partial::OmittedPart> = self
+            .store
+            .omitted(message_id)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
+        let subject = mail_parser::MessageParser::default()
+            .parse_headers(&raw)
+            .and_then(|m| m.subject().map(str::to_string))
+            .unwrap_or_default();
+        Ok((stored + omitted.len(), subject))
+    }
+
     pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
         self.store.message_in_folder(id, folder_id)
     }
@@ -290,12 +345,19 @@ impl Core {
                 if let Some(d) = detail.as_mut() {
                     d.remote_allowed = self.store.allow_remote(id)?;
                 }
-                // Attachments not downloaded yet are still listed.
+                // Attachments not downloaded yet are still listed, numbered after the stored ones.
                 if let (Some(d), Some(json)) = (detail.as_mut(), self.store.omitted(id)?) {
                     let omitted: Vec<partial::OmittedPart> = serde_json::from_str(&json).unwrap_or_default();
-                    d.attachments.extend(
-                        omitted.into_iter().map(|o| Attachment { name: o.name, mime: o.mime, size: o.size }),
-                    );
+                    let first = d.attachments.len();
+                    let cached = self.store.cached_attachment_indices(id)?;
+                    d.attachments.extend(omitted.into_iter().enumerate().map(|(k, o)| Attachment {
+                        index: first + k,
+                        openable: mime::is_openable(&o.name),
+                        downloaded: cached.contains(&(first + k)),
+                        name: o.name,
+                        mime: o.mime,
+                        size: o.size,
+                    }));
                 }
                 Ok(detail)
             }

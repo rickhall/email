@@ -28,6 +28,7 @@ Data lives in `~/.local/share/dev.mailclient.desktop/` on Linux (`~/Library/Appl
 - **Conversations:** grouped by Message-ID / In-Reply-To / References (no subject matching), across folders. Only `<…>`-delimited ids count (encoded-word ids are decoded; prose and ids that are really addresses are ignored), so damaged headers can't glue unrelated conversations together. By default a conversation shows only the current folder's messages; the View menu in the message list switches the app-wide default to *All mail* and/or *Include Trash*, and each conversation offers a temporary "Show N more messages in other folders / in Trash".
 - **Quick search** (`/` or Ctrl+F): SQLite FTS5 over sender, recipients and subject, prefix-matched as you type. Syntax: `"phrase"`, `from:`, `to:`, `subject:`, `-exclude`. Scope is the whole account or the current folder; Sender / Recipients / Subject chips limit plain words.
 - **Reader:** sanitized HTML in a sandboxed iframe; remote images blocked until "Load images", which is remembered per message. Opening a message marks it read. `format=flowed` plain text is reflowed (RFC 3676). Quoted replies get a bar per level (HTML `blockquote` and plain-text `>` lines alike). Trailing quoted history collapses behind "Show quoted text" only when it's safe: exactly one quote, nothing written after it, text before it, and no Outlook-style history in the message itself — inline and bottom-posted replies never collapse (`app/src/lib/quotes.ts`; `node app/scripts/quotes-selfcheck.mjs` checks the plain-text rules).
+- **Attachments:** a compact pill in each message header (`📎 N · size`): with one attachment, click to open in the default app and ⤓ to save; with several, click for a list with per-file Open/Save and ⤓ to save all. Files go straight into Downloads (`name (1).ext` if taken), with "Show in folder". Attachments left out of the body download are fetched on demand (just that MIME part, on the interactive connection) and cached in `bodies.db`. Executable and script types are saved but never opened directly; file names are sanitized.
 - **Sync status:** one fixed summary row at the bottom of the sidebar, with per-account details in a popover. Nothing in the folder tree or headers moves because of background activity.
 - **Window:** size (and position, where the platform allows) is restored at launch, in logical units so GNOME fractional scaling works.
 
@@ -41,6 +42,8 @@ MAIL_PASSWORD='xxxx xxxx xxxx xxxx' cargo run --release -p mail-cli --bin mailsy
 ```
 
 `mailsync reconcile-check --data-dir <copy of app data dir> --email you@example.com [--folder NAME]` compares the expunge walk with a full UID comparison against the server (read-only `EXAMINE`), with timings.
+
+`mailsync fetch-part --email you@example.com --uid N [--ordinal K] [--folder NAME] --out file` downloads one omitted attachment the way the app does (read-only `EXAMINE`).
 
 `mailsync render --data-dir <app data dir> --id N --out file.html` writes a stored message's sanitized HTML (what the reader renders), for diagnosing display issues.
 

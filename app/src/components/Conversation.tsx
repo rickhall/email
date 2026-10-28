@@ -13,7 +13,7 @@ import {
   selectThread,
 } from '../state';
 import { ImageIcon, PaperclipIcon } from './Icons';
-import { AddrList, AttachmentChip, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
+import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -147,22 +147,24 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; on
           </div>
         </div>
         <span class="cm-head-right">
-          <Show when={props.folderTag}>
-            <span class="folder-tag cm-folder">{props.folderTag}</span>
+          <span class="cm-head-date">
+            <Show when={props.folderTag}>
+              <span class="folder-tag cm-folder">{props.folderTag}</span>
+            </Show>
+            <time class="reader-date" dateTime={new Date(props.m.date * 1000).toISOString()}>
+              {longDate(props.m.date)}
+            </time>
+          </span>
+          {/* Second row, slot reserved from the summary so nothing shifts when the detail lands. */}
+          <Show when={props.m.hasAttachments || (detail()?.attachments.length ?? 0) > 0}>
+            <span class="hdr-att">
+              <Show when={(detail()?.attachments.length ?? 0) > 0} fallback={<span class="att-pill-ph" />}>
+                <AttachmentControl messageId={id} list={detail()!.attachments} />
+              </Show>
+            </span>
           </Show>
-          <time class="reader-date" dateTime={new Date(props.m.date * 1000).toISOString()}>
-            {longDate(props.m.date)}
-          </time>
         </span>
       </header>
-      <Show when={(detail()?.attachments.length ?? 0) > 0}>
-        <div class="chips cm-chips">
-          <span class="chips-label">
-            <PaperclipIcon size={13} /> {detail()!.attachments.length}
-          </span>
-          <For each={detail()!.attachments}>{(a) => <AttachmentChip a={a} />}</For>
-        </div>
-      </Show>
       <Show when={body.shown()?.d.hasRemoteContent && !body.shown()?.remote}>
         <div class="remote-banner cm-banner">
           <ImageIcon size={14} />

@@ -196,10 +196,17 @@ pub struct Addr {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Attachment {
+    /// Position in the message's attachment list: stored attachments first, then omitted ones.
+    pub index: usize,
     pub name: String,
     pub mime: String,
     pub size: usize,
+    /// Available locally (in the stored message or the attachment cache).
+    pub downloaded: bool,
+    /// False for executable/script types, which are only saved, never opened directly.
+    pub openable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

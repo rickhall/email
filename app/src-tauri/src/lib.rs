@@ -127,6 +127,103 @@ async fn message_in_folder(core: State<'_, Arc<Core>>, id: i64, folder_id: Optio
     core.message_in_folder(id, folder_id).map_err(err)
 }
 
+/// Where opened attachments are written before handing them to the default app. Cleared at
+/// startup; files there are never marked executable.
+fn opened_attachments_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path().app_cache_dir().map(|d| d.join("attachments")).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_attachment(
+    app: tauri::AppHandle,
+    core: State<'_, Arc<Core>>,
+    message_id: i64,
+    index: usize,
+) -> Res<()> {
+    let (name, _mime, data) = core.attachment(message_id, index).await.map_err(err)?;
+    if !mail_core::mime::is_openable(&name) {
+        return Err("This file type can't be opened directly. Save it, and open it yourself only if you trust it.".into());
+    }
+    let dir = opened_attachments_dir(&app)?.join(format!("{message_id}-{index}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(mail_core::mime::safe_file_name(&name));
+    std::fs::write(&path, &data).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| format!("Couldn't open {name}: {e}"))
+}
+
+/// Save to the Downloads folder without overwriting: `name (1).ext`, `name (2).ext`, ...
+#[tauri::command]
+async fn save_attachment(
+    app: tauri::AppHandle,
+    core: State<'_, Arc<Core>>,
+    message_id: i64,
+    index: usize,
+) -> Res<String> {
+    let (name, _mime, data) = core.attachment(message_id, index).await.map_err(err)?;
+    let path = write_unique(&downloads_dir(&app)?, &name, &data)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Write `data` as `name` in `dir` without overwriting: `name (1).ext`, `name (2).ext`, ...
+fn write_unique(dir: &std::path::Path, name: &str, data: &[u8]) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+    let safe = mail_core::mime::safe_file_name(name);
+    let (stem, ext) = match safe.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (safe.clone(), String::new()),
+    };
+    for n in 0..1000 {
+        let candidate = if n == 0 { safe.clone() } else { format!("{stem} ({n}){ext}") };
+        let path = dir.join(&candidate);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(data).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Couldn't save {}: {e}", path.display())),
+        }
+    }
+    Err(format!("Couldn't find a free file name for {name}."))
+}
+
+fn downloads_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(|e| format!("No Downloads folder: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Save every attachment directly in Downloads (`name (1).ext` if taken); returns the paths.
+#[tauri::command]
+async fn save_all_attachments(app: tauri::AppHandle, core: State<'_, Arc<Core>>, message_id: i64) -> Res<Vec<String>> {
+    let (count, _subject) = core.attachment_summary(message_id).map_err(err)?;
+    if count == 0 {
+        return Err("This message has no attachments.".into());
+    }
+    let downloads = downloads_dir(&app)?;
+    let mut paths = Vec::with_capacity(count);
+    for index in 0..count {
+        let (name, _mime, data) = core.attachment(message_id, index).await.map_err(err)?;
+        paths.push(write_unique(&downloads, &name, &data)?.to_string_lossy().into_owned());
+    }
+    Ok(paths)
+}
+
+/// Show a saved or opened attachment in the file manager (only files this app wrote).
+#[tauri::command]
+async fn reveal_path(app: tauri::AppHandle, path: String) -> Res<()> {
+    let p = std::path::PathBuf::from(&path);
+    let allowed = [app.path().download_dir().ok(), app.path().home_dir().ok(), opened_attachments_dir(&app).ok()];
+    if !(p.is_file() || p.is_dir()) || !allowed.iter().flatten().any(|d| p.starts_with(d)) {
+        return Err("That file isn't available.".into());
+    }
+    app.opener().reveal_item_in_dir(&p).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_sync_status(core: State<'_, Arc<Core>>) -> Res<Vec<SyncStatus>> {
     Ok(core.sync_status())
@@ -239,6 +336,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             create_main_window(app)?;
+            if let Ok(dir) = opened_attachments_dir(app.handle()) {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             let dir = app.path().app_data_dir()?;
             let core = Arc::new(Core::open(&dir, Secrets::Keyring)?);
             tracing::info!("data directory: {}", dir.display());
@@ -268,6 +368,10 @@ pub fn run() {
             update_password,
             search_messages,
             message_in_folder,
+            open_attachment,
+            save_attachment,
+            save_all_attachments,
+            reveal_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

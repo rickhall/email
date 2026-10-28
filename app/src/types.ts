@@ -53,9 +53,16 @@ export interface Addr {
 }
 
 export interface Attachment {
+  /** stable position in this message's attachment list (pass back to commands) */
+  index: number;
   name: string;
   mime: string;
+  /** bytes (estimate when not downloaded yet) */
   size: number;
+  /** available locally; otherwise Open/Save fetch it from the server first */
+  downloaded: boolean;
+  /** false for executable/script types: Save only */
+  openable: boolean;
 }
 
 export interface MessageDetail {
@@ -186,6 +193,10 @@ export interface CommandMap {
   };
   get_sync_status: { args: undefined; ret: SyncStatus[] };
   set_read: { args: { id: number; read: boolean }; ret: void };
+  open_attachment: { args: { messageId: number; index: number }; ret: void };
+  save_attachment: { args: { messageId: number; index: number }; ret: string };
+  save_all_attachments: { args: { messageId: number }; ret: string[] };
+  reveal_path: { args: { path: string }; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

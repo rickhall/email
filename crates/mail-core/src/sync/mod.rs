@@ -219,6 +219,17 @@ impl Shared {
 enum Job {
     Body(i64),
     Seen { id: i64, seen: bool },
+    Part(PartRequest),
+}
+
+/// Download one omitted attachment (a single MIME part) of a stored message.
+pub struct PartRequest {
+    pub message_id: i64,
+    /// Position among the message's omitted attachments.
+    pub ordinal: usize,
+    pub section: Option<String>,
+    pub encoding: Option<String>,
+    pub reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
 }
 
 /// Handle to a running account sync.
@@ -288,6 +299,13 @@ impl AccountSync {
     /// Fetch this message's body ahead of everything else.
     pub fn request_body(&self, message_id: i64) {
         let _ = self.urgent_tx.send(Job::Body(message_id));
+    }
+
+    /// Fetch an omitted attachment on the interactive connection.
+    pub fn fetch_part(&self, req: PartRequest) {
+        if let Err(mpsc::error::SendError(Job::Part(req))) = self.urgent_tx.send(Job::Part(req)) {
+            let _ = req.reply.send(Err(anyhow::anyhow!("account is not syncing")));
+        }
     }
 
     /// Push a \\Seen change to the server (the local store is updated by the caller).
@@ -790,6 +808,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
         }
         let mut bodies = Vec::new();
         let mut seen = Vec::new();
+        let mut parts = Vec::new();
         for j in jobs {
             match j {
                 // Bodies may have landed via a background worker in the meantime.
@@ -798,13 +817,12 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 }
                 Job::Body(id) => bodies.push(id),
                 Job::Seen { id, seen: s } => seen.push((id, s)),
+                Job::Part(p) => parts.push(p),
             }
         }
-        if bodies.is_empty() && seen.is_empty() {
-            continue;
-        }
         let focus = *shared.focus.borrow();
-        for attempt in 0..2 {
+        let pending_messages = !(bodies.is_empty() && seen.is_empty());
+        for attempt in 0..(if pending_messages { 2 } else { 0 }) {
             let started = std::time::Instant::now();
             if conn.is_none() {
                 match shared.connect().await {
@@ -840,7 +858,45 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 }
             }
         }
+        for part in parts {
+            let mut result = Err(anyhow::anyhow!("couldn't connect to the server"));
+            for attempt in 0..2 {
+                if conn.is_none() {
+                    match shared.connect().await {
+                        Ok(c) => conn = Some(c),
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                let c = conn.as_mut().unwrap();
+                let activity = c.activity.clone();
+                result = imap::stall_timeout(&activity, Duration::from_secs(60), "downloading an attachment", fetch_part(&shared, c, &part, focus))
+                    .await
+                    .and_then(|r| r);
+                match &result {
+                    Ok(_) => break,
+                    Err(e) => {
+                        tracing::debug!(attempt, "attachment fetch failed: {e:#}");
+                        conn = None;
+                    }
+                }
+            }
+            let _ = part.reply.send(result);
+        }
     }
+}
+
+/// Fetch one omitted attachment: its section is recorded when the body was downloaded, or
+/// recovered from BODYSTRUCTURE for entries stored before that.
+async fn fetch_part(shared: &Shared, conn: &mut Connection, req: &PartRequest, preferred: Option<i64>) -> Result<Vec<u8>> {
+    let loc = shared
+        .store
+        .body_location(req.message_id, preferred)?
+        .ok_or_else(|| anyhow::anyhow!("This message is no longer on the server."))?;
+    conn.ensure_selected(&loc.raw_name).await?;
+    conn.fetch_omitted_part(loc.uid, req.ordinal, req.section.as_deref(), req.encoding.as_deref()).await
 }
 
 async fn store_seen(

@@ -19,6 +19,13 @@ pub struct OmittedPart {
     pub mime: String,
     /// Decoded size estimate in bytes.
     pub size: usize,
+    /// IMAP section (e.g. "2" or "1.3") to fetch it later; absent in entries from before
+    /// attachments could be downloaded (then BODYSTRUCTURE is fetched again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// Content-Transfer-Encoding to undo after fetching ("base64", "quoted-printable", ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,7 +116,7 @@ fn walk(bs: &BodyStructure, path: &[u32], omitted: &mut Vec<OmittedPart>) -> Opt
         }
         BodyStructure::Text { common, other, .. } => {
             if is_attachment(common) {
-                omitted.push(describe(common, other, "attachment.txt"));
+                omitted.push(describe(common, other, path, "attachment.txt"));
                 None
             } else {
                 Some(Node::Leaf { path: path.to_vec() })
@@ -123,12 +130,12 @@ fn walk(bs: &BodyStructure, path: &[u32], omitted: &mut Vec<OmittedPart>) -> Opt
             if inline_image {
                 Some(Node::Leaf { path: path.to_vec() })
             } else {
-                omitted.push(describe(common, other, "attachment"));
+                omitted.push(describe(common, other, path, "attachment"));
                 None
             }
         }
         BodyStructure::Message { common, other, .. } => {
-            omitted.push(describe(common, other, "forwarded message.eml"));
+            omitted.push(describe(common, other, path, "forwarded message.eml"));
             None
         }
     }
@@ -141,6 +148,7 @@ fn is_attachment(common: &imap_proto::BodyContentCommon) -> bool {
 fn describe(
     common: &imap_proto::BodyContentCommon,
     other: &imap_proto::BodyContentSinglePart,
+    path: &[u32],
     fallback: &str,
 ) -> OmittedPart {
     let name = common
@@ -154,6 +162,18 @@ fn describe(
         name,
         mime: format!("{}/{}", common.ty.ty, common.ty.subtype).to_ascii_lowercase(),
         size: decoded_size(other.octets, &other.transfer_encoding),
+        section: Some(section(path)),
+        encoding: Some(
+            match &other.transfer_encoding {
+                ContentEncoding::SevenBit => "7bit",
+                ContentEncoding::EightBit => "8bit",
+                ContentEncoding::Binary => "binary",
+                ContentEncoding::Base64 => "base64",
+                ContentEncoding::QuotedPrintable => "quoted-printable",
+                ContentEncoding::Other(o) => o.as_ref(),
+            }
+            .to_ascii_lowercase(),
+        ),
     }
 }
 
@@ -271,7 +291,7 @@ mod tests {
                     children: vec![Node::Leaf { path: vec![1, 1] }, Node::Leaf { path: vec![1, 2] }],
                 }],
             }),
-            omitted: vec![OmittedPart { name: "a.pdf".into(), mime: "application/pdf".into(), size: 10 }],
+            omitted: vec![OmittedPart { name: "a.pdf".into(), mime: "application/pdf".into(), size: 10, section: None, encoding: None }],
         };
         assert_eq!(
             plan.fetch_items(),

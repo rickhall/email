@@ -111,6 +111,16 @@ CREATE TABLE IF NOT EXISTS stash (
 );
 "#;
 
+/// Attachments fetched on demand (omitted from the stored body), so opening one again is
+/// instant and works offline. Keyed by the attachment's index in the message.
+const ATTACHMENT_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS attachment_cache (
+    message_id INTEGER NOT NULL,
+    idx        INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    PRIMARY KEY (message_id, idx)
+);";
+
 /// How long a stashed body waits for its message to reappear in another folder.
 const STASH_TTL_SECS: i64 = 7 * 24 * 3600;
 
@@ -461,6 +471,7 @@ impl Store {
         }
         let bodies = open(&dir.join("bodies.db"))?;
         bodies.execute_batch(BODY_SCHEMA)?;
+        bodies.execute_batch(ATTACHMENT_SCHEMA)?;
         bodies.execute(
             "DELETE FROM stash WHERE created < unixepoch() - ?1",
             [STASH_TTL_SECS],
@@ -545,6 +556,7 @@ impl Store {
         tx.execute("DELETE FROM stash WHERE account_id=?1", [account_id])?;
         for id in ids {
             tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+            tx.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
         }
         tx.commit()?;
         Ok(())
@@ -930,6 +942,7 @@ impl Store {
                     )?;
                 }
                 tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+                tx.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
             }
             tx.commit()?;
         }
@@ -1272,6 +1285,29 @@ impl Store {
 
     pub fn set_allow_remote(&self, id: i64, allow: bool) -> Result<()> {
         self.db().execute("UPDATE messages SET allow_remote=?2 WHERE id=?1", params![id, allow])?;
+        Ok(())
+    }
+
+    pub fn cached_attachment(&self, id: i64, idx: usize) -> Result<Option<Vec<u8>>> {
+        let bodies = self.bodies_read.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(bodies
+            .query_row("SELECT data FROM attachment_cache WHERE message_id=?1 AND idx=?2", params![id, idx as i64], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn cached_attachment_indices(&self, id: i64) -> Result<Vec<usize>> {
+        let bodies = self.bodies_read.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = bodies.prepare_cached("SELECT idx FROM attachment_cache WHERE message_id=?1")?;
+        let rows = stmt.query_map([id], |r| r.get::<_, i64>(0).map(|i| i as usize))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn cache_attachment(&self, id: i64, idx: usize, data: &[u8]) -> Result<()> {
+        let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
+        bodies.execute(
+            "INSERT OR REPLACE INTO attachment_cache (message_id, idx, data) VALUES (?1, ?2, ?3)",
+            params![id, idx as i64, data],
+        )?;
         Ok(())
     }
 

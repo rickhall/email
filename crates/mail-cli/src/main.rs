@@ -59,6 +59,23 @@ enum Cmd {
         #[arg(long, default_value_t = 5000)]
         chunk: u32,
     },
+    /// Download one omitted attachment straight from the server (read-only: EXAMINE), the way
+    /// the app does, and write it to a file.
+    FetchPart {
+        #[arg(long)]
+        email: String,
+        #[arg(long, default_value = "imap.gmail.com")]
+        host: String,
+        #[arg(long, default_value = "[Gmail]/All Mail")]
+        folder: String,
+        #[arg(long)]
+        uid: u32,
+        /// Position among the message's omitted attachments.
+        #[arg(long, default_value_t = 0)]
+        ordinal: usize,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Write a stored message's sanitized HTML (what the reader renders) to a file.
     Render {
         /// App data directory (holds mail.db and bodies.db).
@@ -144,6 +161,23 @@ async fn main() -> Result<()> {
             println!("walk: {} gone, {} missing in {:?}", gone.len(), missing.len(), walk_time);
             println!("full: {} gone, {} missing in {:?}", fgone.len(), fmissing.len(), full_time);
             println!("agree: {}", gone == fgone && missing == fmissing);
+            conn.logout().await;
+            Ok(())
+        }
+        Cmd::FetchPart { email, host, folder, uid, ordinal, out } => {
+            let password = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let cfg = mail_core::imap::ServerConfig {
+                host,
+                port: 993,
+                user: email,
+                credentials: mail_core::imap::Credentials::Password(password),
+            };
+            let mut conn = mail_core::imap::connect(&cfg).await?;
+            conn.session.examine(&folder).await?;
+            let t = Instant::now();
+            let data = conn.fetch_omitted_part(uid, ordinal, None, None).await?;
+            println!("fetched {} bytes in {:?}", data.len(), t.elapsed());
+            std::fs::write(&out, &data)?;
             conn.logout().await;
             Ok(())
         }

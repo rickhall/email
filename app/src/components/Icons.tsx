@@ -122,6 +122,25 @@ export const MailIcon = (p: P) => (
     <path d="m2.5 4.5 5.5 4 5.5-4" />
   </Svg>
 );
+export const ExternalIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 2.75h4.25V7" />
+    <path d="M13.25 2.75 7.5 8.5" />
+    <path d="M11.5 9.5v2.75a1 1 0 0 1-1 1h-6.75a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1H6.5" />
+  </Svg>
+);
+export const DownloadIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M8 2.5v7.5" />
+    <path d="m4.75 7 3.25 3.25L11.25 7" />
+    <path d="M3 13h10" />
+  </Svg>
+);
+export const CloudIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M4.5 12.5h7a2.75 2.75 0 0 0 .4-5.47A4 4 0 0 0 4.2 7.6 2.5 2.5 0 0 0 4.5 12.5z" />
+  </Svg>
+);
 export const CheckIcon = (p: P) => (
   <Svg {...p}>
     <path d="m3.5 8.5 3 3 6-7" />

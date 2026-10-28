@@ -29,7 +29,13 @@ interface MessageSummary {
 }
 
 interface Addr { name: string | null; addr: string }
-interface Attachment { name: string; mime: string; size: number }
+interface Attachment {
+  index: number;       // stable position in this message's attachment list (pass back to commands)
+  name: string; mime: string;
+  size: number;        // bytes (estimate for attachments not downloaded yet)
+  downloaded: boolean; // available locally; otherwise Open/Save first fetch it from the server
+  openable: boolean;   // false for executable/script types: offer Save only
+}
 interface MessageDetail {
   id: number; subject: string; from: Addr; to: Addr[]; cc: Addr[]; date: number;
   html: string | null;     // already sanitized by core; remote content stripped unless allowRemote
@@ -91,6 +97,10 @@ interface SyncStatus {
 | `list_threads` | `{ folderId, offset, limit, scope, includeTrash }` | `{ total: number, threads: ThreadSummary[] }` newest first — threaded counterpart of `list_messages`. A conversation is listed if any of its messages is in `folderId`; summary fields (count, participants, unread, flagged, attachments, snippet, latestMessageId) cover only the messages `scope`/`includeTrash` select. |
 | `get_thread` | `{ threadId, folderId, scope, includeTrash }` | `ThreadView` — the conversation's messages selected by `scope`/`includeTrash`, oldest first, plus counts of hidden ones. A message's `folderId` is `folderId` when it's in that folder, else its most specific other folder (labels before All Mail) |
 | `search_messages` | `{ accountId, folderId, query, offset, limit, fields }` | `{ total, messages: MessageSummary[] }` newest first. `folderId: null` = whole account. Each result's `folderId` is the most specific folder it's in (Inbox/label over All Mail). `fields: SearchField[] \| null` limits plain (unprefixed) terms to those fields; null or empty = all three. Query syntax below. |
+| `open_attachment` | `{ messageId, index }` | `void` — fetches if needed, writes to the app cache, opens in the default app. Rejects (string) for non-openable types or on failure |
+| `save_attachment` | `{ messageId, index }` | `string` — absolute path written in the Downloads folder (`name (1).ext` if taken) |
+| `save_all_attachments` | `{ messageId }` | `string[]` — absolute paths of every attachment, each saved directly in Downloads (`name (1).ext` if taken) |
+| `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |
 | `set_allow_remote` | `{ id, allow }` | `void` — remembers the "Load images" choice per message |
