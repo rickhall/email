@@ -615,9 +615,16 @@ impl Store {
 
     /// Replace the folder list with the result of LIST, keeping sync state of existing folders.
     pub fn sync_folder_list(&self, account_id: i64, listed: &[ListedFolder]) -> Result<()> {
+        // Every IMAP server lists INBOX. A listing without it is a server glitch, not a mass
+        // deletion: update what's listed but remove nothing.
+        let trustworthy = listed.iter().any(|f| f.raw_name.eq_ignore_ascii_case("INBOX"));
         let mut db = self.db();
         let tx = db.transaction()?;
-        tx.execute("UPDATE folders SET present=0 WHERE account_id=?1", [account_id])?;
+        if trustworthy {
+            tx.execute("UPDATE folders SET present=0 WHERE account_id=?1", [account_id])?;
+        } else {
+            tracing::warn!(account_id, n = listed.len(), "folder list without INBOX; not removing any folders");
+        }
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO folders (account_id, raw_name, path, role, selectable, present)
@@ -635,8 +642,26 @@ impl Store {
                 ])?;
             }
         }
+        // Folders deleted on the server (by another client): their entries go with them
+        // (ON DELETE CASCADE); messages that were only there are then dropped below.
+        let candidates: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT e.message_id FROM entries e JOIN folders f ON f.id = e.folder_id
+                 WHERE f.account_id=?1 AND f.present=0",
+            )?;
+            stmt.query_map([account_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let gone: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT raw_name FROM folders WHERE account_id=?1 AND present=0")?;
+            stmt.query_map([account_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
         tx.execute("DELETE FROM folders WHERE account_id=?1 AND present=0", [account_id])?;
         tx.commit()?;
+        drop(db);
+        if !gone.is_empty() {
+            let dropped = self.drop_orphans(&candidates)?;
+            tracing::info!(?gone, messages_dropped = dropped, "folders removed on the server");
+        }
         Ok(())
     }
 
@@ -942,60 +967,81 @@ impl Store {
 
     /// Remove entries for UIDs that no longer exist on the server, then drop orphaned messages.
     pub fn remove_uids(&self, folder_id: i64, uids: &[u32]) -> Result<()> {
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        let mut orphans = Vec::new();
+        let mut candidates = Vec::new();
         {
-            let mut find =
-                tx.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
-            let mut del = tx.prepare_cached("DELETE FROM entries WHERE folder_id=?1 AND uid=?2")?;
-            let mut has_uid_entry = tx.prepare_cached(
-                "SELECT 1 FROM entries WHERE message_id=?1 AND uid IS NOT NULL LIMIT 1",
-            )?;
-            let mut del_msg = tx.prepare_cached("DELETE FROM messages WHERE id=?1")?;
-            let mut meta = tx.prepare_cached(
-                "SELECT account_id, identity, has_body, snippet, has_attachments, omitted, allow_remote
-                 FROM messages WHERE id=?1",
-            )?;
-            for uid in uids {
-                let Some(id): Option<i64> =
-                    find.query_row(params![folder_id, uid], |r| r.get(0)).optional()?
-                else {
-                    continue;
-                };
-                del.execute(params![folder_id, uid])?;
-                // Message still physically present in some other folder?
-                if has_uid_entry.query_row([id], |_| Ok(())).optional()?.is_none() {
-                    let m: (i64, Option<String>, bool, Option<String>, bool, Option<String>, bool) =
-                        meta.query_row([id], |r| {
-                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
-                        })?;
+            let mut db = self.db();
+            let tx = db.transaction()?;
+            {
+                let mut find = tx.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
+                let mut del = tx.prepare_cached("DELETE FROM entries WHERE folder_id=?1 AND uid=?2")?;
+                for uid in uids {
+                    if let Some(id) = find.query_row(params![folder_id, uid], |r| r.get::<_, i64>(0)).optional()? {
+                        del.execute(params![folder_id, uid])?;
+                        candidates.push(id);
+                    }
+                }
+            }
+            tx.commit()?;
+        }
+        self.drop_orphans(&candidates)?;
+        Ok(())
+    }
+
+    /// Delete those of `candidates` that no longer exist on the server in any folder (no entry
+    /// with a UID), with their bodies and cached attachments. Bodies of messages with a
+    /// cross-folder identity are stashed first: they may reappear in a folder we haven't synced
+    /// yet (a move, or a folder rename seen as delete + create). Returns how many were dropped.
+    pub fn drop_orphans(&self, candidates: &[i64]) -> Result<usize> {
+        type Meta = (i64, Option<String>, bool, Option<String>, bool, Option<String>, bool);
+        let mut orphans: Vec<(i64, Meta)> = Vec::new();
+        {
+            let mut db = self.db();
+            let tx = db.transaction()?;
+            {
+                let mut has_uid_entry =
+                    tx.prepare_cached("SELECT 1 FROM entries WHERE message_id=?1 AND uid IS NOT NULL LIMIT 1")?;
+                let mut meta = tx.prepare_cached(
+                    "SELECT account_id, identity, has_body, snippet, has_attachments, omitted, allow_remote
+                     FROM messages WHERE id=?1",
+                )?;
+                let mut del_msg = tx.prepare_cached("DELETE FROM messages WHERE id=?1")?;
+                let mut seen = std::collections::HashSet::new();
+                for &id in candidates {
+                    if !seen.insert(id) || has_uid_entry.exists([id])? {
+                        continue;
+                    }
+                    let Some(m) = meta
+                        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+                        .optional()?
+                    else {
+                        continue;
+                    };
                     del_msg.execute([id])?;
                     orphans.push((id, m));
                 }
             }
-        }
-        tx.commit()?;
-        drop(db);
-        if !orphans.is_empty() {
-            let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
-            let tx = bodies.unchecked_transaction()?;
-            for (id, (account_id, identity, has_body, snippet, att, omitted, remote)) in orphans {
-                // Possibly moved to a folder we haven't seen yet: keep the body for a while.
-                if let (Some(key), true) = (identity, has_body) {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO stash
-                             (account_id, identity, raw, snippet, has_attachments, omitted, allow_remote, created)
-                         SELECT ?2, ?3, raw, ?4, ?5, ?6, ?7, unixepoch() FROM bodies WHERE message_id=?1",
-                        params![id, account_id, key, snippet, att, omitted, remote],
-                    )?;
-                }
-                tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
-                tx.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
-            }
             tx.commit()?;
         }
-        Ok(())
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+        let n = orphans.len();
+        let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = bodies.unchecked_transaction()?;
+        for (id, (account_id, identity, has_body, snippet, att, omitted, remote)) in orphans {
+            if let (Some(key), true) = (identity, has_body) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO stash
+                         (account_id, identity, raw, snippet, has_attachments, omitted, allow_remote, created)
+                     SELECT ?2, ?3, raw, ?4, ?5, ?6, ?7, unixepoch() FROM bodies WHERE message_id=?1",
+                    params![id, account_id, key, snippet, att, omitted, remote],
+                )?;
+            }
+            tx.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+            tx.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn list_messages(&self, folder_id: i64, offset: u32, limit: u32) -> Result<MessagePage> {
@@ -1861,6 +1907,51 @@ mod tests {
         }
         assert_eq!(store.index_of(inbox, 999_999, false).unwrap(), None);
         assert_eq!(store.index_of(inbox, 999_999, true).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_deleted_elsewhere_drops_its_messages() {
+        let dir = std::env::temp_dir().join(format!("mail-core-folderdel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@example.com", "x", Provider::Imap, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        let all = [lf("INBOX", Some(FolderRole::Inbox)), lf("Old", None), lf("Keep", None)];
+        store.sync_folder_list(acct.id, &all).unwrap();
+        let id = |n: &str| store.folders(acct.id).unwrap().into_iter().find(|f| f.raw_name == n).unwrap().id;
+        let none = HashMap::new();
+        let msg = |uid: u32, mid: &str| HeaderRecord { gm_msgid: None, gm_labels: None, message_id: Some(mid.into()), ..rec(uid, 0, &[]) };
+        // 30 messages only in Old (bodies downloaded), one also in Keep.
+        let recs: Vec<HeaderRecord> = (1..=30).map(|u| msg(u, &format!("o{u}@x"))).collect();
+        store.upsert_headers(acct.id, id("Old"), &recs, &none).unwrap();
+        store.upsert_headers(acct.id, id("Keep"), &[msg(7, "o7@x")], &none).unwrap();
+        for m in store.list_messages(id("Old"), 0, 100).unwrap().messages {
+            store.store_body(m.id, b"Subject: x\r\n\r\nbody", Some("body"), false, None).unwrap();
+        }
+        assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (30, 30));
+
+        // A glitchy empty listing removes nothing.
+        store.sync_folder_list(acct.id, &[]).unwrap();
+        assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (30, 30));
+
+        // Another client deletes "Old".
+        store.sync_folder_list(acct.id, &[all[0].clone(), all[2].clone()]).unwrap();
+        assert!(store.folders(acct.id).unwrap().iter().all(|f| f.raw_name != "Old"));
+        // Only the message that's also in Keep survives, body intact; the rest are gone,
+        // from counts and search alike.
+        assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (1, 1));
+        assert_eq!(store.search(acct.id, None, "m1", &[], 0, 50).unwrap().total, 0);
+        let kept = store.list_messages(id("Keep"), 0, 10).unwrap().messages;
+        assert!(kept.len() == 1 && store.body(kept[0].id).unwrap().is_some());
+
+        // Renamed rather than deleted: the same messages reappear under "Older" and pick up
+        // their stashed bodies instead of downloading again.
+        store.sync_folder_list(acct.id, &[all[0].clone(), all[2].clone(), lf("Older", None)]).unwrap();
+        store.upsert_headers(acct.id, id("Older"), &recs, &none).unwrap();
+        let older = store.list_messages(id("Older"), 0, 100).unwrap().messages;
+        assert_eq!(older.len(), 30);
+        assert!(older.iter().all(|m| m.has_body), "bodies restored from the stash");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
