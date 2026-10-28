@@ -18,6 +18,13 @@ function focusList(selectFirst: boolean) {
   }
 }
 
+/** Focus the quick-search field (shortcut `/`, ⌘F, macOS menu "Find"). */
+export function focusSearch() {
+  const el = document.querySelector<HTMLInputElement>('.search-field input');
+  el?.focus();
+  el?.select();
+}
+
 export function SearchBar() {
   let input!: HTMLInputElement;
 

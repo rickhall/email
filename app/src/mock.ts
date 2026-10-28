@@ -18,6 +18,7 @@ import type {
   MessageDetail,
   MessageSummary,
   ConversationScope,
+  MenuActionId,
   Provider,
   SearchField,
   ThreadSummary,
@@ -941,6 +942,12 @@ export function createMockBackend(): Backend {
     };
   }
 
+  // `?mac` debug hook: window.__menu('search' | 'toggle-threaded' | 'toggle-scope' | 'add-account')
+  // emits the native menu event the macOS build sends.
+  if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('mac')) {
+    (window as unknown as { __menu: (id: MenuActionId) => void }).__menu = (id) => emit('menu-action', { id });
+  }
+
   const startEmpty = typeof location !== 'undefined' && new URLSearchParams(location.search).has('empty');
   if (!startEmpty) {
     const g = createAccount('rick.hall@gmail.com', 'Rick Hall', 'gmail', GMAIL_FOLDERS);
@@ -1227,6 +1234,10 @@ export function createMockBackend(): Backend {
         const name = n === 1 || dot < 0 ? a.name : `${a.name.slice(0, dot)} (${n - 1})${a.name.slice(dot)}`;
         return `/home/user/Downloads/${name}`;
       });
+    },
+    async app_version() {
+      await sleep(3);
+      return '0.1.0-dev';
     },
     async reveal_path() {
       await sleep(5);

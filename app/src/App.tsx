@@ -11,8 +11,12 @@ import {
   searchFieldsArg,
   selectedFolderId,
   threaded,
+  setThreaded,
+  conversationScope,
+  setConversationScope,
 } from './state';
-import { SearchBar } from './components/SearchBar';
+import { focusSearch, SearchBar } from './components/SearchBar';
+import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -34,6 +38,28 @@ export function App() {
   let readerEl: HTMLElement | undefined;
 
   onMount(() => void initApp());
+
+  // Native macOS menu bar (no-op elsewhere: the event is never sent).
+  onMount(() => {
+    const un = events.onMenuAction(({ id }) => {
+      switch (id) {
+        case 'search':
+          focusSearch();
+          break;
+        case 'toggle-threaded':
+          setThreaded(!threaded());
+          break;
+        case 'toggle-scope':
+          setConversationScope(conversationScope() === 'all' ? 'folder' : 'all');
+          break;
+        case 'add-account':
+          // With no accounts the onboarding form is already the whole window.
+          if ((accounts()?.length ?? 0) > 0) setShowAdd(true);
+          break;
+      }
+    });
+    onCleanup(() => void un.then((f) => f()));
+  });
 
   const folder = createMemo(() => folderById(selectedFolderId()));
 

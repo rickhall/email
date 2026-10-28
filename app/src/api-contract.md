@@ -100,6 +100,7 @@ interface SyncStatus {
 | `open_attachment` | `{ messageId, index }` | `void` — fetches if needed, writes to the app cache, opens in the default app. Rejects (string) for non-openable types or on failure |
 | `save_attachment` | `{ messageId, index }` | `string` — absolute path written in the Downloads folder (`name (1).ext` if taken) |
 | `save_all_attachments` | `{ messageId }` | `string[]` — absolute paths of every attachment, each saved directly in Downloads (`name (1).ext` if taken) |
+| `app_version` | – | `string` — e.g. "0.1.28" |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |
@@ -124,3 +125,9 @@ Matches sender (name + address), recipients (To/Cc names + addresses) and subjec
 - `"exact phrase"` — phrase (last word still prefix-matched)
 - `from:x`, `to:x`, `subject:x` — restrict a term to one field (`from:"Ada L"` works); these override `fields`
 - `-word` — exclude
+
+## macOS menu events
+
+| name | payload |
+|---|---|
+| `menu-action` | `{ id: 'search' \| 'toggle-threaded' \| 'toggle-scope' \| 'add-account' }` — sent by the native macOS menu bar (the window is shown/focused first) |

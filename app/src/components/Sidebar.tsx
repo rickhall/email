@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore } from 'solid-js/store';
-import type { Account, Folder, FolderRole, SyncStatus } from '../api';
+import { api, type Account, type Folder, type FolderRole, type SyncStatus } from '../api';
 import { foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
 import { fmtNum, loadPref, savePref } from '../lib/format';
 import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon } from './Icons';
@@ -121,6 +121,16 @@ function syncLabel(s: SyncStatus): string {
       return 'Up to date';
   }
 }
+
+// ------------------------------------------------------------- app version (fetched once)
+
+const [appVersion, setAppVersion] = createSignal<string | null>(null);
+api
+  .appVersion()
+  .then(setAppVersion)
+  .catch(() => {
+    /* older core: no version line */
+  });
 
 // ------------------------------------------------------------- status footer
 
@@ -304,6 +314,7 @@ function SyncFooter() {
           <For each={snap()}>
             {(x) => <SyncPopoverRow account={x.account} status={x.status} onFix={() => setFixFor(x.account)} />}
           </For>
+          <div class="sp-version">{appVersion() ? `Email ${appVersion()}` : '\u00a0'}</div>
         </div>
       </Show>
       <button

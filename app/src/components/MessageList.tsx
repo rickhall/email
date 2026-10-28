@@ -358,11 +358,11 @@ export function MessageList(props: {
     <section class="list" aria-label={search ? 'Search results' : 'Messages'}>
       <Show when={props.search}>
         {(sp) => (
-          <header class="list-head search-head">
-            <div class="search-head-row">
-            <div class="list-title">
+          <header class="list-head search-head" data-tauri-drag-region>
+            <div class="search-head-row" data-tauri-drag-region>
+            <div class="list-title" data-tauri-drag-region>
               {/* The query itself is already in the search field; show only the outcome. */}
-              <div class="list-sub search-count">
+              <div class="list-sub search-count" data-tauri-drag-region>
                 <span>
                   <Show when={model.state.total != null} fallback="Searching…">
                     {model.state.total === 0
@@ -400,8 +400,8 @@ export function MessageList(props: {
               </button>
             </div>
             </div>
-            <div class="search-fields" role="group" aria-label="Search in">
-              <span class="search-fields-label">Search in</span>
+            <div class="search-fields" role="group" aria-label="Search in" data-tauri-drag-region>
+              <span class="search-fields-label" data-tauri-drag-region>Search in</span>
               <For each={['sender', 'recipients', 'subject'] as SearchField[]}>
                 {(f) => (
                   <button
@@ -425,8 +425,8 @@ export function MessageList(props: {
       <Show when={!search}>
       <header class="list-head" data-tauri-drag-region>
         <div class="list-title" data-tauri-drag-region>
-          <h2>{props.folder.displayName}</h2>
-          <div class="list-sub">
+          <h2 data-tauri-drag-region>{props.folder.displayName}</h2>
+          <div class="list-sub" data-tauri-drag-region>
             <Show when={threaded}>
               <span>
                 {fmtNum(props.folder.syncedCount)} {props.folder.syncedCount === 1 ? 'message' : 'messages'}

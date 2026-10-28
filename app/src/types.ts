@@ -158,11 +158,18 @@ export interface MessageReadyPayload {
   id: number;
 }
 
+/** Native macOS menu bar commands. */
+export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account';
+export interface MenuActionPayload {
+  id: MenuActionId;
+}
+
 export interface EventMap {
   'folders-changed': FoldersChangedPayload;
   'messages-changed': MessagesChangedPayload;
   'message-ready': MessageReadyPayload;
   'sync-status': SyncStatus;
+  'menu-action': MenuActionPayload;
 }
 
 export interface CommandMap {
@@ -196,6 +203,7 @@ export interface CommandMap {
   open_attachment: { args: { messageId: number; index: number }; ret: void };
   save_attachment: { args: { messageId: number; index: number }; ret: string };
   save_all_attachments: { args: { messageId: number }; ret: string[] };
+  app_version: { args: undefined; ret: string };
   reveal_path: { args: { path: string }; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };

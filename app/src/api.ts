@@ -111,6 +111,7 @@ export const api = {
     call('save_attachment', { messageId, index }),
   /** Saves every attachment into a new Downloads folder; returns its path. */
   saveAllAttachments: (messageId: number): Promise<string[]> => call('save_all_attachments', { messageId }),
+  appVersion: (): Promise<string> => call('app_version', undefined),
   revealPath: (path: string): Promise<void> => call('reveal_path', { path }),
   setRead: (id: number, read: boolean): Promise<void> => call('set_read', { id, read }),
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
@@ -128,4 +129,5 @@ export const events = {
   onMessagesChanged: (cb: (p: EventMap['messages-changed']) => void) => on('messages-changed', cb),
   onMessageReady: (cb: (p: EventMap['message-ready']) => void) => on('message-ready', cb),
   onSyncStatus: (cb: (p: EventMap['sync-status']) => void) => on('sync-status', cb),
+  onMenuAction: (cb: (p: EventMap['menu-action']) => void) => on('menu-action', cb),
 };

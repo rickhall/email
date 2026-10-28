@@ -31,6 +31,8 @@ Data lives in `~/.local/share/dev.mailclient.desktop/` on Linux (`~/Library/Appl
 - **Attachments:** a compact pill in each message header (`📎 N · size`): with one attachment, click to open in the default app and ⤓ to save; with several, click for a list with per-file Open/Save and ⤓ to save all. Files go straight into Downloads (`name (1).ext` if taken), with "Show in folder". Attachments left out of the body download are fetched on demand (just that MIME part, on the interactive connection) and cached in `bodies.db`. Executable and script types are saved but never opened directly; file names are sanitized.
 - **Sync status:** one fixed summary row at the bottom of the sidebar, with per-account details in a popover. Nothing in the folder tree or headers moves because of background activity.
 - **Window:** size (and position, where the platform allows) is restored at launch, in logical units so GNOME fractional scaling works.
+- **macOS:** inset title bar with the traffic lights over the sidebar; the pane tops drag the window. Closing the window keeps the app (and sync) running; the Dock icon reopens it and ⌘Q quits. Native menu bar with Edit (copy/paste) and View (Search ⌘F, Group by Conversation ⌘T, Show All Mail ⇧⌘A).
+- **Versions:** `major.minor` is set in `app/src-tauri/tauri.conf.json`; CI builds use the run number as the patch (e.g. 0.1.28), so every build upgrades the previous one. The version is shown at the bottom of the sync status popover (and in About on macOS).
 
 ## Benchmark sync
 

@@ -181,7 +181,7 @@ type Phase = 'idle' | 'loading' | 'downloading' | 'ready' | 'error';
 
 export function ReaderEmpty() {
   return (
-    <div class="reader-empty">
+    <div class="reader-empty" data-tauri-drag-region>
       <MailIcon size={44} class="icon empty-icon" />
       <div class="reader-empty-title">No message selected</div>
       <div class="reader-empty-sub">
@@ -318,11 +318,11 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
         {(h) => (
           <>
             {/* Fixed-height band: lines up with the message list's header border. */}
-            <header class="reader-band">
+            <header class="reader-band" data-tauri-drag-region>
               <h1 class="reader-subject" title={h().subject || '(no subject)'}>
                 {h().subject || '(no subject)'}
               </h1>
-              <div class="band-meta">
+              <div class="band-meta" data-tauri-drag-region>
                 <time dateTime={new Date(h().date * 1000).toISOString()}>{longDate(h().date)}</time>
                 <Show when={h().attachments.length > 0}>
                   <span class="dot-sep">·</span>

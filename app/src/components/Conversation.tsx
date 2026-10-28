@@ -391,12 +391,12 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
   return (
     <div class="conv-view">
       {/* Subject stays put; only the cards below scroll. */}
-      <header class="conv-head reader-band">
+      <header class="conv-head reader-band" data-tauri-drag-region>
         <h1 class="reader-subject" title={subject()}>
           {subject()}
         </h1>
-        <div class="conv-meta">
-          <span class="conv-count">
+        <div class="conv-meta" data-tauri-drag-region>
+          <span class="conv-count" data-tauri-drag-region>
             <Show when={state.loaded} fallback={<>&nbsp;</>}>
               {metaText()}
             </Show>

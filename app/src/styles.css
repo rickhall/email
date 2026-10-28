@@ -2613,3 +2613,28 @@ body.resizing iframe {
 .att-pill.multi.open .att-pill-main {
   background: var(--bg-active);
 }
+
+/* app version at the bottom of the sync popover (fixed height) */
+.sp-version {
+  height: 26px;
+  line-height: 26px;
+  padding: 0 12px;
+  border-top: 1px solid var(--sep);
+  font-size: 11px;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ==========================================================================
+   macOS: overlay title bar — traffic lights sit at (18, 20) over the sidebar top row
+   ========================================================================== */
+
+html.macos .sidebar-top {
+  /* lights occupy x 18→~72: keep clear, like Apple Mail (no title there) */
+  padding-left: 84px;
+}
+html.macos .sidebar-title {
+  visibility: hidden;
+}

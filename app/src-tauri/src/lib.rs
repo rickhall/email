@@ -225,6 +225,11 @@ async fn reveal_path(app: tauri::AppHandle, path: String) -> Res<()> {
 }
 
 #[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
 async fn get_sync_status(core: State<'_, Arc<Core>>) -> Res<Vec<SyncStatus>> {
     Ok(core.sync_status())
 }
@@ -297,6 +302,15 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     if let Some(state) = &saved {
         builder = window_state::apply(app, builder, state);
     }
+    // macOS: transparent title bar with the traffic lights over the sidebar's top row
+    // (like Mail/Notes). The UI reserves room for them and makes the pane tops draggable.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+    }
     let window = builder
         .on_new_window(move |url, _features| {
             let _ = opener.opener().open_url(url.as_str(), None::<&str>);
@@ -312,7 +326,89 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
 
     window_state::track(&window, saved, requested);
+
+    // macOS: closing the window hides it; the app keeps syncing until ⌘Q, and the Dock icon
+    // brings the window back (see the Reopen handler in `run`).
+    #[cfg(target_os = "macos")]
+    {
+        let w = window.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = w.hide();
+            }
+        });
+    }
     Ok(())
+}
+
+/// macOS menu bar: the standard app/Edit/Window menus (Edit is what makes ⌘C/⌘V work in the
+/// webview) plus a View menu whose items are forwarded to the UI as `menu-action` events.
+#[cfg(target_os = "macos")]
+fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let app_menu = Submenu::with_items(
+        app,
+        "Email",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some("About Email"), Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "add-account", "Add Account…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let view = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[
+            &MenuItem::with_id(app, "search", "Search", true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(app, "toggle-threaded", "Group by Conversation", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(app, "toggle-scope", "Show All Mail in Conversations", true, Some("CmdOrCtrl+Shift+A"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, Some("Zoom"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &edit, &view, &window])
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Serialize)]
+struct MenuAction {
+    id: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -323,7 +419,17 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(macos_menu).on_menu_event(|app, event| {
+        let id = event.id().as_ref().to_string();
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let _ = app.emit("menu-action", MenuAction { id });
+    });
+    builder
         // One instance per machine: a second launch focuses the existing window instead of
         // starting another sync engine on the same database and accounts.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -372,7 +478,18 @@ pub fn run() {
             save_attachment,
             save_all_attachments,
             reveal_path,
+            app_version,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon with the window hidden brings it back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = _event {
+                if let Some(w) = _app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        });
 }
