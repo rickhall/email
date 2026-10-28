@@ -1,6 +1,7 @@
 //! Mail core: local store, IMAP sync engine and MIME rendering, independent of any UI.
 
 pub mod imap;
+pub mod actions;
 pub mod mime;
 pub mod model;
 pub mod partial;
@@ -106,8 +107,11 @@ impl Core {
         options: SyncOptions,
     ) -> Result<Core> {
         let (events, _) = broadcast::channel(4096);
+        let store = Store::open(data_dir)?;
+        // Actions interrupted mid-send (quit, crash) are sent again.
+        store.reset_started_ops()?;
         Ok(Core {
-            store: Arc::new(Store::open(data_dir)?),
+            store: Arc::new(store),
             events,
             secrets,
             strategy,
@@ -311,6 +315,53 @@ impl Core {
             .and_then(|m| m.subject().map(str::to_string))
             .unwrap_or_default();
         Ok((stored + omitted.len(), subject))
+    }
+
+    /// Apply a user action to messages viewed in `folder_id`: locally at once, on the server via
+    /// the outbox (moves after the undo window). Returns the op id to pass to `undo_action`.
+    pub fn apply_action(&self, action: actions::Action, message_ids: &[i64], folder_id: i64) -> Result<ActionResult> {
+        let (account_id, _) = self.store.folder(folder_id)?.ok_or_else(|| anyhow!("unknown folder"))?;
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
+        let gmail = account.provider == Provider::Gmail;
+        let planned = actions::plan(&self.store, account_id, gmail, action, message_ids, folder_id)?;
+        let snapshot = self.store.snapshot(message_ids)?;
+        let changed = self.store.apply_local(&planned.change)?;
+        let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: changed });
+        let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
+        if planned.ops.is_empty() {
+            return Ok(ActionResult { op_id: None, undoable: false });
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        let op_id = self.store.enqueue_ops(
+            account_id,
+            &serde_json::to_string(&planned.ops)?,
+            &serde_json::to_string(&snapshot)?,
+            &serde_json::to_string(&planned.folders)?,
+            now + planned.delay_ms,
+        )?;
+        if let Some(s) = self.running.lock().unwrap().get(&account_id) {
+            s.wake_outbox();
+        }
+        Ok(ActionResult { op_id: Some(op_id), undoable: planned.delay_ms > 0 })
+    }
+
+    /// Undo an action that hasn't been sent yet (within the undo window).
+    pub fn undo_action(&self, op_id: i64) -> Result<()> {
+        let snapshot = self
+            .store
+            .cancel_op(op_id)?
+            .ok_or_else(|| anyhow!("Too late to undo: the change was already sent to the server."))?;
+        let snapshot: store::Snapshot = serde_json::from_str(&snapshot)?;
+        let changed = self.store.restore(&snapshot)?;
+        let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: changed.clone() });
+        for (account_id, _) in changed.iter().filter_map(|f| self.store.folder(*f).ok().flatten()).collect::<std::collections::HashSet<_>>() {
+            let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
+        }
+        Ok(())
+    }
+
+    pub fn index_of(&self, folder_id: i64, id: i64, threaded: bool) -> Result<Option<u32>> {
+        self.store.index_of(folder_id, id, threaded)
     }
 
     pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {

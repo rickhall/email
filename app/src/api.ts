@@ -1,5 +1,7 @@
 import type {
   Account,
+  Action,
+  ActionResult,
   AddAccountArgs,
   Backend,
   CommandMap,
@@ -102,6 +104,9 @@ export const api = {
   ): Promise<ThreadView> => call('get_thread', { threadId, folderId, scope, includeTrash }),
   getSyncStatus: (): Promise<SyncStatus[]> => call('get_sync_status', undefined),
   /** Is message `id` still in `folderId` (null = still exists at all)? */
+  /** Row index of a message / conversation in the folder's list (null = not in it). */
+  indexOf: (folderId: number, id: number, threaded: boolean): Promise<number | null> =>
+    call('index_of', { folderId, id, threaded }),
   messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
     call('message_in_folder', { id, folderId }),
   openAttachment: (messageId: number, index: number): Promise<void> =>
@@ -111,6 +116,10 @@ export const api = {
     call('save_attachment', { messageId, index }),
   /** Saves every attachment into a new Downloads folder; returns its path. */
   saveAllAttachments: (messageId: number): Promise<string[]> => call('save_all_attachments', { messageId }),
+  /** Applies locally at once; moves reach the server after a 5 s undo window. */
+  applyAction: (action: Action, messageIds: number[], folderId: number): Promise<ActionResult> =>
+    call('apply_action', { action, messageIds, folderId }),
+  undoAction: (opId: number): Promise<void> => call('undo_action', { opId }),
   appVersion: (): Promise<string> => call('app_version', undefined),
   revealPath: (path: string): Promise<void> => call('reveal_path', { path }),
   setRead: (id: number, read: boolean): Promise<void> => call('set_read', { id, read }),
@@ -129,5 +138,6 @@ export const events = {
   onMessagesChanged: (cb: (p: EventMap['messages-changed']) => void) => on('messages-changed', cb),
   onMessageReady: (cb: (p: EventMap['message-ready']) => void) => on('message-ready', cb),
   onSyncStatus: (cb: (p: EventMap['sync-status']) => void) => on('sync-status', cb),
+  onActionFailed: (cb: (p: EventMap['action-failed']) => void) => on('action-failed', cb),
   onMenuAction: (cb: (p: EventMap['menu-action']) => void) => on('menu-action', cb),
 };

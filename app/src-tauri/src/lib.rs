@@ -225,6 +225,26 @@ async fn reveal_path(app: tauri::AppHandle, path: String) -> Res<()> {
 }
 
 #[tauri::command]
+async fn apply_action(
+    core: State<'_, Arc<Core>>,
+    action: mail_core::actions::Action,
+    message_ids: Vec<i64>,
+    folder_id: i64,
+) -> Res<ActionResult> {
+    core.apply_action(action, &message_ids, folder_id).map_err(err)
+}
+
+#[tauri::command]
+async fn undo_action(core: State<'_, Arc<Core>>, op_id: i64) -> Res<()> {
+    core.undo_action(op_id).map_err(err)
+}
+
+#[tauri::command]
+async fn index_of(core: State<'_, Arc<Core>>, folder_id: i64, id: i64, threaded: bool) -> Res<Option<u32>> {
+    core.index_of(folder_id, id, threaded).map_err(err)
+}
+
+#[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
@@ -247,6 +267,11 @@ struct FolderIdsPayload {
 }
 
 #[derive(Clone, Serialize)]
+struct MessagePayload {
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
 struct IdPayload {
     id: i64,
 }
@@ -264,6 +289,7 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
                 Ok(CoreEvent::MessagesChanged { folder_ids }) => folders_dirty.extend(folder_ids),
                 Ok(CoreEvent::FoldersChanged { account_id }) => { accounts_dirty.insert(account_id); }
                 Ok(CoreEvent::MessageReady { id }) => { let _ = app.emit("message-ready", IdPayload { id }); }
+                Ok(CoreEvent::ActionFailed { message }) => { let _ = app.emit("action-failed", MessagePayload { message }); }
                 Ok(CoreEvent::Sync(status)) => { let _ = app.emit("sync-status", status); }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::debug!("event forwarder lagged by {n}");
@@ -479,6 +505,9 @@ pub fn run() {
             save_all_attachments,
             reveal_path,
             app_version,
+            apply_action,
+            undo_action,
+            index_of,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

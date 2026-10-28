@@ -14,6 +14,8 @@ import {
 } from '../state';
 import { ImageIcon, PaperclipIcon } from './Icons';
 import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
+import { DRAG } from '../lib/platform';
+import { CardActions, HeaderActions, type ActionTarget } from './Actions';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -110,7 +112,7 @@ function CollapsedCard(props: { m: MessageSummary; me: Me; folderTag?: string; o
   );
 }
 
-function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; onToggle: () => void }) {
+function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; actions: ActionTarget; onToggle: () => void }) {
   const id = props.m.id;
   const body = createMessageBody(id);
   const detail = () => body.shown()?.d ?? null;
@@ -154,6 +156,8 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; on
             <time class="reader-date" dateTime={new Date(props.m.date * 1000).toISOString()}>
               {longDate(props.m.date)}
             </time>
+            {/* Overlays the date on hover/focus: no layout change. */}
+            <CardActions target={props.actions} />
           </span>
           {/* Second row, slot reserved from the summary so nothing shifts when the detail lands. */}
           <Show when={props.m.hasAttachments || (detail()?.attachments.length ?? 0) > 0}>
@@ -385,22 +389,46 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
     void unlistenP.then((un) => un());
   });
 
+  // Header actions act on every message being viewed (incl. revealed ones); star = newest.
+  const headerTarget = (): ActionTarget | null => {
+    if (!state.loaded || state.list.length === 0) return null;
+    const newest = state.list[state.list.length - 1]!;
+    return {
+      ids: state.list.map((m) => m.id),
+      folderId: t.folderId,
+      anyUnread: state.list.some((m) => m.unread),
+      starId: newest.id,
+      starred: newest.flagged,
+      advance: true,
+    };
+  };
+  /** One card's own actions; it advances only when that message is the last one here. */
+  const cardTarget = (m: MessageSummary): ActionTarget => ({
+    ids: [m.id],
+    folderId: t.folderId,
+    anyUnread: m.unread,
+    starId: m.id,
+    starred: m.flagged,
+    advance: m.folderId === t.folderId && !state.list.some((x) => x.id !== m.id && x.folderId === t.folderId),
+  });
+
   const subject = () => state.list[0]?.subject || t.subject || '(no subject)';
   const toggle = (id: number) => setExpanded(id, (v) => !v);
 
   return (
     <div class="conv-view">
       {/* Subject stays put; only the cards below scroll. */}
-      <header class="conv-head reader-band" data-tauri-drag-region>
+      <header class="conv-head reader-band" data-tauri-drag-region={DRAG}>
         <h1 class="reader-subject" title={subject()}>
           {subject()}
         </h1>
-        <div class="conv-meta" data-tauri-drag-region>
-          <span class="conv-count" data-tauri-drag-region>
+        <div class="conv-meta" data-tauri-drag-region={DRAG}>
+          <span class="conv-count" data-tauri-drag-region={DRAG}>
             <Show when={state.loaded} fallback={<>&nbsp;</>}>
               {metaText()}
             </Show>
           </span>
+          <HeaderActions target={headerTarget()} />
         </div>
       </header>
       <div class="conv-scroll" ref={(el) => { scrollEl = el; props.ref?.(el); }} tabIndex={-1}>
@@ -467,7 +495,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
                 when={expanded[m.id]}
                 fallback={<CollapsedCard m={m} me={me()} folderTag={folderTag(m)} onToggle={() => toggle(m.id)} />}
               >
-                <ExpandedCard m={m} me={me()} folderTag={folderTag(m)} onToggle={() => toggle(m.id)} />
+                <ExpandedCard m={m} me={me()} folderTag={folderTag(m)} actions={cardTarget(m)} onToggle={() => toggle(m.id)} />
               </Show>
             </div>
           )}

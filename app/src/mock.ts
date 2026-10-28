@@ -18,6 +18,8 @@ import type {
   MessageDetail,
   MessageSummary,
   ConversationScope,
+  Action,
+  ActionResult,
   MenuActionId,
   Provider,
   SearchField,
@@ -1083,6 +1085,139 @@ export function createMockBackend(): Backend {
     return a;
   }
 
+  // ---- message actions: local at once, "sent" after a 5 s undo window (read/star at once).
+  // `?actionfail`: every queued action is rejected by the "server" and rolled back.
+  const actionFail = typeof location !== 'undefined' && new URLSearchParams(location.search).has('actionfail');
+  let nextOpId = 1;
+  const pendingOps = new Map<number, { rollback: () => void; timer: ReturnType<typeof setTimeout> }>();
+
+  function roleFolder(accountId: number, ...roles: FolderRole[]) {
+    for (const r of roles) {
+      const f = [...folders.values()].find((x) => x.accountId === accountId && x.role === r);
+      if (f) return f;
+    }
+    return undefined;
+  }
+  /** Move (or with `to` null, delete) messages; returns a rollback. Emits once. */
+  function relocate(ms: MessageSummary[], to: Folder | null): () => void {
+    const moved: { m: MessageSummary; from: Folder }[] = [];
+    const touched = new Set<number>();
+    for (const m of ms) {
+      const from = folders.get(m.folderId);
+      if (!from || from.id === to?.id) continue;
+      const src = folderMsgs.get(from.id) ?? [];
+      const i = src.indexOf(m);
+      if (i >= 0) src.splice(i, 1);
+      if (to) {
+        const dst = folderMsgs.get(to.id) ?? [];
+        dst.push(m);
+        dst.sort((a, b) => b.date - a.date);
+        m.folderId = to.id;
+        touched.add(to.id);
+      } else byId.delete(m.id);
+      touched.add(from.id);
+      moved.push({ m, from });
+    }
+    const changed = () => {
+      for (const id of touched) {
+        const f = folders.get(id);
+        if (f) recount(f);
+      }
+      if (touched.size) {
+        emit('messages-changed', { folderIds: [...touched] });
+        const acc = folders.get([...touched][0]!)?.accountId;
+        if (acc != null) emit('folders-changed', { accountId: acc });
+      }
+    };
+    changed();
+    return () => {
+      for (const { m, from } of moved) {
+        if (m.folderId !== from.id || !byId.has(m.id)) {
+          const cur = folders.get(m.folderId);
+          if (cur && byId.has(m.id)) {
+            const l = folderMsgs.get(cur.id) ?? [];
+            const i = l.indexOf(m);
+            if (i >= 0) l.splice(i, 1);
+          }
+          byId.set(m.id, m);
+          const dst = folderMsgs.get(from.id) ?? [];
+          dst.push(m);
+          dst.sort((a, b) => b.date - a.date);
+          m.folderId = from.id;
+        }
+      }
+      changed();
+    };
+  }
+
+  async function applyAction(action: Action, ids: number[], folderId: number): Promise<ActionResult> {
+    const ms = ids.map((id) => byId.get(id)).filter((m): m is MessageSummary => !!m);
+    const ctx = folders.get(folderId) ?? (ms[0] ? folders.get(ms[0].folderId) : undefined);
+    if (!ctx || ms.length === 0) return { opId: null, undoable: false };
+    const acc = accounts.find((a) => a.id === ctx.accountId);
+    const flagChange = (fn: (m: MessageSummary) => void) => {
+      const touched = new Set<number>();
+      for (const m of ms) {
+        fn(m);
+        touched.add(m.folderId);
+      }
+      for (const id of touched) {
+        const f = folders.get(id);
+        if (f) recount(f);
+      }
+      emit('messages-changed', { folderIds: [...touched] });
+      emit('folders-changed', { accountId: ctx.accountId });
+      return { opId: null, undoable: false };
+    };
+    let target: Folder | null | undefined;
+    switch (action.kind) {
+      case 'read':
+        return flagChange((m) => (m.unread = false));
+      case 'unread':
+        return flagChange((m) => (m.unread = true));
+      case 'flag':
+        return flagChange((m) => (m.flagged = true));
+      case 'unflag':
+        return flagChange((m) => (m.flagged = false));
+      case 'archive':
+        target = acc?.provider === 'gmail' ? roleFolder(ctx.accountId, 'all') : roleFolder(ctx.accountId, 'archive');
+        if (!target) throw 'This account has no Archive folder';
+        break;
+      case 'trash':
+        target = roleFolder(ctx.accountId, 'trash');
+        if (!target) throw 'This account has no Trash folder';
+        break;
+      case 'spam':
+        target = roleFolder(ctx.accountId, 'junk');
+        if (!target) throw 'This account has no Spam folder';
+        break;
+      case 'notSpam':
+        target = roleFolder(ctx.accountId, 'inbox');
+        break;
+      case 'move':
+        target = folders.get(action.targetFolderId);
+        if (!target || target.accountId !== ctx.accountId || !target.selectable) throw 'Unknown folder';
+        break;
+      case 'deleteForever':
+        if (ctx.role !== 'trash' && ctx.role !== 'junk') throw 'Delete forever only works in Trash or Spam';
+        target = null;
+        break;
+    }
+    const affected = ms.filter((m) => target === null || m.folderId !== target!.id);
+    if (affected.length === 0) return { opId: null, undoable: false };
+    const rollback = relocate(affected, target ?? null);
+    const opId = nextOpId++;
+    const timer = setTimeout(() => {
+      pendingOps.delete(opId);
+      if (actionFail) {
+        rollback();
+        emit('action-failed', { message: `The server rejected the change (${affected.length} message${affected.length === 1 ? '' : 's'}); it was rolled back` });
+      }
+    }, 5000);
+    pendingOps.set(opId, { rollback, timer });
+    return { opId, undoable: true };
+  }
+
   const latency = () => sleep(8 + Math.random() * 25);
 
   const handlers: { [K in CommandName]: (args: CommandMap[K]['args']) => Promise<CommandMap[K]['ret']> } = {
@@ -1241,6 +1376,37 @@ export function createMockBackend(): Backend {
     },
     async reveal_path() {
       await sleep(5);
+    },
+    async apply_action({ action, messageIds, folderId }) {
+      await sleep(4);
+      return applyAction(action, messageIds, folderId);
+    },
+    async undo_action({ opId }) {
+      await sleep(4);
+      const op = pendingOps.get(opId);
+      if (!op) throw 'Too late to undo — the change was already sent to the server';
+      clearTimeout(op.timer);
+      pendingOps.delete(opId);
+      op.rollback();
+    },
+    async index_of({ folderId, id, threaded }) {
+      await sleep(3);
+      const list = folderMsgs.get(folderId) ?? [];
+      if (!threaded) {
+        const i = list.findIndex((m) => m.id === id);
+        return i >= 0 ? i : null;
+      }
+      // Same ordering as list_threads: threads by their newest message in this folder.
+      const seen = new Set<number>();
+      let n = 0;
+      for (const m of list) {
+        const tid = threadOf(m);
+        if (seen.has(tid)) continue;
+        if (tid === id) return n;
+        seen.add(tid);
+        n++;
+      }
+      return null;
     },
     async message_in_folder({ id, folderId }) {
       await sleep(3);

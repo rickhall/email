@@ -253,12 +253,23 @@ pub struct SyncStatus {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResult {
+    /// Pass to `undo_action`; None when nothing had to be sent.
+    pub op_id: Option<i64>,
+    /// True while the action can still be undone (moves wait a few seconds before sending).
+    pub undoable: bool,
+}
+
 /// Events emitted by the core for the UI layer to forward.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     FoldersChanged { account_id: i64 },
     MessagesChanged { folder_ids: Vec<i64> },
     MessageReady { id: i64 },
+    /// A queued action was rejected by the server and has been rolled back locally.
+    ActionFailed { message: String },
     Sync(SyncStatus),
 }
 

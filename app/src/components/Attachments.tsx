@@ -3,58 +3,10 @@ import { createStore } from 'solid-js/store';
 import { Portal } from 'solid-js/web';
 import { api, errorMessage, type Attachment } from '../api';
 import { fmtSize } from '../lib/format';
-import { ChevronIcon, CloseIcon, CloudIcon, DownloadIcon, ExternalIcon, FileIcon, ImageIcon, PaperclipIcon } from './Icons';
+import { showToast } from './Toast';
+import { ChevronIcon, CloudIcon, DownloadIcon, ExternalIcon, FileIcon, ImageIcon, PaperclipIcon } from './Icons';
 
-// ------------------------------------------------------------- toast (overlay, bottom of reader)
-
-interface Toast {
-  id: number;
-  kind: 'ok' | 'error';
-  text: string;
-  path?: string;
-}
-const [toast, setToast] = createSignal<Toast | null>(null);
-let toastSeq = 0;
-let toastTimer: ReturnType<typeof setTimeout> | undefined;
-
-function showToast(t: Omit<Toast, 'id'>) {
-  clearTimeout(toastTimer);
-  const id = ++toastSeq;
-  setToast({ ...t, id });
-  toastTimer = setTimeout(() => {
-    if (toast()?.id === id) setToast(null);
-  }, t.kind === 'error' ? 8000 : 5000);
-}
-
-/** Absolutely positioned at the bottom of the reader pane; never moves content. */
-export function AttachmentToast() {
-  return (
-    <div class="toast-host" aria-live="polite">
-      <Show when={toast()} keyed>
-        {(t) => (
-          <div class="toast" classList={{ error: t.kind === 'error' }} role={t.kind === 'error' ? 'alert' : 'status'}>
-            <span class="toast-text" title={t.text}>
-              {t.text}
-            </span>
-            <Show when={t.path}>
-              {(p) => (
-                <>
-                  <span class="dot-sep">·</span>
-                  <button class="link-btn toast-action" onClick={() => api.revealPath(p()).catch((e) => showToast({ kind: 'error', text: errorMessage(e) }))}>
-                    Show in folder
-                  </button>
-                </>
-              )}
-            </Show>
-            <button class="toast-close" aria-label="Dismiss" onClick={() => setToast(null)}>
-              <CloseIcon size={10} />
-            </button>
-          </div>
-        )}
-      </Show>
-    </div>
-  );
-}
+export { ToastHost as AttachmentToast } from './Toast';
 
 // ------------------------------------------------------------- actions (shared busy state)
 

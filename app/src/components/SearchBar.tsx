@@ -1,6 +1,7 @@
 import { onCleanup, onMount, Show } from 'solid-js';
 import { searchActive, searchQuery, setSearchQuery } from '../state';
 import { CloseIcon, SearchIcon } from './Icons';
+import { DRAG } from '../lib/platform';
 
 function isTypingTarget(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
@@ -60,7 +61,7 @@ export function SearchBar() {
   };
 
   return (
-    <div class="search-bar" data-tauri-drag-region>
+    <div class="search-bar" data-tauri-drag-region={DRAG}>
       <label class="search-field" classList={{ filled: searchQuery() !== '' }}>
         <SearchIcon size={14} class="icon search-icon" />
         <input

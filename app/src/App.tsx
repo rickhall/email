@@ -18,6 +18,7 @@ import {
 import { focusSearch, SearchBar } from './components/SearchBar';
 import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
+import { ConfirmHost } from './components/Actions';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
 import { Sidebar } from './components/Sidebar';
@@ -26,6 +27,7 @@ import { Reader } from './components/Reader';
 import { ConversationReader } from './components/Conversation';
 import { Resizer } from './components/Resizer';
 import { AddAccountModal, Onboarding } from './components/AddAccount';
+import { DRAG } from './lib/platform';
 
 const SIDEBAR = { min: 180, max: 420, def: 236 };
 const LIST = { min: 300, max: 760, def: 400 };
@@ -111,7 +113,7 @@ export function App() {
   return (
     <Switch>
       <Match when={accounts() === null}>
-        <div class="splash" data-tauri-drag-region />
+        <div class="splash" data-tauri-drag-region={DRAG} />
       </Match>
       <Match when={accounts()?.length === 0}>
         <Onboarding onAdded={added} />
@@ -136,7 +138,7 @@ export function App() {
                   <Show
                     when={folder()}
                     keyed
-                    fallback={<div class="list-placeholder" data-tauri-drag-region />}
+                    fallback={<div class="list-placeholder" data-tauri-drag-region={DRAG} />}
                   >
                     {(f) => (
                       <Show when={threaded()} fallback={<MessageList folder={f} threaded={false} onOpen={openReader} />}>
@@ -173,6 +175,7 @@ export function App() {
             <AttachmentToast />
           </div>
           <ViewMenuPopover />
+          <ConfirmHost />
           <Show when={showAdd()}>
             <AddAccountModal onAdded={added} onClose={() => setShowAdd(false)} />
           </Show>

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 keyring = "4.2.0"
 mail-core = { version = "0.1.0", path = "../mail-core" }

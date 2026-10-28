@@ -158,6 +158,30 @@ export interface MessageReadyPayload {
   id: number;
 }
 
+/** A user action on messages (api-contract `Action`). */
+export type Action =
+  | { kind: 'archive' }
+  | { kind: 'trash' }
+  | { kind: 'deleteForever' }
+  | { kind: 'move'; targetFolderId: number }
+  | { kind: 'spam' }
+  | { kind: 'notSpam' }
+  | { kind: 'read' }
+  | { kind: 'unread' }
+  | { kind: 'flag' }
+  | { kind: 'unflag' };
+export type ActionKind = Action['kind'];
+
+export interface ActionResult {
+  /** null when nothing was queued (e.g. no-op, or read/star which apply at once) */
+  opId: number | null;
+  undoable: boolean;
+}
+
+export interface ActionFailedPayload {
+  message: string;
+}
+
 /** Native macOS menu bar commands. */
 export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account';
 export interface MenuActionPayload {
@@ -170,6 +194,7 @@ export interface EventMap {
   'message-ready': MessageReadyPayload;
   'sync-status': SyncStatus;
   'menu-action': MenuActionPayload;
+  'action-failed': ActionFailedPayload;
 }
 
 export interface CommandMap {
@@ -203,8 +228,11 @@ export interface CommandMap {
   open_attachment: { args: { messageId: number; index: number }; ret: void };
   save_attachment: { args: { messageId: number; index: number }; ret: string };
   save_all_attachments: { args: { messageId: number }; ret: string[] };
+  apply_action: { args: { action: Action; messageIds: number[]; folderId: number }; ret: ActionResult };
+  undo_action: { args: { opId: number }; ret: void };
   app_version: { args: undefined; ret: string };
   reveal_path: { args: { path: string }; ret: void };
+  index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

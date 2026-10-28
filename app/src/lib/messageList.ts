@@ -168,6 +168,31 @@ export function createPagedList<T extends { id: number }>(
     return -1;
   }
 
+  /**
+   * Index of `id`, loading pages in order (up to `maxPages`) until it's found; -1 if not.
+   * Used to restore a folder's remembered selection deep in the list.
+   */
+  async function locate(id: number, maxPages: number): Promise<number> {
+    for (let p = 0; p < maxPages; p++) {
+      const k = indexOfId(id);
+      if (k >= 0) return k;
+      if (disposed) return -1;
+      if (state.total != null && p * PAGE_SIZE >= state.total) return -1;
+      if (state.pages[p] === undefined) {
+        await fetchPage(p);
+        if (state.pages[p] === undefined) return indexOfId(id); // superseded or failed
+      }
+    }
+    return indexOfId(id);
+  }
+
+  /** The row at `i`, fetching just its page if needed (undefined if gone/superseded). */
+  async function rowAt(i: number): Promise<T | undefined> {
+    const p = pageOf(i);
+    if (state.pages[p] === undefined && !disposed) await fetchPage(p);
+    return row(i);
+  }
+
   const unlistenP = events.onMessagesChanged(({ folderIds }) => {
     // folderId null = results span folders (search): any change may affect them.
     if (folderId == null || folderIds.includes(folderId)) invalidate();
@@ -187,6 +212,8 @@ export function createPagedList<T extends { id: number }>(
     setVisibleRange,
     invalidate,
     reset,
+    locate,
+    rowAt,
   };
 }
 

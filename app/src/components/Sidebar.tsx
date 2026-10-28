@@ -5,6 +5,7 @@ import { foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accoun
 import { fmtNum, loadPref, savePref } from '../lib/format';
 import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon } from './Icons';
 import { PasswordDialog } from './PasswordPrompt';
+import { DRAG } from '../lib/platform';
 
 const ROLE_ORDER: Exclude<FolderRole, null>[] = [
   'inbox',
@@ -485,8 +486,8 @@ function AccountSection(props: { account: Account }) {
 export function Sidebar(props: { onAddAccount: () => void }) {
   return (
     <nav class="sidebar" aria-label="Mailboxes">
-      <div class="sidebar-top" data-tauri-drag-region>
-        <span class="sidebar-title" data-tauri-drag-region>
+      <div class="sidebar-top" data-tauri-drag-region={DRAG}>
+        <span class="sidebar-title" data-tauri-drag-region={DRAG}>
           Mailboxes
         </span>
         <button class="icon-btn" onClick={props.onAddAccount} title="Add account" aria-label="Add account">

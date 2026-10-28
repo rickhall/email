@@ -207,6 +207,10 @@ pub struct Caps {
     pub special_use: bool,
     /// RFC 8474: stable server-assigned EMAILID per message, shared by its copies.
     pub objectid: bool,
+    /// RFC 6851 MOVE; without it a move is COPY + \Deleted + expunge.
+    pub move_ext: bool,
+    /// RFC 4315: UID EXPUNGE removes only the given messages.
+    pub uidplus: bool,
 }
 
 pub struct Connection {
@@ -271,6 +275,8 @@ pub async fn connect(cfg: &ServerConfig) -> Result<Connection> {
         idle: c.has_str("IDLE"),
         special_use: c.has_str("SPECIAL-USE"),
         objectid: c.has_str("OBJECTID"),
+        move_ext: c.has_str("MOVE"),
+        uidplus: c.has_str("UIDPLUS"),
     };
     Ok(Connection { session, caps, selected: None, activity })
 }
@@ -514,6 +520,60 @@ impl Connection {
             .and_then(|f| f.section(&imap_proto::SectionPath::Part(path.clone(), None)))
             .ok_or_else(|| anyhow!("The server returned no data for this attachment."))?;
         Ok(mime::decode_transfer(data, encoding.as_deref()))
+    }
+
+    /// Send one queued action command (see `actions::ServerOp`).
+    pub async fn run_op(&mut self, op: &crate::actions::ServerOp) -> Result<()> {
+        use crate::actions::{ServerOp, quote};
+        async fn store(c: &mut Connection, uid: u32, query: String) -> Result<()> {
+            let r: Vec<Fetch> = c.session.uid_store(uid.to_string(), query).await?.try_collect().await?;
+            drop(r);
+            Ok(())
+        }
+        match op {
+            ServerOp::Labels { folder, uid, add, remove } => {
+                self.ensure_selected(folder).await?;
+                let list = |l: &[String]| l.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" ");
+                if !add.is_empty() {
+                    store(self, *uid, format!("+X-GM-LABELS.SILENT ({})", list(add))).await?;
+                }
+                if !remove.is_empty() {
+                    store(self, *uid, format!("-X-GM-LABELS.SILENT ({})", list(remove))).await?;
+                }
+            }
+            ServerOp::Move { folder, uid, target } => {
+                self.ensure_selected(folder).await?;
+                if self.caps.move_ext {
+                    self.session.uid_mv(uid.to_string(), target).await?;
+                } else {
+                    self.session.uid_copy(uid.to_string(), target).await?;
+                    store(self, *uid, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+                    // Without UIDPLUS a plain EXPUNGE could remove other clients' \Deleted
+                    // messages here; leave ours flagged for the server's own cleanup.
+                    if self.caps.uidplus {
+                        let r: Vec<_> = self.session.uid_expunge(uid.to_string()).await?.try_collect().await?;
+                        drop(r);
+                    }
+                }
+            }
+            ServerOp::Flags { folder, uid, flag, on } => {
+                self.ensure_selected(folder).await?;
+                store(self, *uid, format!("{}FLAGS.SILENT ({flag})", if *on { "+" } else { "-" })).await?;
+            }
+            ServerOp::Expunge { folder, uid } => {
+                self.ensure_selected(folder).await?;
+                store(self, *uid, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+                if self.caps.uidplus {
+                    let r: Vec<_> = self.session.uid_expunge(uid.to_string()).await?.try_collect().await?;
+                    drop(r);
+                } else {
+                    // Only reached from Trash/Spam, where removing \Deleted messages is the point.
+                    let r: Vec<_> = self.session.expunge().await?.try_collect().await?;
+                    drop(r);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Fetch the given section items for messages sharing one plan shape.

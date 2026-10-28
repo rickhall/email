@@ -78,6 +78,20 @@ CREATE TABLE IF NOT EXISTS msgrefs (
 CREATE INDEX IF NOT EXISTS msgrefs_ref ON msgrefs(account_id, ref_msgid);
 CREATE INDEX IF NOT EXISTS msgrefs_msg ON msgrefs(message_id);
 
+-- Server operations for user actions (archive, delete, move, flags), applied locally at once
+-- and sent from here: survives restarts and offline periods. `snapshot` restores the local
+-- state on undo or permanent failure; ops with `started = 0` can still be cancelled.
+CREATE TABLE IF NOT EXISTS pending_ops (
+    id         INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    ops        TEXT NOT NULL,
+    snapshot   TEXT NOT NULL,
+    folders    TEXT NOT NULL,
+    not_before INTEGER NOT NULL,
+    started    INTEGER NOT NULL DEFAULT 0,
+    attempts   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS entries (
     folder_id  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -123,6 +137,41 @@ CREATE TABLE IF NOT EXISTS attachment_cache (
 
 /// How long a stashed body waits for its message to reappear in another folder.
 const STASH_TTL_SECS: i64 = 7 * 24 * 3600;
+
+/// Local state of some messages before an action (undo restores it).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Snapshot {
+    pub entries: Vec<SnapEntry>,
+    pub flags: Vec<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SnapEntry {
+    pub folder_id: i64,
+    pub message_id: i64,
+    pub uid: Option<u32>,
+    pub date: i64,
+}
+
+/// The local effect of an action.
+#[derive(Debug, Clone, Default)]
+pub struct LocalChange {
+    pub message_ids: Vec<i64>,
+    /// (folder, message) entries to drop / add.
+    pub remove: Vec<(i64, i64)>,
+    pub add: Vec<(i64, i64)>,
+    /// (message, flag bits to set, flag bits to clear).
+    pub flags: Vec<(i64, i64, i64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingOp {
+    pub id: i64,
+    pub ops: String,
+    pub snapshot: String,
+    pub folders: String,
+    pub attempts: i64,
+}
 
 /// Header data for one message as fetched from a folder.
 #[derive(Debug, Clone)]
@@ -1149,6 +1198,39 @@ impl Store {
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
     }
 
+    /// Position of a message (`threaded` = false) or conversation (`threaded` = true, `id` is a
+    /// thread id) in the folder's list, using exactly the list queries' ordering; None if it
+    /// isn't in the folder. Lets the UI open a remembered item and scroll to it at any depth.
+    pub fn index_of(&self, folder_id: i64, id: i64, threaded: bool) -> Result<Option<u32>> {
+        let db = self.rdb();
+        if threaded {
+            let newest: Option<i64> = db.query_row(
+                "SELECT max(date) FROM entries WHERE folder_id=?1 AND thread_id=?2",
+                params![folder_id, id],
+                |r| r.get(0),
+            )?;
+            let Some(d) = newest else { return Ok(None) };
+            // list_threads: ORDER BY max(date) DESC, thread_id DESC
+            Ok(Some(db.query_row(
+                "SELECT count(*) FROM (SELECT thread_id, max(date) AS d FROM entries WHERE folder_id=?1
+                 GROUP BY thread_id) WHERE d > ?2 OR (d = ?2 AND thread_id > ?3)",
+                params![folder_id, d, id],
+                |r| r.get(0),
+            )?))
+        } else {
+            let date: Option<i64> = db
+                .query_row("SELECT date FROM entries WHERE folder_id=?1 AND message_id=?2", params![folder_id, id], |r| r.get(0))
+                .optional()?;
+            let Some(d) = date else { return Ok(None) };
+            // list_messages: ORDER BY e.date DESC, e.message_id DESC
+            Ok(Some(db.query_row(
+                "SELECT count(*) FROM entries WHERE folder_id=?1 AND (date > ?2 OR (date = ?2 AND message_id > ?3))",
+                params![folder_id, d, id],
+                |r| r.get(0),
+            )?))
+        }
+    }
+
     /// Whether message `id` is still in `folder_id`, or (with `None`) still exists at all.
     pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
         let db = self.rdb();
@@ -1352,6 +1434,235 @@ impl Store {
         Ok(Some(folders))
     }
 
+    // ---- user actions -----------------------------------------------------------------------
+
+    /// Folder membership and flags of these messages, for undo.
+    pub fn snapshot(&self, ids: &[i64]) -> Result<Snapshot> {
+        let db = self.rdb();
+        let mut snap = Snapshot::default();
+        let mut ent = db.prepare_cached("SELECT folder_id, uid, date FROM entries WHERE message_id=?1")?;
+        let mut fl = db.prepare_cached("SELECT flags FROM messages WHERE id=?1")?;
+        for &id in ids {
+            for row in ent.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?, r.get::<_, i64>(2)?)))? {
+                let (folder_id, uid, date) = row?;
+                snap.entries.push(SnapEntry { folder_id, message_id: id, uid, date });
+            }
+            if let Some(f) = fl.query_row([id], |r| r.get(0)).optional()? {
+                snap.flags.push((id, f));
+            }
+        }
+        Ok(snap)
+    }
+
+    /// Apply an action's local effect: drop/add folder entries and set flags, keeping folder
+    /// counts in step. Returns the folders whose contents changed.
+    pub fn apply_local(&self, change: &LocalChange) -> Result<Vec<i64>> {
+        let ids: Vec<i64> = change.message_ids.clone();
+        self.mutate_counted(&ids, |tx| {
+            let mut del = tx.prepare_cached("DELETE FROM entries WHERE folder_id=?1 AND message_id=?2")?;
+            for (f, m) in &change.remove {
+                del.execute(params![f, m])?;
+            }
+            let mut add = tx.prepare_cached(
+                "INSERT INTO entries (folder_id, message_id, uid, date)
+                 SELECT ?1, ?2, NULL, date FROM messages WHERE id=?2
+                 ON CONFLICT(folder_id, message_id) DO NOTHING",
+            )?;
+            for (f, m) in &change.add {
+                add.execute(params![f, m])?;
+            }
+            let mut set = tx.prepare_cached("UPDATE messages SET flags=(flags | ?2) & ~?3 WHERE id=?1")?;
+            for (m, on, off) in &change.flags {
+                set.execute(params![m, on, off])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Put messages back exactly as snapshotted (undo, or a failed action).
+    pub fn restore(&self, snap: &Snapshot) -> Result<Vec<i64>> {
+        let ids: Vec<i64> = snap.flags.iter().map(|(m, _)| *m).collect();
+        self.mutate_counted(&ids, |tx| {
+            let mut clear = tx.prepare_cached("DELETE FROM entries WHERE message_id=?1")?;
+            for m in &ids {
+                clear.execute([m])?;
+            }
+            let mut ins = tx.prepare_cached(
+                "INSERT INTO entries (folder_id, message_id, uid, date) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(folder_id, message_id) DO UPDATE SET uid=excluded.uid",
+            )?;
+            for e in &snap.entries {
+                ins.execute(params![e.folder_id, e.message_id, e.uid, e.date])?;
+            }
+            let mut set = tx.prepare_cached("UPDATE messages SET flags=?2 WHERE id=?1")?;
+            for (m, f) in &snap.flags {
+                set.execute(params![m, f])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Run `f` on these messages and adjust the cached total/unread of every folder whose
+    /// membership or unread state changed, so the sidebar updates before the next STATUS.
+    fn mutate_counted(
+        &self,
+        ids: &[i64],
+        f: impl FnOnce(&rusqlite::Transaction) -> Result<()>,
+    ) -> Result<Vec<i64>> {
+        type Counts = std::collections::HashMap<i64, (i64, i64)>;
+        fn counts(tx: &rusqlite::Transaction, ids: &[i64]) -> Result<Counts> {
+            let mut out = Counts::new();
+            let mut stmt = tx.prepare_cached(
+                "SELECT e.folder_id, (m.flags & 1) = 0 FROM entries e JOIN messages m ON m.id=e.message_id
+                 WHERE e.message_id=?1",
+            )?;
+            for id in ids {
+                for row in stmt.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)))? {
+                    let (folder, unread) = row?;
+                    let c = out.entry(folder).or_default();
+                    c.0 += 1;
+                    c.1 += unread as i64;
+                }
+            }
+            Ok(out)
+        }
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let before = counts(&tx, ids)?;
+        f(&tx)?;
+        let after = counts(&tx, ids)?;
+        let mut changed = Vec::new();
+        {
+            let mut adj = tx.prepare_cached(
+                "UPDATE folders SET total=max(0, total+?2), unread=max(0, unread+?3) WHERE id=?1",
+            )?;
+            let folders: std::collections::BTreeSet<i64> = before.keys().chain(after.keys()).copied().collect();
+            for folder in folders {
+                let (bt, bu) = before.get(&folder).copied().unwrap_or_default();
+                let (at, au) = after.get(&folder).copied().unwrap_or_default();
+                if (bt, bu) != (at, au) {
+                    adj.execute(params![folder, at - bt, au - bu])?;
+                    changed.push(folder);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn enqueue_ops(&self, account_id: i64, ops: &str, snapshot: &str, folders: &str, not_before_ms: i64) -> Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO pending_ops (account_id, ops, snapshot, folders, not_before) VALUES (?1,?2,?3,?4,?5)",
+            params![account_id, ops, snapshot, folders, not_before_ms],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// Cancel an op that hasn't been sent yet; returns its snapshot JSON.
+    pub fn cancel_op(&self, op_id: i64) -> Result<Option<String>> {
+        let db = self.db();
+        let snap: Option<String> = db
+            .query_row("SELECT snapshot FROM pending_ops WHERE id=?1 AND started=0", [op_id], |r| r.get(0))
+            .optional()?;
+        if snap.is_some() {
+            db.execute("DELETE FROM pending_ops WHERE id=?1", [op_id])?;
+        }
+        Ok(snap)
+    }
+
+    /// The next due op for an account, marked started (no longer cancellable).
+    pub fn claim_due_op(&self, account_id: i64, now_ms: i64) -> Result<Option<PendingOp>> {
+        let db = self.db();
+        let row: Option<PendingOp> = db
+            .query_row(
+                "SELECT id, ops, snapshot, folders, attempts FROM pending_ops
+                 WHERE account_id=?1 AND not_before<=?2 ORDER BY id LIMIT 1",
+                params![account_id, now_ms],
+                |r| Ok(PendingOp { id: r.get(0)?, ops: r.get(1)?, snapshot: r.get(2)?, folders: r.get(3)?, attempts: r.get(4)? }),
+            )
+            .optional()?;
+        if let Some(op) = &row {
+            db.execute("UPDATE pending_ops SET started=1 WHERE id=?1", [op.id])?;
+        }
+        Ok(row)
+    }
+
+    /// Record progress: the commands still to send.
+    pub fn update_op(&self, op_id: i64, ops: &str) -> Result<()> {
+        self.db().execute("UPDATE pending_ops SET ops=?2 WHERE id=?1", params![op_id, ops])?;
+        Ok(())
+    }
+
+    pub fn finish_op(&self, op_id: i64) -> Result<()> {
+        self.db().execute("DELETE FROM pending_ops WHERE id=?1", [op_id])?;
+        Ok(())
+    }
+
+    /// Put an op back for a later retry.
+    pub fn retry_op(&self, op_id: i64, not_before_ms: i64) -> Result<()> {
+        self.db().execute(
+            "UPDATE pending_ops SET started=0, attempts=attempts+1, not_before=?2 WHERE id=?1",
+            params![op_id, not_before_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn next_op_due(&self, account_id: i64) -> Result<Option<i64>> {
+        Ok(self.rdb().query_row("SELECT min(not_before) FROM pending_ops WHERE account_id=?1", [account_id], |r| r.get(0))?)
+    }
+
+    pub fn has_pending_ops(&self, account_id: i64) -> Result<bool> {
+        Ok(self.rdb().prepare_cached("SELECT 1 FROM pending_ops WHERE account_id=?1")?.exists([account_id])?)
+    }
+
+    /// Ops interrupted by a crash or quit mid-send are retried, not lost.
+    pub fn reset_started_ops(&self) -> Result<()> {
+        self.db().execute("UPDATE pending_ops SET started=0 WHERE started=1", [])?;
+        Ok(())
+    }
+
+    /// Drop messages that are in no folder any more, with their body.
+    pub fn purge_orphans(&self, ids: &[i64]) -> Result<()> {
+        let mut gone = Vec::new();
+        {
+            let db = self.db();
+            let mut has = db.prepare_cached("SELECT 1 FROM entries WHERE message_id=?1")?;
+            let mut del = db.prepare_cached("DELETE FROM messages WHERE id=?1")?;
+            for id in ids {
+                if !has.exists([id])? {
+                    del.execute([id])?;
+                    gone.push(*id);
+                }
+            }
+        }
+        let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
+        for id in gone {
+            bodies.execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+            bodies.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
+        }
+        Ok(())
+    }
+
+    /// (folder raw name, uid) for every copy of a message the server knows a UID for.
+    pub fn message_copies(&self, id: i64) -> Result<Vec<(i64, String, u32)>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached(
+            "SELECT f.id, f.raw_name, e.uid FROM entries e JOIN folders f ON f.id=e.folder_id
+             WHERE e.message_id=?1 AND e.uid IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Folder ids a message is in (with or without a UID).
+    pub fn message_folder_ids(&self, id: i64) -> Result<Vec<i64>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached("SELECT folder_id FROM entries WHERE message_id=?1")?;
+        let rows = stmt.query_map([id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn message_flags(&self, id: i64) -> Result<i64> {
         Ok(self.db().query_row("SELECT flags FROM messages WHERE id=?1", [id], |r| r.get(0))?)
     }
@@ -1515,6 +1826,41 @@ mod tests {
         assert_eq!(store.body(moved).unwrap().as_deref(), Some(&b"Subject: b\r\n\r\nbody b"[..]));
         let page = store.list_messages(archive, 0, 10).unwrap();
         assert!(page.messages.iter().any(|m| m.id == moved && m.has_body && m.snippet.as_deref() == Some("body b")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_of_matches_list_order() {
+        let dir = std::env::temp_dir().join(format!("mail-core-indexof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@example.com", "x", Provider::Imap, "h", 993).unwrap();
+        store
+            .sync_folder_list(acct.id, &[ListedFolder { raw_name: "INBOX".into(), path: vec!["INBOX".into()], role: Some(FolderRole::Inbox), selectable: true }])
+            .unwrap();
+        let inbox = store.folders(acct.id).unwrap()[0].id;
+        // Same dates on purpose (ties), replies forming threads.
+        let recs: Vec<HeaderRecord> = (1..=40u32)
+            .map(|u| HeaderRecord {
+                gm_msgid: None,
+                gm_labels: None,
+                message_id: Some(format!("m{u}@x")),
+                in_reply_to: (u % 3 == 0).then(|| format!("m{}@x", u - 1)),
+                date: (u / 4) as i64,
+                ..rec(u, 0, &[])
+            })
+            .collect();
+        store.upsert_headers(acct.id, inbox, &recs, &HashMap::new()).unwrap();
+        let flat = store.list_messages(inbox, 0, 100).unwrap().messages;
+        for (i, m) in flat.iter().enumerate() {
+            assert_eq!(store.index_of(inbox, m.id, false).unwrap(), Some(i as u32));
+        }
+        let threads = store.list_threads(inbox, ThreadScope::default(), 0, 100).unwrap().threads;
+        for (i, t) in threads.iter().enumerate() {
+            assert_eq!(store.index_of(inbox, t.id, true).unwrap(), Some(i as u32));
+        }
+        assert_eq!(store.index_of(inbox, 999_999, false).unwrap(), None);
+        assert_eq!(store.index_of(inbox, 999_999, true).unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

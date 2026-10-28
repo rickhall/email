@@ -11,6 +11,7 @@ use mail_core::model::{CoreEvent, SyncPhase};
 use mail_core::sync::{STRATEGIES, SyncOptions, strategy_by_name};
 use mail_core::{Core, NewAccount, Secrets};
 
+mod action_test;
 mod probe;
 
 #[derive(Parser)]
@@ -75,6 +76,14 @@ enum Cmd {
         ordinal: usize,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Exercise the message-action commands against a real Gmail account on a throwaway test
+    /// message it APPENDs to the Inbox (and deletes for good at the end). Nothing else is touched.
+    ActionTest {
+        #[arg(long)]
+        email: String,
+        #[arg(long, default_value = "imap.gmail.com")]
+        host: String,
     },
     /// Write a stored message's sanitized HTML (what the reader renders) to a file.
     Render {
@@ -181,6 +190,7 @@ async fn main() -> Result<()> {
             conn.logout().await;
             Ok(())
         }
+        Cmd::ActionTest { email, host } => action_test::run(&email, &host).await,
         Cmd::Render { data_dir, id, out } => {
             let store = mail_core::store::Store::open(&data_dir)?;
             let raw = store.body(id)?.ok_or_else(|| anyhow!("no body stored for message {id}"))?;

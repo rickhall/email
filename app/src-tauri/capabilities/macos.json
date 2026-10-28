@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-window-drag",
+  "description": "macOS has no title bar (overlay style): the pane tops drag the window. Linux keeps its native title bar for that.",
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "macOS"
+  ],
+  "permissions": [
+    "core:window:allow-start-dragging"
+  ]
+}

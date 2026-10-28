@@ -1,6 +1,7 @@
 import { createSignal, Show } from 'solid-js';
 import { api, errorMessage, type Account } from '../api';
 import { AlertIcon, ChevronIcon, CloseIcon, MailIcon } from './Icons';
+import { DRAG } from '../lib/platform';
 
 function isGmail(email: string) {
   const d = email.split('@')[1]?.trim().toLowerCase() ?? '';
@@ -151,7 +152,7 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
 
 export function Onboarding(props: { onAdded: (a: Account) => void }) {
   return (
-    <div class="onboarding" data-tauri-drag-region>
+    <div class="onboarding" data-tauri-drag-region={DRAG}>
       <div class="card">
         <div class="card-hero">
           <div class="hero-icon">

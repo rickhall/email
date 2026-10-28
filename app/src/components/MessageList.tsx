@@ -6,6 +6,9 @@ import { fmtNum, smartDate } from '../lib/format';
 import { highlightParts, highlightRegex } from '../lib/query';
 import {
   accounts,
+  rememberedSelection,
+  rememberSelection,
+  setRestorePending,
   conversationScope,
   setConversationScope,
   includeTrash,
@@ -25,6 +28,11 @@ import {
 } from '../state';
 import { CheckIcon, FlagIcon, PaperclipIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
+import { registerListNav, runShortcut } from '../lib/actions';
+
+/** Pages (×200 rows) searched for a remembered item before giving up on restoring it. */
+const RESTORE_MAX_PAGES = 10;
+import { DRAG } from '../lib/platform';
 
 type Item = MessageSummary | ThreadSummary;
 
@@ -341,10 +349,94 @@ export function MessageList(props: {
         else scrollEl.focus({ preventScroll: true });
         break;
       default:
+        // Message actions: e, #, Delete, v, !, Shift+U, s, z.
+        if (runShortcut(e)) break;
         return;
     }
     e.preventDefault();
   }
+
+  // Thunderbird-style: re-open this folder's remembered item (per view mode) when entering it.
+  if (!search) {
+    const remembered = rememberedSelection(folderId, threaded);
+    if (remembered != null && untrack(selectedId) == null) {
+      let disposed = false;
+      onCleanup(() => {
+        disposed = true;
+        setRestorePending(false);
+      });
+      setRestorePending(true);
+      // The empty reader stays quiet at most this long, then shows its hint as usual.
+      const quietTimer = setTimeout(() => setRestorePending(false), 150);
+      // index_of answers both questions at once: still in this folder, and where (any depth).
+      void api
+        .indexOf(folderId, remembered, threaded)
+        .then(
+          (i) => i,
+          // Older core without index_of: fall back to walking the first pages.
+          () => model.locate(remembered, RESTORE_MAX_PAGES).then((k) => (k >= 0 ? k : null)),
+        )
+        .then(async (idx) => {
+          if (disposed) return;
+          if (idx == null) {
+            rememberSelection(folderId, threaded, null);
+            return;
+          }
+          // The user may have picked something meanwhile: never override that.
+          if (untrack(selectedId) != null) return;
+          // Scroll only if the row isn't on screen, then centred. (Before the first page lands the
+          // list may not be that long yet, so this is repeated once the row is here.)
+          const reveal = (i: number) => {
+            const top = i * ROW_HEIGHT;
+            if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
+              virt.scrollToIndex(i, { align: 'center' });
+            }
+          };
+          setSelIndex(idx);
+          if (idx < count()) reveal(idx);
+          // Open it as soon as its row (one page, fetched directly) is here.
+          let m = await model.rowAt(idx);
+          let k = idx;
+          if (disposed || untrack(selectedId) != null) return;
+          if (m?.id !== remembered) {
+            // List shifted between index_of and the page fetch: find it nearby.
+            k = model.indexOfId(remembered);
+            m = k >= 0 ? model.row(k) : undefined;
+          }
+          if (!m) return;
+          setSelIndex(k);
+          select(m);
+          queueMicrotask(() => reveal(k));
+        })
+        .finally(() => {
+          clearTimeout(quietTimer);
+          if (!disposed) setRestorePending(false);
+        });
+    }
+  }
+
+  // Lets message actions open the next older row (own actions) and re-sync after undo.
+  onCleanup(
+    registerListNav(search ? 'search' : 'folder', {
+      advance() {
+        const cur = selIndex();
+        const n = count();
+        if (cur < 0 || n === 0) return;
+        if (cur + 1 < n) selectIndex(cur + 1);
+        else if (cur - 1 >= 0) selectIndex(cur - 1);
+        else threaded ? selectThread(null) : selectMessage(null);
+      },
+      sync() {
+        const id = untrack(selectedId);
+        if (id == null) return;
+        const k = model.indexOfId(id);
+        if (k >= 0) {
+          setSelIndex(k);
+          virt.scrollToIndex(k, { align: 'auto' });
+        }
+      },
+    }),
+  );
 
   onMount(() => {
     window.addEventListener('keydown', onKey);
@@ -358,11 +450,11 @@ export function MessageList(props: {
     <section class="list" aria-label={search ? 'Search results' : 'Messages'}>
       <Show when={props.search}>
         {(sp) => (
-          <header class="list-head search-head" data-tauri-drag-region>
-            <div class="search-head-row" data-tauri-drag-region>
-            <div class="list-title" data-tauri-drag-region>
+          <header class="list-head search-head" data-tauri-drag-region={DRAG}>
+            <div class="search-head-row" data-tauri-drag-region={DRAG}>
+            <div class="list-title" data-tauri-drag-region={DRAG}>
               {/* The query itself is already in the search field; show only the outcome. */}
-              <div class="list-sub search-count" data-tauri-drag-region>
+              <div class="list-sub search-count" data-tauri-drag-region={DRAG}>
                 <span>
                   <Show when={model.state.total != null} fallback="Searching…">
                     {model.state.total === 0
@@ -400,8 +492,8 @@ export function MessageList(props: {
               </button>
             </div>
             </div>
-            <div class="search-fields" role="group" aria-label="Search in" data-tauri-drag-region>
-              <span class="search-fields-label" data-tauri-drag-region>Search in</span>
+            <div class="search-fields" role="group" aria-label="Search in" data-tauri-drag-region={DRAG}>
+              <span class="search-fields-label" data-tauri-drag-region={DRAG}>Search in</span>
               <For each={['sender', 'recipients', 'subject'] as SearchField[]}>
                 {(f) => (
                   <button
@@ -423,10 +515,10 @@ export function MessageList(props: {
         )}
       </Show>
       <Show when={!search}>
-      <header class="list-head" data-tauri-drag-region>
-        <div class="list-title" data-tauri-drag-region>
-          <h2 data-tauri-drag-region>{props.folder.displayName}</h2>
-          <div class="list-sub" data-tauri-drag-region>
+      <header class="list-head" data-tauri-drag-region={DRAG}>
+        <div class="list-title" data-tauri-drag-region={DRAG}>
+          <h2 data-tauri-drag-region={DRAG}>{props.folder.displayName}</h2>
+          <div class="list-sub" data-tauri-drag-region={DRAG}>
             <Show when={threaded}>
               <span>
                 {fmtNum(props.folder.syncedCount)} {props.folder.syncedCount === 1 ? 'message' : 'messages'}

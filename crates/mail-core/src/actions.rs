@@ -1,0 +1,537 @@
+//! User actions on messages (archive, delete, move, spam, read/unread, star).
+//!
+//! An action is applied to the local store at once (the UI never waits) and its server side is
+//! queued as [`ServerOp`]s in `pending_ops`, sent in order on the interactive connection. Moves
+//! wait [`UNDO_WINDOW_MS`] first, so undo just cancels the queued ops and restores the snapshot.
+//!
+//! Gmail and other servers differ in what an action means on the server:
+//!
+//! | action  | Gmail                                             | other IMAP                       |
+//! |---------|---------------------------------------------------|----------------------------------|
+//! | archive | remove \Inbox and user labels ("unfiled")          | MOVE to the \Archive folder      |
+//! | trash   | MOVE to [Gmail]/Trash                              | MOVE to \Trash                   |
+//! | move    | remove current label, add target label             | MOVE to target                   |
+//! | spam    | MOVE to [Gmail]/Spam                               | MOVE to \Junk                    |
+//! | flags   | STORE once (flags are per message)                 | STORE on every copy              |
+//!
+//! Gmail operations address a message by its All Mail UID when it has one, since that copy
+//! carries every label; messages in Trash/Spam (not in All Mail) use their copy there.
+
+use std::collections::{HashMap, HashSet};
+
+use anyhow::{Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::model::{Folder, FolderRole, flags};
+use crate::store::{LocalChange, Store};
+
+/// Moves wait this long before being sent, so they can be undone without a server round trip.
+pub const UNDO_WINDOW_MS: i64 = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Action {
+    Archive,
+    Trash,
+    /// Only from Trash or Spam: remove from the server for good.
+    DeleteForever,
+    #[serde(rename_all = "camelCase")]
+    Move { target_folder_id: i64 },
+    Spam,
+    NotSpam,
+    Read,
+    Unread,
+    Flag,
+    Unflag,
+}
+
+impl Action {
+    fn is_flags(self) -> bool {
+        matches!(self, Action::Read | Action::Unread | Action::Flag | Action::Unflag)
+    }
+}
+
+/// One server command, addressed by folder raw name and UID.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase")]
+pub enum ServerOp {
+    /// Gmail: change labels (`add`/`remove` are X-GM-LABELS values, e.g. `\Inbox`, `Work`).
+    Labels { folder: String, uid: u32, add: Vec<String>, remove: Vec<String> },
+    Move { folder: String, uid: u32, target: String },
+    /// `flag` is an IMAP flag such as `\Seen`.
+    Flags { folder: String, uid: u32, flag: String, on: bool },
+    /// \Deleted + UID EXPUNGE (permanent).
+    Expunge { folder: String, uid: u32 },
+}
+
+/// What applying an action produced.
+pub struct Planned {
+    pub change: LocalChange,
+    pub ops: Vec<ServerOp>,
+    /// Folders touched on the server (re-synced once the ops are sent).
+    pub folders: Vec<i64>,
+    pub delay_ms: i64,
+}
+
+/// Gmail X-GM-LABELS value for a label-backed folder.
+fn gmail_label(f: &Folder) -> Option<String> {
+    Some(match f.role {
+        Some(FolderRole::Inbox) => "\\Inbox".into(),
+        Some(FolderRole::Sent) => "\\Sent".into(),
+        Some(FolderRole::Drafts) => "\\Draft".into(),
+        Some(FolderRole::Important) => "\\Important".into(),
+        Some(FolderRole::Flagged) => "\\Starred".into(),
+        Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk) => return None,
+        Some(FolderRole::Archive) | None => f.raw_name.clone(),
+    })
+}
+
+fn find_role(folders: &[Folder], role: FolderRole, gmail: bool) -> Option<&Folder> {
+    let mut matching = folders.iter().filter(|f| f.role == Some(role) && f.selectable);
+    if gmail {
+        // Prefer Gmail's own system folder if a user folder happens to share the role.
+        let all: Vec<&Folder> = matching.collect();
+        all.iter()
+            .copied()
+            .find(|f| f.raw_name.starts_with("[Gmail]/") || f.raw_name.starts_with("[Google Mail]/"))
+            .or(all.first().copied())
+    } else {
+        matching.next()
+    }
+}
+
+/// Plan an action on `message_ids`, viewed in `context` (the folder on screen).
+pub fn plan(
+    store: &Store,
+    account_id: i64,
+    gmail: bool,
+    action: Action,
+    message_ids: &[i64],
+    context: i64,
+) -> Result<Planned> {
+    let folders = store.folders(account_id)?;
+    let by_id: HashMap<i64, &Folder> = folders.iter().map(|f| (f.id, f)).collect();
+    let ctx = *by_id.get(&context).ok_or_else(|| anyhow!("unknown folder"))?;
+    let role = |r| find_role(&folders, r, gmail);
+    let all_mail = if gmail { role(FolderRole::All) } else { None };
+
+    let mut change = LocalChange { message_ids: message_ids.to_vec(), ..Default::default() };
+    let mut ops = Vec::new();
+    let mut touched: HashSet<i64> = HashSet::from([context]);
+
+    for &id in message_ids {
+        let in_folders: Vec<i64> = store.message_folder_ids(id)?;
+        let copies = store.message_copies(id)?; // (folder id, raw, uid)
+        let copy_in = |fid: i64| copies.iter().find(|c| c.0 == fid).map(|c| (c.1.clone(), c.2));
+        // A conversation's revealed messages may live outside the folder on screen: use the
+        // copy in view when there is one, else the message's own copy (non-Trash first).
+        let any_copy = || {
+            let is_bin = |fid: &i64| by_id.get(fid).is_some_and(|f| matches!(f.role, Some(FolderRole::Trash | FolderRole::Junk)));
+            copies.iter().find(|c| !is_bin(&c.0)).or(copies.first()).map(|c| (c.0, c.1.clone(), c.2))
+        };
+        // The copy server commands address: (folder id, raw name, uid).
+        let primary = if gmail {
+            all_mail
+                .and_then(|a| copies.iter().find(|c| c.0 == a.id))
+                .map(|c| (c.0, c.1.clone(), c.2))
+                .or_else(|| copies.iter().find(|c| c.0 == context).map(|c| (c.0, c.1.clone(), c.2)))
+                .or_else(any_copy)
+        } else {
+            copies.iter().find(|c| c.0 == context).map(|c| (c.0, c.1.clone(), c.2)).or_else(any_copy)
+        };
+        let need_primary = || {
+            primary
+                .clone()
+                .map(|(_, raw, uid)| (raw, uid))
+                .ok_or_else(|| anyhow!("This message isn't on the server yet; try again after it syncs."))
+        };
+        let move_to = |target: &Folder, change: &mut LocalChange, ops: &mut Vec<ServerOp>, touched: &mut HashSet<i64>| -> Result<()> {
+            // Already there (e.g. a revealed message that's in Trash): nothing to do.
+            if in_folders.contains(&target.id) {
+                return Ok(());
+            }
+            let (source, folder, uid) =
+                primary.clone().ok_or_else(|| anyhow!("This message isn't on the server yet; try again after it syncs."))?;
+            ops.push(ServerOp::Move { folder, uid, target: target.raw_name.clone() });
+            if gmail {
+                // In Gmail a message lives in one of Inbox/labels/All Mail, Trash or Spam.
+                for &f in &in_folders {
+                    change.remove.push((f, id));
+                    touched.insert(f);
+                }
+            } else {
+                // Only the moved copy leaves; other copies stay where they are.
+                change.remove.push((source, id));
+                touched.insert(source);
+            }
+            change.add.push((target.id, id));
+            touched.insert(target.id);
+            Ok(())
+        };
+
+        match action {
+            // Out of Trash/Spam, "unfiled" means back into All Mail with no labels.
+            Action::Archive if gmail && in_folders.iter().any(|f| by_id.get(f).is_some_and(|f| matches!(f.role, Some(FolderRole::Trash | FolderRole::Junk)))) => {
+                let target = all_mail.ok_or_else(|| anyhow!("This account has no All Mail folder."))?;
+                move_to(target, &mut change, &mut ops, &mut touched)?;
+            }
+            Action::Archive if gmail => {
+                // Unfiled: drop \Inbox and user labels; keep Sent/Drafts/Starred/Important.
+                let mut remove = Vec::new();
+                for &f in &in_folders {
+                    let Some(folder) = by_id.get(&f) else { continue };
+                    if matches!(folder.role, Some(FolderRole::Inbox) | None | Some(FolderRole::Archive)) {
+                        if let Some(label) = gmail_label(folder) {
+                            remove.push(label);
+                            change.remove.push((f, id));
+                            touched.insert(f);
+                        }
+                    }
+                }
+                if !remove.is_empty() {
+                    let (folder, uid) = need_primary()?;
+                    ops.push(ServerOp::Labels { folder, uid, add: vec![], remove });
+                }
+            }
+            Action::Archive => {
+                let target = role(FolderRole::Archive).ok_or_else(|| anyhow!("This account has no Archive folder."))?;
+                if target.id != context {
+                    move_to(target, &mut change, &mut ops, &mut touched)?;
+                }
+            }
+            Action::Trash => {
+                let target = role(FolderRole::Trash).ok_or_else(|| anyhow!("This account has no Trash folder."))?;
+                if target.id == context {
+                    bail!("This message is already in the Trash.");
+                }
+                move_to(target, &mut change, &mut ops, &mut touched)?;
+            }
+            Action::DeleteForever => {
+                if !matches!(ctx.role, Some(FolderRole::Trash | FolderRole::Junk)) {
+                    bail!("Messages can only be deleted for good from Trash or Spam.");
+                }
+                // Only the copy in this folder; revealed messages elsewhere are left alone.
+                if let Some((folder, uid)) = copy_in(context) {
+                    ops.push(ServerOp::Expunge { folder, uid });
+                    change.remove.push((context, id));
+                }
+            }
+            Action::Move { target_folder_id } => {
+                let target = *by_id.get(&target_folder_id).ok_or_else(|| anyhow!("unknown folder"))?;
+                if target.id == context {
+                    continue;
+                }
+                match (gmail, target.role) {
+                    (true, Some(FolderRole::Trash)) => return plan(store, account_id, gmail, Action::Trash, message_ids, context),
+                    (true, Some(FolderRole::Junk)) => return plan(store, account_id, gmail, Action::Spam, message_ids, context),
+                    (true, Some(FolderRole::All)) => return plan(store, account_id, gmail, Action::Archive, message_ids, context),
+                    (true, _) if matches!(ctx.role, Some(FolderRole::Trash | FolderRole::Junk)) => {
+                        // Out of Trash/Spam: a real move, then the label applies.
+                        move_to(target, &mut change, &mut ops, &mut touched)?;
+                    }
+                    (true, _) => {
+                        let add = gmail_label(target).ok_or_else(|| anyhow!("Can't move to {}.", target.display_name))?;
+                        // Drop the label being viewed only from messages that carry it.
+                        let remove: Vec<String> =
+                            if in_folders.contains(&context) { gmail_label(ctx).into_iter().collect() } else { vec![] };
+                        let (folder, uid) = need_primary()?;
+                        ops.push(ServerOp::Labels { folder, uid, add: vec![add], remove });
+                        if ctx.role != Some(FolderRole::All) && in_folders.contains(&context) {
+                            change.remove.push((context, id));
+                        }
+                        change.add.push((target.id, id));
+                        touched.insert(target.id);
+                    }
+                    (false, _) => move_to(target, &mut change, &mut ops, &mut touched)?,
+                }
+            }
+            Action::Spam => {
+                let target = role(FolderRole::Junk).ok_or_else(|| anyhow!("This account has no Spam folder."))?;
+                if target.id != context {
+                    move_to(target, &mut change, &mut ops, &mut touched)?;
+                }
+            }
+            Action::NotSpam => {
+                let inbox = role(FolderRole::Inbox).ok_or_else(|| anyhow!("no Inbox"))?;
+                if ctx.role != Some(FolderRole::Junk) {
+                    bail!("Not spam only applies to messages in Spam.");
+                }
+                // Revealed messages that aren't in Spam are left alone.
+                if let Some((folder, uid)) = copy_in(context) {
+                    ops.push(ServerOp::Move { folder, uid, target: inbox.raw_name.clone() });
+                    change.remove.push((context, id));
+                    change.add.push((inbox.id, id));
+                    touched.insert(inbox.id);
+                }
+            }
+            Action::Read | Action::Unread | Action::Flag | Action::Unflag => {
+                let (bit, flag, on) = match action {
+                    Action::Read => (flags::SEEN, "\\Seen", true),
+                    Action::Unread => (flags::SEEN, "\\Seen", false),
+                    Action::Flag => (flags::FLAGGED, "\\Flagged", true),
+                    _ => (flags::FLAGGED, "\\Flagged", false),
+                };
+                change.flags.push((id, if on { bit } else { 0 }, if on { 0 } else { bit }));
+                if gmail {
+                    let (folder, uid) = need_primary()?;
+                    ops.push(ServerOp::Flags { folder, uid, flag: flag.into(), on });
+                } else {
+                    // Each copy has its own flags.
+                    for (fid, folder, uid) in &copies {
+                        ops.push(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.into(), on });
+                        touched.insert(*fid);
+                    }
+                }
+                // Starred is a Gmail folder backed by \Flagged.
+                if bit == flags::FLAGGED {
+                    if let Some(starred) = role(FolderRole::Flagged) {
+                        if on { change.add.push((starred.id, id)) } else { change.remove.push((starred.id, id)) }
+                        touched.insert(starred.id);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Planned {
+        change,
+        ops,
+        folders: touched.into_iter().collect(),
+        delay_ms: if action.is_flags() { 0 } else { UNDO_WINDOW_MS },
+    })
+}
+
+/// IMAP quoting for a label or mailbox name in a command.
+pub fn quote(s: &str) -> String {
+    if s.starts_with('\\') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '\\') {
+        return s.to_string(); // system label: \Inbox
+    }
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Provider;
+    use crate::store::{HeaderRecord, ListedFolder};
+
+    fn rec(uid: u32, gm: Option<u64>, labels: Option<&[&str]>, mid: &str, flags: i64) -> HeaderRecord {
+        HeaderRecord {
+            uid,
+            gm_msgid: gm,
+            email_id: None,
+            gm_labels: labels.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            message_id: Some(mid.into()),
+            in_reply_to: None,
+            refs: None,
+            subject: format!("m{uid}"),
+            from_name: String::new(),
+            from_addr: "a@b.c".into(),
+            to_addrs: String::new(),
+            date: uid as i64,
+            size: 10,
+            flags,
+            has_attachments: false,
+        }
+    }
+
+    fn lf(name: &str, role: Option<FolderRole>) -> ListedFolder {
+        ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true }
+    }
+
+    struct Env {
+        store: Store,
+        acct: i64,
+        dir: std::path::PathBuf,
+    }
+    impl Env {
+        fn new(tag: &str, provider: Provider, folders: &[ListedFolder]) -> Env {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("mail-core-actions-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = Store::open(&dir).unwrap();
+            let acct = store.insert_account("x@example.com", "x", provider, "h", 993).unwrap().id;
+            store.sync_folder_list(acct, folders).unwrap();
+            Env { store, acct, dir }
+        }
+        fn id(&self, name: &str) -> i64 {
+            self.store.folders(self.acct).unwrap().into_iter().find(|f| f.raw_name == name).unwrap().id
+        }
+        fn folder_names(&self, msg: i64) -> Vec<String> {
+            let mut v: Vec<String> = self
+                .store
+                .message_folder_ids(msg)
+                .unwrap()
+                .into_iter()
+                .map(|f| self.store.folders(self.acct).unwrap().into_iter().find(|x| x.id == f).unwrap().raw_name)
+                .collect();
+            v.sort();
+            v
+        }
+    }
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn gmail_env() -> (Env, i64) {
+        let env = Env::new(
+            "gmail",
+            Provider::Gmail,
+            &[
+                lf("INBOX", Some(FolderRole::Inbox)),
+                lf("[Gmail]/All Mail", Some(FolderRole::All)),
+                lf("[Gmail]/Trash", Some(FolderRole::Trash)),
+                lf("[Gmail]/Spam", Some(FolderRole::Junk)),
+                lf("[Gmail]/Sent Mail", Some(FolderRole::Sent)),
+                lf("Work", None),
+                lf("Travel", None),
+            ],
+        );
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        let r = rec(900, Some(1), Some(&["\\Inbox", "Work", "\\Sent"]), "a@x", 0);
+        env.store.upsert_headers(env.acct, env.id("[Gmail]/All Mail"), &[r.clone()], &labels).unwrap();
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[HeaderRecord { uid: 5, ..r }], &labels).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("INBOX"), &[5]).unwrap()[0];
+        (env, msg)
+    }
+
+    #[test]
+    fn gmail_archive_unfiles_and_undo_restores() {
+        let (env, msg) = gmail_env();
+        let inbox = env.id("INBOX");
+        assert_eq!(env.folder_names(msg), ["INBOX", "Work", "[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
+        let before = env.store.snapshot(&[msg]).unwrap();
+
+        let p = plan(&env.store, env.acct, true, Action::Archive, &[msg], inbox).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![ServerOp::Labels {
+                folder: "[Gmail]/All Mail".into(),
+                uid: 900,
+                add: vec![],
+                remove: vec!["\\Inbox".into(), "Work".into()]
+            }]
+        );
+        assert_eq!(p.delay_ms, UNDO_WINDOW_MS);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
+
+        env.store.restore(&before).unwrap();
+        assert_eq!(env.folder_names(msg), ["INBOX", "Work", "[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
+    }
+
+    #[test]
+    fn gmail_trash_move_and_flags() {
+        let (env, msg) = gmail_env();
+        let inbox = env.id("INBOX");
+
+        let p = plan(&env.store, env.acct, true, Action::Trash, &[msg], inbox).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Move { folder: "[Gmail]/All Mail".into(), uid: 900, target: "[Gmail]/Trash".into() }]);
+        let mut c = p.change.clone();
+        env.store.apply_local(&c).unwrap();
+        assert_eq!(env.folder_names(msg), ["[Gmail]/Trash"]);
+        c.remove.clear();
+
+        let (env, msg) = gmail_env();
+        let p = plan(&env.store, env.acct, true, Action::Move { target_folder_id: env.id("Travel") }, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![ServerOp::Labels { folder: "[Gmail]/All Mail".into(), uid: 900, add: vec!["Travel".into()], remove: vec!["\\Inbox".into()] }]
+        );
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["Travel", "Work", "[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
+
+        let p = plan(&env.store, env.acct, true, Action::Read, &[msg], env.id("Travel")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 900, flag: "\\Seen".into(), on: true }]);
+        assert_eq!(p.delay_ms, 0);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.store.message_flags(msg).unwrap() & flags::SEEN, flags::SEEN);
+    }
+
+    #[test]
+    fn imap_moves_the_copy_in_view_and_flags_every_copy() {
+        let env = Env::new(
+            "imap",
+            Provider::Imap,
+            &[lf("INBOX", Some(FolderRole::Inbox)), lf("Archive", Some(FolderRole::Archive)), lf("Trash", Some(FolderRole::Trash)), lf("Projects", None)],
+        );
+        let none = HashMap::new();
+        let r = rec(7, None, None, "b@x", 0);
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[r.clone()], &none).unwrap();
+        env.store.upsert_headers(env.acct, env.id("Projects"), &[HeaderRecord { uid: 3, ..r }], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("INBOX"), &[7]).unwrap()[0];
+        assert_eq!(env.folder_names(msg), ["INBOX", "Projects"]);
+
+        let p = plan(&env.store, env.acct, false, Action::Archive, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Move { folder: "INBOX".into(), uid: 7, target: "Archive".into() }]);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["Archive", "Projects"]);
+
+        let p = plan(&env.store, env.acct, false, Action::Flag, &[msg], env.id("Projects")).unwrap();
+        // Archive's copy has no UID yet (arrives on its next sync); Projects' copy is flagged.
+        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "Projects".into(), uid: 3, flag: "\\Flagged".into(), on: true }]);
+
+        let none_archive = Env::new("noarch", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        none_archive.store.upsert_headers(none_archive.acct, none_archive.id("INBOX"), &[rec(1, None, None, "c@x", 0)], &none).unwrap();
+        let m = none_archive.store.message_ids_for_uids(none_archive.id("INBOX"), &[1]).unwrap()[0];
+        assert!(plan(&none_archive.store, none_archive.acct, false, Action::Archive, &[m], none_archive.id("INBOX")).is_err());
+    }
+
+    #[test]
+    fn revealed_messages_in_other_folders() {
+        // Gmail: trashing a conversation that includes a message already in Trash.
+        let (env, msg) = gmail_env();
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        env.store.upsert_headers(env.acct, env.id("[Gmail]/Trash"), &[rec(44, Some(2), Some(&[]), "t@x", 0)], &labels).unwrap();
+        let trashed = env.store.message_ids_for_uids(env.id("[Gmail]/Trash"), &[44]).unwrap()[0];
+        let p = plan(&env.store, env.acct, true, Action::Trash, &[msg, trashed], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Move { folder: "[Gmail]/All Mail".into(), uid: 900, target: "[Gmail]/Trash".into() }]);
+
+        // IMAP: archiving a conversation viewed in INBOX that includes a message from Sent.
+        let env = Env::new(
+            "reveal",
+            Provider::Imap,
+            &[lf("INBOX", Some(FolderRole::Inbox)), lf("Sent", Some(FolderRole::Sent)), lf("Archive", Some(FolderRole::Archive))],
+        );
+        let none = HashMap::new();
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[rec(1, None, None, "a@x", 0)], &none).unwrap();
+        env.store.upsert_headers(env.acct, env.id("Sent"), &[rec(9, None, None, "b@x", 0)], &none).unwrap();
+        let a = env.store.message_ids_for_uids(env.id("INBOX"), &[1]).unwrap()[0];
+        let b = env.store.message_ids_for_uids(env.id("Sent"), &[9]).unwrap()[0];
+        let p = plan(&env.store, env.acct, false, Action::Archive, &[a, b], env.id("INBOX")).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Move { folder: "INBOX".into(), uid: 1, target: "Archive".into() },
+                ServerOp::Move { folder: "Sent".into(), uid: 9, target: "Archive".into() },
+            ]
+        );
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(a), ["Archive"]);
+        assert_eq!(env.folder_names(b), ["Archive"]);
+    }
+
+    #[test]
+    fn gmail_archive_from_trash_restores_to_all_mail() {
+        let (env, _) = gmail_env();
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        env.store.upsert_headers(env.acct, env.id("[Gmail]/Trash"), &[rec(44, Some(2), Some(&[]), "t@x", 0)], &labels).unwrap();
+        let m = env.store.message_ids_for_uids(env.id("[Gmail]/Trash"), &[44]).unwrap()[0];
+        let p = plan(&env.store, env.acct, true, Action::Archive, &[m], env.id("[Gmail]/Trash")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Move { folder: "[Gmail]/Trash".into(), uid: 44, target: "[Gmail]/All Mail".into() }]);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(m), ["[Gmail]/All Mail"]);
+    }
+
+    #[test]
+    fn quoting() {
+        assert_eq!(quote("\\Inbox"), "\\Inbox");
+        assert_eq!(quote("Work/Q \"1\""), "\"Work/Q \\\"1\\\"\"");
+    }
+}

@@ -17,3 +17,10 @@ function detect(): Platform {
 
 export const platform: Platform = detect();
 document.documentElement.classList.add(platform);
+
+/**
+ * Value for `data-tauri-drag-region`. Only macOS drags the window from pane tops (its title
+ * bar is an overlay); elsewhere the native title bar does that, and "false" stops Tauri's drag
+ * script from swallowing mouse presses (and with them text selection) in those areas.
+ */
+export const DRAG: 'true' | 'false' = platform === 'macos' ? 'true' : 'false';

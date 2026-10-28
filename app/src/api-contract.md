@@ -75,6 +75,15 @@ interface ThreadView {
   hiddenTrash: number;  // messages the scope hid that are only in Trash/Spam
 }
 
+/** Message actions. `folderId` passed with them is the folder being viewed. */
+type Action =
+  | { kind: 'archive' }        // Gmail: unfiled (drop Inbox + user labels); else move to Archive
+  | { kind: 'trash' }
+  | { kind: 'deleteForever' }  // only in Trash/Spam
+  | { kind: 'move'; targetFolderId: number }
+  | { kind: 'spam' } | { kind: 'notSpam' }
+  | { kind: 'read' } | { kind: 'unread' } | { kind: 'flag' } | { kind: 'unflag' };
+
 type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error'
                | 'auth'     // credentials rejected: sync paused until update_password
                | 'limited'; // server refused a connection temporarily (connection limit); retrying on its own
@@ -100,6 +109,9 @@ interface SyncStatus {
 | `open_attachment` | `{ messageId, index }` | `void` — fetches if needed, writes to the app cache, opens in the default app. Rejects (string) for non-openable types or on failure |
 | `save_attachment` | `{ messageId, index }` | `string` — absolute path written in the Downloads folder (`name (1).ext` if taken) |
 | `save_all_attachments` | `{ messageId }` | `string[]` — absolute paths of every attachment, each saved directly in Downloads (`name (1).ext` if taken) |
+| `apply_action` | `{ action: Action, messageIds: number[], folderId }` | `{ opId: number \| null, undoable: boolean }` — applies locally at once (emits `messages-changed` / `folders-changed`); moves are sent to the server after a 5 s undo window, read/star at once. Rejects (string) when the action doesn't apply (e.g. no Archive folder) |
+| `undo_action` | `{ opId }` | `void` — within the undo window; rejects "Too late to undo…" otherwise |
+| `index_of` | `{ folderId, id, threaded }` | `number \| null` — the row index of a message (`threaded: false`) or conversation (`threaded: true`, `id` = thread id) in the folder's list (same ordering as `list_messages` / `list_threads`); `null` when it isn't in the folder |
 | `app_version` | – | `string` — e.g. "0.1.28" |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
@@ -115,6 +127,7 @@ interface SyncStatus {
 | `folders-changed` | `{ accountId }` |
 | `messages-changed` | `{ folderIds: number[] }` (throttled ~250ms) |
 | `message-ready` | `{ id }` |
+| `action-failed` | `{ message }` — a queued action was rejected by the server and rolled back locally |
 | `sync-status` | `SyncStatus` |
 
 ## Quick search query syntax

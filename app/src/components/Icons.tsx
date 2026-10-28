@@ -122,6 +122,45 @@ export const MailIcon = (p: P) => (
     <path d="m2.5 4.5 5.5 4 5.5-4" />
   </Svg>
 );
+export const MoveIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />
+    <path d="M6 9h4.5M9 7.25 10.75 9 9 10.75" />
+  </Svg>
+);
+export const StarFilledIcon = (p: P) => (
+  <Svg {...p} fill>
+    <path d="m8 1.6 1.95 4.05 4.45.55-3.27 3.1.83 4.4L8 11.55 4.04 13.7l.83-4.4L1.6 6.2l4.45-.55z" />
+  </Svg>
+);
+export const UnreadIcon = (p: P) => (
+  <Svg {...p}>
+    <rect x="1.75" y="3.75" width="10.5" height="8.5" rx="1.5" />
+    <path d="m2.5 5 4.75 3.25L12 5" />
+    <circle cx="13" cy="3.5" r="2" fill="currentColor" stroke="none" />
+  </Svg>
+);
+export const ReadIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2 6.5 8 2.5l6 4V12a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z" />
+    <path d="m2.5 7 5.5 3.75L13.5 7" />
+  </Svg>
+);
+export const MoreIcon = (p: P) => (
+  <Svg {...p} fill>
+    <circle cx="3.5" cy="8" r="1.25" />
+    <circle cx="8" cy="8" r="1.25" />
+    <circle cx="12.5" cy="8" r="1.25" />
+  </Svg>
+);
+export const DeleteForeverIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2.5 4h11" />
+    <path d="M6 4V2.5h4V4" />
+    <path d="M3.8 4l.7 9a1 1 0 0 0 1 .9h5a1 1 0 0 0 1-.9l.7-9" />
+    <path d="m6.5 7 3 3.5M9.5 7l-3 3.5" />
+  </Svg>
+);
 export const ExternalIcon = (p: P) => (
   <Svg {...p}>
     <path d="M9 2.75h4.25V7" />

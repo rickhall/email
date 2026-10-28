@@ -5,8 +5,10 @@ export { AttachmentControl };
 import { analyzePlain, collapseHtmlQuotes, QUOTE_FRAME_CSS, type QNode } from '../lib/quotes';
 import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } from '../lib/body';
 import { avatarColor, initials, linkify, longDate } from '../lib/format';
-import { selectedMessageId, selectedSummary } from '../state';
+import { patchSelectedSummary, restorePending, searchActive, selectedFolderId, selectedMessageId, selectedSummary } from '../state';
+import { HeaderActions, type ActionTarget } from './Actions';
 import { ImageIcon, MailIcon, PaperclipIcon } from './Icons';
+import { DRAG } from '../lib/platform';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -181,7 +183,7 @@ type Phase = 'idle' | 'loading' | 'downloading' | 'ready' | 'error';
 
 export function ReaderEmpty() {
   return (
-    <div class="reader-empty" data-tauri-drag-region>
+    <div class="reader-empty" classList={{ quiet: restorePending() }} data-tauri-drag-region={DRAG}>
       <MailIcon size={44} class="icon empty-icon" />
       <div class="reader-empty-title">No message selected</div>
       <div class="reader-empty-sub">
@@ -190,6 +192,16 @@ export function ReaderEmpty() {
     </div>
   );
 }
+
+/** What the header actions act on in single-message view: the open message. */
+const actionTarget = (): ActionTarget | null => {
+  const s = selectedSummary();
+  const id = selectedMessageId();
+  if (!s || s.id !== id) return null;
+  // Search results span folders: act in the message's own folder there.
+  const folderId = searchActive() ? s.folderId : selectedFolderId() ?? s.folderId;
+  return { ids: [s.id], folderId, anyUnread: s.unread, starId: s.id, starred: s.flagged, advance: !searchActive() };
+};
 
 export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   const [allowRemote, setAllowRemote] = createSignal(false);
@@ -244,7 +256,10 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
         setShown({ d, remote: remote || d.remoteAllowed });
         setPhase('ready');
         // Opening a message marks it read; the core no-ops if it already is.
-        api.setRead(id, true).catch(() => {});
+        api
+          .setRead(id, true)
+          .then(() => patchSelectedSummary(id, { unread: false }))
+          .catch(() => {});
         return;
       }
       setPhase('downloading');
@@ -318,11 +333,11 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
         {(h) => (
           <>
             {/* Fixed-height band: lines up with the message list's header border. */}
-            <header class="reader-band" data-tauri-drag-region>
+            <header class="reader-band" data-tauri-drag-region={DRAG}>
               <h1 class="reader-subject" title={h().subject || '(no subject)'}>
                 {h().subject || '(no subject)'}
               </h1>
-              <div class="band-meta" data-tauri-drag-region>
+              <div class="band-meta" data-tauri-drag-region={DRAG}>
                 <time dateTime={new Date(h().date * 1000).toISOString()}>{longDate(h().date)}</time>
                 <Show when={h().attachments.length > 0}>
                   <span class="dot-sep">·</span>
@@ -331,6 +346,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                     {h().attachments.length} {h().attachments.length === 1 ? 'attachment' : 'attachments'}
                   </span>
                 </Show>
+                <HeaderActions target={actionTarget()} />
               </div>
             </header>
             <div class="reader-head">

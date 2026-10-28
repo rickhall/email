@@ -1,4 +1,4 @@
-import { batch, createSignal } from 'solid-js';
+import { batch, createEffect, createRoot, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, events, type Account, type Folder, type MessageSummary, type SyncStatus, type ThreadSummary, type ConversationScope, type SearchField } from './api';
 import { loadPref, savePref } from './lib/format';
@@ -39,6 +39,12 @@ export function folderById(id: number | null): Folder | undefined {
     if (f) return f;
   }
   return undefined;
+}
+
+/** Keep the selected row's copy in step after a local change (read/star). */
+export function patchSelectedSummary(id: number, patch: Partial<MessageSummary>): void {
+  const cur = selectedSummary();
+  if (cur && cur.id === id) setSelectedSummary({ ...cur, ...patch });
 }
 
 export function selectMessage(m: MessageSummary | null): void {
@@ -247,3 +253,70 @@ export async function initApp(): Promise<void> {
     console.warn('get_sync_status failed', e);
   }
 }
+
+// ------------------------------------------------------------- per-folder remembered selection
+
+/** folder id -> last selected thread (t) / message (f) id, with a recency stamp. Persisted. */
+type SelMemory = Record<string, { t?: number; f?: number; at: number }>;
+const SEL_KEY = 'ui.lastSelection';
+const SEL_MAX = 500;
+const selMem: SelMemory = (() => {
+  const v = loadPref<unknown>(SEL_KEY, {});
+  return v && typeof v === 'object' ? (v as SelMemory) : {};
+})();
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+function persistSelMem() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const keys = Object.keys(selMem);
+    if (keys.length > SEL_MAX) {
+      keys
+        .sort((a, b) => (selMem[a]!.at ?? 0) - (selMem[b]!.at ?? 0))
+        .slice(0, keys.length - SEL_MAX)
+        .forEach((k) => delete selMem[k]);
+    }
+    savePref(SEL_KEY, selMem);
+  }, 200);
+}
+
+export function rememberedSelection(folderId: number, threadedMode: boolean): number | null {
+  const e = selMem[folderId];
+  const v = threadedMode ? e?.t : e?.f;
+  return typeof v === 'number' ? v : null;
+}
+
+export function rememberSelection(folderId: number, threadedMode: boolean, id: number | null): void {
+  const e = selMem[folderId] ?? { at: 0 };
+  if (threadedMode) {
+    if (id == null) delete e.t;
+    else e.t = id;
+  } else if (id == null) delete e.f;
+  else e.f = id;
+  e.at = Date.now();
+  if (e.t == null && e.f == null) delete selMem[folderId];
+  else selMem[folderId] = e;
+  persistSelMem();
+}
+
+/** True while a folder's remembered item is being verified (the empty reader hides its hint). */
+const [restorePending, setRestorePending] = createSignal(false);
+export { restorePending, setRestorePending };
+
+// Record selection changes made *within* a folder+mode (not the reset that comes with
+// switching folder / mode / entering or leaving search, and nothing while searching).
+createRoot(() => {
+  let prevKey = '';
+  createEffect(() => {
+    const f = selectedFolderId();
+    const th = threaded();
+    const s = searchActive();
+    const id = th ? selectedThreadId() : selectedMessageId();
+    const key = `${f}|${th}|${s}`;
+    if (key !== prevKey) {
+      prevKey = key;
+      return;
+    }
+    if (f == null || s) return;
+    rememberSelection(f, th, id);
+  });
+});

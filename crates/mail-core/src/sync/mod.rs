@@ -170,6 +170,8 @@ struct Shared {
     dirty: Mutex<HashSet<i64>>,
     /// Wakes the headers task (dirty folders, count sweep requests).
     refresh: Notify,
+    /// Wakes the interactive task: an action was queued or cancelled.
+    outbox: Notify,
     /// A STATUS sweep of all folder counts is due (run by the headers task between steps).
     counts_due: std::sync::atomic::AtomicBool,
     /// Folders whose contents changed since their counts were last fetched; recounted
@@ -267,6 +269,7 @@ impl AccountSync {
             new_headers: Notify::new(),
             dirty: Mutex::new(HashSet::new()),
             refresh: Notify::new(),
+            outbox: Notify::new(),
             counts_due: std::sync::atomic::AtomicBool::new(true),
             counts_dirty: Mutex::new(HashSet::new()),
             urgent: urgent_tx.clone(),
@@ -299,6 +302,11 @@ impl AccountSync {
     /// Fetch this message's body ahead of everything else.
     pub fn request_body(&self, message_id: i64) {
         let _ = self.urgent_tx.send(Job::Body(message_id));
+    }
+
+    /// A user action was queued: send it when due.
+    pub fn wake_outbox(&self) {
+        self.shared.outbox.notify_one();
     }
 
     /// Fetch an omitted attachment on the interactive connection.
@@ -438,6 +446,15 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         first_pass = false;
 
         loop {
+            // A pending user action (archive, move, ...) hasn't reached the server yet: syncing
+            // now would put the message back. Wait for the outbox to drain (normally ≤ 5 s).
+            if shared.store.has_pending_ops(account.id)? {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                    _ = shared.refresh.notified() => {}
+                }
+                continue;
+            }
             // Counts: after the first step (so the focused folder's new mail isn't delayed
             // at startup), or whenever there's nothing else to do.
             if first_step_done {
@@ -628,6 +645,12 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
 /// One incremental step (new mail, flag changes, expunges) on a folder the server just told
 /// us about, on the caller's connection. Bodies of new mail are queued at top priority.
 async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i64) -> Result<()> {
+    // Leave it to the headers task, which waits for pending actions to be sent first.
+    if shared.store.has_pending_ops(shared.account.id)? {
+        shared.dirty.lock().unwrap().insert(folder_id);
+        shared.refresh.notify_one();
+        return Ok(());
+    }
     let folders = shared.store.folders(shared.account.id)?;
     let Some(folder) = folders.iter().find(|f| f.id == folder_id) else { return Ok(()) };
     let label_folders = gmail_label_map(&folders);
@@ -788,11 +811,25 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             }
         }
 
+        // Queued user actions go first: they're what the user is waiting on.
+        if let Some(c) = conn.as_mut() {
+            if let Err(e) = run_outbox(&shared, c).await {
+                tracing::debug!("outbox: {e:#}");
+                conn = None;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        }
+        let next_due = shared.store.next_op_due(shared.account.id).ok().flatten();
+        let until_due = next_due.map(|t| Duration::from_millis((t - now_ms()).max(0) as u64)).unwrap_or(KEEPALIVE);
+
         let first = tokio::select! {
             job = rx.recv() => match job {
                 Some(j) => j,
                 None => return,
             },
+            _ = shared.outbox.notified() => continue,
+            _ = tokio::time::sleep(until_due.min(KEEPALIVE)), if next_due.is_some() => continue,
             _ = tokio::time::sleep(KEEPALIVE) => {
                 if let Some(c) = conn.as_mut() {
                     if c.session.noop().await.is_err() {
@@ -886,6 +923,73 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             let _ = part.reply.send(result);
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Send every due queued action. Progress is saved after each command, so a dropped
+/// connection resumes where it stopped. A server rejection (NO/BAD) rolls the action back
+/// locally and tells the user; connection trouble retries with backoff.
+async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
+    use crate::actions::ServerOp;
+    while let Some(op) = shared.store.claim_due_op(shared.account.id, now_ms())? {
+        let mut ops: Vec<ServerOp> = serde_json::from_str(&op.ops).unwrap_or_default();
+        let folders: Vec<i64> = serde_json::from_str(&op.folders).unwrap_or_default();
+        let mut failure: Option<anyhow::Error> = None;
+        while !ops.is_empty() {
+            let activity = conn.activity.clone();
+            match imap::stall_timeout(&activity, STALL_TIMEOUT, "sending an action", conn.run_op(&ops[0])).await.and_then(|r| r) {
+                Ok(()) => {
+                    ops.remove(0);
+                    shared.store.update_op(op.id, &serde_json::to_string(&ops)?)?;
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        }
+        let snapshot: crate::store::Snapshot = serde_json::from_str(&op.snapshot).unwrap_or_default();
+        match failure {
+            None => {
+                shared.store.finish_op(op.id)?;
+                let ids: Vec<i64> = snapshot.flags.iter().map(|(m, _)| *m).collect();
+                // Messages deleted for good are in no folder now: drop them and their bodies.
+                shared.store.purge_orphans(&ids)?;
+                // Re-sync what changed so UIDs of moved copies and counts catch up.
+                shared.dirty.lock().unwrap().extend(folders.iter().copied());
+                shared.counts_dirty.lock().unwrap().extend(folders.iter().copied());
+                shared.refresh.notify_one();
+            }
+            Some(e) => {
+                let rejected = e.chain().any(|c| {
+                    matches!(c.downcast_ref::<async_imap::error::Error>(), Some(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_)))
+                });
+                if rejected || op.attempts >= 5 {
+                    tracing::warn!(op = op.id, "action failed, rolling back: {e:#}");
+                    shared.store.finish_op(op.id)?;
+                    let changed = shared.store.restore(&snapshot)?;
+                    shared.emit(CoreEvent::MessagesChanged { folder_ids: changed });
+                    shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
+                    shared.emit(CoreEvent::ActionFailed {
+                        message: format!("The server didn't accept the change, so it was undone: {e:#}"),
+                    });
+                    shared.dirty.lock().unwrap().extend(folders.iter().copied());
+                    shared.refresh.notify_one();
+                    if !rejected {
+                        return Err(e);
+                    }
+                } else {
+                    let backoff = 2_000i64 << op.attempts.min(5);
+                    shared.store.retry_op(op.id, now_ms() + backoff)?;
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Fetch one omitted attachment: its section is recorded when the body was downloaded, or
