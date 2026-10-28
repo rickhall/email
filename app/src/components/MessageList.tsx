@@ -28,6 +28,7 @@ import {
 } from '../state';
 import { CheckIcon, FlagIcon, PaperclipIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
+import { climbToParent, FolderCrumbs } from './FolderSwitcher';
 import { registerListNav, runShortcut } from '../lib/actions';
 
 /** Pages (×200 rows) searched for a remembered item before giving up on restoring it. */
@@ -348,6 +349,9 @@ export function MessageList(props: {
         if (search) setSearchQuery('');
         else scrollEl.focus({ preventScroll: true });
         break;
+      case 'Backspace':
+        if (search || !climbToParent()) return;
+        break;
       default:
         // Message actions: e, #, Delete, v, !, Shift+U, s, z.
         if (runShortcut(e)) break;
@@ -517,7 +521,7 @@ export function MessageList(props: {
       <Show when={!search}>
       <header class="list-head" data-tauri-drag-region={DRAG}>
         <div class="list-title" data-tauri-drag-region={DRAG}>
-          <h2 data-tauri-drag-region={DRAG}>{props.folder.displayName}</h2>
+          <FolderCrumbs folder={props.folder} />
           <div class="list-sub" data-tauri-drag-region={DRAG}>
             <Show when={threaded}>
               <span>

@@ -122,6 +122,18 @@ export const MailIcon = (p: P) => (
     <path d="m2.5 4.5 5.5 4 5.5-4" />
   </Svg>
 );
+export const SidebarIcon = (p: P) => (
+  <Svg {...p}>
+    <rect x="2" y="2.75" width="12" height="10.5" rx="1.75" />
+    <path d="M6 2.75v10.5" />
+  </Svg>
+);
+export const FoldersIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2.5 3.5h4l1.2 1.3h5.8v7.7h-11z" />
+    <path d="M5 8h6M5 10.5h4" />
+  </Svg>
+);
 export const MoveIcon = (p: P) => (
   <Svg {...p}>
     <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />

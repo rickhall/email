@@ -3,11 +3,12 @@ import { createStore } from 'solid-js/store';
 import { api, type Account, type Folder, type FolderRole, type SyncStatus } from '../api';
 import { foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
 import { fmtNum, loadPref, savePref } from '../lib/format';
-import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon } from './Icons';
+import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon, SidebarIcon } from './Icons';
 import { PasswordDialog } from './PasswordPrompt';
+import { toggleSidebar } from '../lib/layout';
 import { DRAG } from '../lib/platform';
 
-const ROLE_ORDER: Exclude<FolderRole, null>[] = [
+export const ROLE_ORDER: Exclude<FolderRole, null>[] = [
   'inbox',
   'flagged',
   'important',
@@ -32,7 +33,7 @@ interface TreeNode {
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
-function isInboxPath(f: Folder) {
+export function isInboxPath(f: Folder) {
   return f.path.length === 1 && f.path[0]?.toUpperCase() === 'INBOX';
 }
 
@@ -66,7 +67,7 @@ function buildTree(accountId: number, folders: Folder[]): TreeNode[] {
   return prune(root.children);
 }
 
-function roleFolders(folders: Folder[]): Folder[] {
+export function roleFolders(folders: Folder[]): Folder[] {
   return folders
     .filter((f) => f.selectable && (f.role || isInboxPath(f)))
     .sort((a, b) => {
@@ -94,7 +95,7 @@ function toggleNode(n: TreeNode) {
   savePref('ui.expanded', ui.expanded);
 }
 
-function badgeFor(f: Folder): number {
+export function badgeFor(f: Folder): number {
   if (f.role === 'drafts') return f.total;
   if (NO_BADGE.has(f.role)) return 0;
   return f.unread;
@@ -234,7 +235,8 @@ function SyncPopoverRow(props: { account: Account; status: SyncStatus | undefine
  * One fixed-height summary row pinned to the sidebar bottom; clicking it opens a popover
  * (overlay, never pushes layout) with per-account details.
  */
-function SyncFooter() {
+/** Sync status: the full-width summary row, or (compact, in the rail) just its glyph. */
+export function SyncFooter(props: { compact?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const [fixFor, setFixFor] = createSignal<Account | null>(null);
   let rowEl!: HTMLButtonElement;
@@ -309,9 +311,9 @@ function SyncFooter() {
   });
 
   return (
-    <footer class="sync-footer">
+    <footer class="sync-footer" classList={{ compact: !!props.compact }}>
       <Show when={open()}>
-        <div class="sync-popover" ref={popEl} role="dialog" aria-label="Account sync status">
+        <div class="sync-popover" classList={{ rail: !!props.compact }} ref={popEl} role="dialog" aria-label="Account sync status">
           <For each={snap()}>
             {(x) => <SyncPopoverRow account={x.account} status={x.status} onFix={() => setFixFor(x.account)} />}
           </For>
@@ -328,10 +330,12 @@ function SyncFooter() {
         onClick={() => setOpen((v) => !v)}
       >
         <StatusGlyph phase={summary().phase} />
-        <span class="sf-text sf-summary-text">{summary().text}</span>
-        <span class="sf-chevron" aria-hidden="true">
-          <ChevronIcon size={12} />
-        </span>
+        <Show when={!props.compact}>
+          <span class="sf-text sf-summary-text">{summary().text}</span>
+          <span class="sf-chevron" aria-hidden="true">
+            <ChevronIcon size={12} />
+          </span>
+        </Show>
         <ProgressTrack active={summary().active} pct={summary().pct} />
       </button>
       <Show when={fixFor()}>{(a) => <PasswordDialog account={a()} onClose={() => setFixFor(null)} />}</Show>
@@ -442,7 +446,7 @@ function AccountSection(props: { account: Account }) {
   const status = () => syncByAccount[props.account.id];
   const totalUnread = createMemo(() => roles().find((f) => f.role === 'inbox' || isInboxPath(f))?.unread ?? 0);
   return (
-    <section class="account">
+    <section class="account" data-account-id={props.account.id}>
       <button
         class="account-head"
         onClick={() => toggleAccount(props.account.id)}
@@ -483,16 +487,26 @@ function AccountSection(props: { account: Account }) {
   );
 }
 
-export function Sidebar(props: { onAddAccount: () => void }) {
+export function Sidebar(props: { onAddAccount: () => void; flyout?: boolean }) {
   return (
-    <nav class="sidebar" aria-label="Mailboxes">
+    <nav class="sidebar" classList={{ flyout: !!props.flyout }} aria-label="Mailboxes">
       <div class="sidebar-top" data-tauri-drag-region={DRAG}>
         <span class="sidebar-title" data-tauri-drag-region={DRAG}>
           Mailboxes
         </span>
-        <button class="icon-btn" onClick={props.onAddAccount} title="Add account" aria-label="Add account">
-          <PlusIcon />
-        </button>
+        <span class="sidebar-top-btns">
+          <button class="icon-btn" onClick={props.onAddAccount} title="Add account" aria-label="Add account">
+            <PlusIcon />
+          </button>
+          <button
+            class="icon-btn"
+            onClick={() => toggleSidebar()}
+            title={props.flyout ? 'Keep sidebar open (Ctrl+1)' : 'Collapse sidebar (Ctrl+1)'}
+            aria-label={props.flyout ? 'Keep sidebar open' : 'Collapse sidebar'}
+          >
+            <SidebarIcon />
+          </button>
+        </span>
       </div>
       <div class="sidebar-scroll">
         <For each={accounts() ?? []}>{(a) => <AccountSection account={a} />}</For>

@@ -16,6 +16,10 @@ import {
   setConversationScope,
 } from './state';
 import { focusSearch, SearchBar } from './components/SearchBar';
+import { Rail } from './components/Rail';
+import { Flyout } from './components/Flyout';
+import { FolderSwitcherHost, openFolderSwitcher } from './components/FolderSwitcher';
+import { flyout, RAIL_W, setFlyout, sidebarMode, toggleSidebar } from './lib/layout';
 import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { ConfirmHost } from './components/Actions';
@@ -40,6 +44,25 @@ export function App() {
   let readerEl: HTMLElement | undefined;
 
   onMount(() => void initApp());
+
+  // Ctrl/⌘+1: full ↔ rail · Ctrl/⌘+Shift+1: folder flyout · Ctrl/⌘+G: folder switcher.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (document.querySelector('.modal-backdrop') || (accounts()?.length ?? 0) === 0) return;
+      if (e.code === 'Digit1') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          if (sidebarMode() === 'rail') setFlyout(flyout() ? false : 'keyboard');
+        } else toggleSidebar();
+      } else if (!e.shiftKey && e.key.toLowerCase() === 'g') {
+        e.preventDefault();
+        openFolderSwitcher();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
 
   // Native macOS menu bar (no-op elsewhere: the event is never sent).
   onMount(() => {
@@ -119,16 +142,32 @@ export function App() {
         <Onboarding onAdded={added} />
       </Match>
       <Match when={true}>
-        <div class="app" style={{ '--sidebar-w': `${sidebarW()}px`, '--list-w': `${listW()}px` }}>
+        <div
+          class="app"
+          classList={{ 'rail-mode': sidebarMode() === 'rail' }}
+          style={{ '--sidebar-w': `${sidebarMode() === 'rail' ? RAIL_W : sidebarW()}px`, '--list-w': `${listW()}px` }}
+        >
           <div class="pane pane-sidebar">
-            <Sidebar onAddAccount={() => setShowAdd(true)} />
-            <Resizer
-              label="Resize sidebar"
-              width={sidebarW}
-              onResize={(w) => setSidebarW(clamp(w, SIDEBAR.min, SIDEBAR.max))}
-              onDone={() => savePref('ui.sidebarWidth', sidebarW())}
-            />
+            <Show
+              when={sidebarMode() === 'rail'}
+              fallback={
+                <>
+                  <Sidebar onAddAccount={() => setShowAdd(true)} />
+                  <Resizer
+                    label="Resize sidebar"
+                    width={sidebarW}
+                    onResize={(w) => setSidebarW(clamp(w, SIDEBAR.min, SIDEBAR.max))}
+                    onDone={() => savePref('ui.sidebarWidth', sidebarW())}
+                  />
+                </>
+              }
+            >
+              <Rail />
+            </Show>
           </div>
+          <Show when={flyout()}>
+            <Flyout width={sidebarW()} onAddAccount={() => setShowAdd(true)} />
+          </Show>
           <div class="pane pane-list">
             <div class="list-pane">
               <SearchBar />
@@ -176,6 +215,7 @@ export function App() {
           </div>
           <ViewMenuPopover />
           <ConfirmHost />
+          <FolderSwitcherHost />
           <Show when={showAdd()}>
             <AddAccountModal onAdded={added} onClose={() => setShowAdd(false)} />
           </Show>

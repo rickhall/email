@@ -2837,3 +2837,281 @@ html.macos .sidebar-title {
 .reader-empty.quiet > * {
   visibility: hidden;
 }
+
+/* ==========================================================================
+   Sidebar rail (48px), folder flyout, breadcrumb + folder switcher
+   ========================================================================== */
+
+.app {
+  position: relative;
+  transition: grid-template-columns 160ms var(--ease);
+}
+body.resizing .app {
+  transition: none;
+}
+.sidebar-top-btns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* rail */
+.rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  align-items: stretch;
+}
+.rail-top {
+  flex: none;
+  height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  padding-top: 10px;
+  /* the second (folders) button sits in the scroll area's first row on non-mac */
+  height: auto;
+}
+html.macos .rail-top {
+  /* traffic lights at y≈14–28 span past the rail: first item below them */
+  padding-top: 40px;
+}
+.rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  padding: 2px 0 8px;
+}
+.rail-scroll::-webkit-scrollbar {
+  width: 0;
+}
+.rail-acct {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 8px 0 4px;
+}
+.rail-acct + .rail-acct {
+  border-top: 1px solid var(--sep);
+  margin: 0 8px;
+}
+.rail-marker {
+  width: 36px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 2px;
+}
+
+.rail-marker span {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+.rail-btn {
+  position: relative;
+  width: 36px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 80ms;
+}
+.rail-acct .rail-btn {
+  color: var(--accent);
+}
+.rail-btn:hover {
+  background: var(--bg-hover);
+}
+.rail-btn.selected {
+  background: var(--sidebar-sel);
+}
+.rail-badge {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  min-width: 15px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--unread);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 1.5px var(--bg-sidebar);
+}
+.sync-footer.compact {
+  padding: 4px 6px;
+}
+.sync-footer.compact .sf-summary {
+  grid-template-columns: 14px;
+  justify-content: center;
+  padding: 0;
+  height: 32px;
+}
+.sync-footer.compact .sf-summary .sf-track {
+  left: 6px;
+  right: 6px;
+}
+.sync-popover.rail {
+  left: 6px;
+  right: auto;
+  width: 300px;
+}
+
+/* flyout: the full tree over the list (never pushes content) */
+.flyout {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 45;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--sep);
+  box-shadow: 8px 0 28px rgba(0, 0, 0, 0.14);
+  animation: flyout-in 160ms var(--ease);
+}
+@keyframes flyout-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .flyout {
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* macOS rail: keep the list column's top-band content right of the traffic lights */
+html.macos .app.rail-mode .search-bar {
+  padding-left: 40px;
+}
+
+/* breadcrumb title */
+.list-title h2.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.crumb {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+.crumb.current {
+  flex: 0 0 auto;
+  max-width: 75%;
+  cursor: pointer;
+}
+.crumb.link,
+.crumb.muted {
+  color: var(--text-3);
+  font-weight: 600;
+}
+.crumb.link {
+  cursor: pointer;
+}
+.crumb.link:hover {
+  color: var(--accent);
+}
+.crumb-sep {
+  flex: none;
+  color: var(--text-4);
+  font-weight: 400;
+}
+.crumb-switch {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  cursor: pointer;
+}
+.crumb-switch:hover,
+.crumb-switch[aria-expanded='true'] {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.crumb:focus-visible,
+.crumb-switch:focus-visible {
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
+}
+
+/* folder switcher (reuses the move-picker shell) */
+.folder-switcher {
+  transform-origin: top left;
+}
+.fs-group {
+  padding: 8px 8px 3px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fs-row.current .mp-name {
+  font-weight: 650;
+}
+.fs-count {
+  flex: none;
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.mp-row.active .fs-count {
+  color: var(--on-accent);
+}
+
+/* Account marker (breadcrumb, folder switcher): same tinted letter as the rail. */
+.acct-dot {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.fs-group {
+  display: flex;
+  align-items: center;
+}
+.fs-group .acct-dot {
+  font-size: 8.5px;
+}
