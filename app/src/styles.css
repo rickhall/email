@@ -3930,3 +3930,17 @@ html.macos .app.rail-mode .search-bar {
 .cmp-editor .ProseMirror li + li {
   margin-top: 2px;
 }
+
+/* our outgoing mail: in place of the date */
+.send-state {
+  font-style: italic;
+  color: var(--text-3);
+}
+.send-state.failed {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--danger);
+}
+.list-scroll:focus-within .row.selected .send-state {
+  color: var(--sel-muted);
+}

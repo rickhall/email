@@ -426,6 +426,14 @@ impl Core {
         if let Some(s) = self.running.lock().unwrap().get(&account.id) {
             s.wake_sender();
         }
+        // Shown in Sent (and its conversation) right away, marked as sending.
+        let sent = self.store.folders(account.id)?.into_iter().find(|f| f.role == Some(FolderRole::Sent));
+        if let Some(sent) = sent {
+            let raw = self.store.outgoing_raw(id)?.unwrap_or_default();
+            let copy = self.store.insert_local_copy(account.id, sent.id, &raw, id)?;
+            let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: self.store.message_folder_ids(copy)? });
+            let _ = self.events.send(CoreEvent::FoldersChanged { account_id: account.id });
+        }
         Ok(SendQueued { id, send_at })
     }
 
@@ -434,6 +442,13 @@ impl Core {
         let draft = self.store.cancel_outgoing(id)?.ok_or_else(|| anyhow!("Too late to undo: the message was already sent."))?;
         for s in self.running.lock().unwrap().values() {
             s.wake_sender();
+        }
+        let folders = self.store.drop_local_copy(id)?;
+        if !folders.is_empty() {
+            let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders.clone() });
+            for (account_id, _) in folders.iter().filter_map(|f| self.store.folder(*f).ok().flatten()).collect::<std::collections::HashSet<_>>() {
+                let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
+            }
         }
         Ok(serde_json::from_str(&draft).ok())
     }

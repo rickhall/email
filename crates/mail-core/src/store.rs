@@ -458,6 +458,10 @@ const SCOPE_FILTER: &str = "(
 
 /// Writers (sync) and readers (UI) use separate connections so that WAL lets the UI read
 /// while a large header batch is being written.
+/// A conversation member as `list_threads` reads it: id, subject, from name, from address,
+/// flags, has attachments, snippet, Message-ID, keywords, send state (None / Some(failed)).
+type Member = (i64, String, String, String, i64, bool, Option<String>, Option<String>, String, Option<bool>);
+
 /// A message to queue for sending (see `Store::enqueue_outgoing`).
 pub struct NewOutgoing {
     pub account_id: i64,
@@ -544,6 +548,9 @@ impl Store {
             ("messages", "identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
             ("messages", "keywords", "ALTER TABLE messages ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"),
             ("accounts", "smtp_host", "ALTER TABLE accounts ADD COLUMN smtp_host TEXT"),
+            // Our own sent mail, shown before the server has it (see `insert_local_copy`).
+            ("messages", "local_copy", "ALTER TABLE messages ADD COLUMN local_copy INTEGER NOT NULL DEFAULT 0"),
+            ("messages", "pending_send", "ALTER TABLE messages ADD COLUMN pending_send INTEGER"),
             ("accounts", "smtp_port", "ALTER TABLE accounts ADD COLUMN smtp_port INTEGER"),
         ] {
             let exists = db
@@ -948,6 +955,15 @@ impl Store {
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             )?;
             let mut update_flags = tx.prepare_cached("UPDATE messages SET flags=?2, keywords=?3 WHERE id=?1")?;
+            // Our local copy of a message we sent: the server's copy takes it over (same row, so
+            // no duplicate and the conversation keeps its place).
+            let mut by_local = tx.prepare_cached(
+                "SELECT id FROM messages WHERE account_id=?1 AND local_copy=1 AND gm_msgid IS NULL AND message_id=?2",
+            )?;
+            let mut adopt = tx.prepare_cached(
+                "UPDATE messages SET local_copy=0, pending_send=NULL, gm_msgid=coalesce(gm_msgid, ?2)
+                 WHERE id=?1 AND local_copy=1",
+            )?;
             let mut entry = tx.prepare_cached(
                 "INSERT INTO entries (folder_id, message_id, uid, date) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(folder_id, message_id) DO UPDATE SET uid=coalesce(excluded.uid, entries.uid)",
@@ -955,7 +971,13 @@ impl Store {
             for rec in records {
                 let mut identity = message_identity(rec);
                 let existing: Option<i64> = match rec.gm_msgid {
-                    Some(gm) => by_gm.query_row(params![account_id, gm as i64], |r| r.get(0)).optional()?,
+                    Some(gm) => match by_gm.query_row(params![account_id, gm as i64], |r| r.get(0)).optional()? {
+                        Some(id) => Some(id),
+                        None => match &rec.message_id {
+                            Some(mid) => by_local.query_row(params![account_id, mid], |r| r.get(0)).optional()?,
+                            None => None,
+                        },
+                    },
                     None => match by_uid.query_row(params![folder_id, rec.uid], |r| r.get(0)).optional()? {
                         Some(id) => Some(id),
                         None => match &identity {
@@ -985,6 +1007,7 @@ impl Store {
                 let id = match existing {
                     Some(id) => {
                         update_flags.execute(params![id, rec.flags, crate::tags::join(&rec.keywords)])?;
+                        adopt.execute(params![id, rec.gm_msgid.map(|g| g as i64)])?;
                         id
                     }
                     None => {
@@ -1206,7 +1229,8 @@ impl Store {
             db.query_row("SELECT count(*) FROM entries WHERE folder_id=?1", [folder_id], |r| r.get(0))?;
         let mut stmt = db.prepare_cached(
             "SELECT m.id, m.subject, m.from_name, m.from_addr, m.date, m.snippet, m.flags,
-                    m.has_attachments, m.has_body, m.keywords
+                    m.has_attachments, m.has_body, m.keywords,
+                    (SELECT o.failed IS NOT NULL FROM outgoing o WHERE o.id = m.pending_send)
              FROM entries e JOIN messages m ON m.id = e.message_id
              WHERE e.folder_id=?1 ORDER BY e.date DESC, e.message_id DESC LIMIT ?2 OFFSET ?3",
         )?;
@@ -1227,6 +1251,8 @@ impl Store {
                 tags: crate::tags::visible(&r.get::<_, String>(9)?),
                 answered: flags & flags::ANSWERED != 0,
                 forwarded: crate::tags::is_forwarded(&r.get::<_, String>(9)?),
+                sending: r.get::<_, Option<bool>>(10)? == Some(false),
+                send_failed: r.get::<_, Option<bool>>(10)? == Some(true),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
@@ -1259,15 +1285,14 @@ impl Store {
             .unwrap_or_default();
         let mut members = db.prepare_cached(&format!(
             "SELECT m.id, m.subject, m.from_name, m.from_addr, m.flags, m.has_attachments, m.snippet, m.message_id,
-                    m.keywords
+                    m.keywords, (SELECT o.failed IS NOT NULL FROM outgoing o WHERE o.id = m.pending_send)
              FROM messages m WHERE m.thread_id=?1 AND {SCOPE_FILTER} ORDER BY m.date, m.id"
         ))?;
         let mut threads = Vec::with_capacity(page.len());
         for (thread_id, date) in page {
-            #[allow(clippy::type_complexity)]
-            let rows: Vec<(i64, String, String, String, i64, bool, Option<String>, Option<String>, String)> = members
+            let rows: Vec<Member> = members
                 .query_map(params![thread_id, folder_id, scope.all_folders, scope.include_trash], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             let Some(first) = rows.first() else { continue };
@@ -1283,7 +1308,7 @@ impl Store {
             let mut seen_ids = std::collections::HashSet::new();
             let count = rows.iter().filter(|r| r.7.as_ref().is_none_or(|m| seen_ids.insert(m.clone()))).count();
             // Replied/forwarded describe the newest message from someone else.
-            let mine = |r: &(i64, String, String, String, i64, bool, Option<String>, Option<String>, String)| r.3.to_lowercase() == me;
+            let mine = |r: &Member| r.3.to_lowercase() == me;
             let incoming = rows.iter().rposition(|r| !mine(r));
             let answered = incoming.is_some_and(|i| rows[i].4 & flags::ANSWERED != 0 || rows[i + 1..].iter().any(mine));
             let forwarded = incoming.is_some_and(|i| crate::tags::is_forwarded(&rows[i].8));
@@ -1312,6 +1337,8 @@ impl Store {
                 },
                 answered,
                 forwarded,
+                sending: latest.9 == Some(false),
+                send_failed: latest.9 == Some(true),
             });
         }
         Ok(ThreadPage { total, threads })
@@ -1336,7 +1363,8 @@ impl Store {
                             WHERE e.message_id = m.id AND coalesce(f.role, '') NOT IN ('trash', 'junk')),
                     EXISTS (SELECT 1 FROM entries e JOIN folders f ON f.id = e.folder_id
                             WHERE e.message_id = m.id AND f.role IN ('trash', 'junk')),
-                    m.keywords
+                    m.keywords,
+                    (SELECT o.failed IS NOT NULL FROM outgoing o WHERE o.id = m.pending_send)
              FROM messages m WHERE m.thread_id = ?1
              ORDER BY m.date, m.has_body DESC, m.id",
         )?;
@@ -1360,6 +1388,8 @@ impl Store {
                     tags: crate::tags::visible(&r.get::<_, String>(14)?),
                     answered: flags & flags::ANSWERED != 0,
                     forwarded: crate::tags::is_forwarded(&r.get::<_, String>(14)?),
+                    sending: r.get::<_, Option<bool>>(15)? == Some(false),
+                    send_failed: r.get::<_, Option<bool>>(15)? == Some(true),
                 },
             ))
         })?;
@@ -1433,7 +1463,8 @@ impl Store {
                         ORDER BY CASE f.role WHEN 'inbox' THEN 0 WHEN 'all' THEN 3
                                  WHEN 'trash' THEN 2 WHEN 'junk' THEN 2 ELSE 1 END LIMIT 1), 0),
                     m.subject, m.from_name, m.from_addr, m.date, m.snippet, m.flags,
-                    m.has_attachments, m.has_body, m.keywords
+                    m.has_attachments, m.has_body, m.keywords,
+                    (SELECT o.failed IS NOT NULL FROM outgoing o WHERE o.id = m.pending_send)
              FROM {from} WHERE {scope} ORDER BY m.date DESC, m.id DESC LIMIT ?4 OFFSET ?5"
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
@@ -1453,6 +1484,8 @@ impl Store {
                 tags: crate::tags::visible(&r.get::<_, String>(10)?),
                 answered: flags & flags::ANSWERED != 0,
                 forwarded: crate::tags::is_forwarded(&r.get::<_, String>(10)?),
+                sending: r.get::<_, Option<bool>>(11)? == Some(false),
+                send_failed: r.get::<_, Option<bool>>(11)? == Some(true),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
@@ -1979,6 +2012,11 @@ impl Store {
         Ok(db.last_insert_rowid())
     }
 
+    /// The built message of a queue entry.
+    pub fn outgoing_raw(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        Ok(self.rdb().query_row("SELECT raw FROM outgoing WHERE id=?1", [id], |r| r.get(0)).optional()?)
+    }
+
     /// Take back a message that hasn't started sending (undo): returns its draft state, or None
     /// if it's already on its way (or gone).
     pub fn cancel_outgoing(&self, id: i64) -> Result<Option<String>> {
@@ -2077,6 +2115,103 @@ impl Store {
         )?;
         let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Show a message we're sending at once, in `folder_id` (Sent) and its conversation, before
+    /// the server has it: a local copy, linked to its queue entry. The server's copy takes the
+    /// row over when it syncs (see `upsert_headers_since`). Returns the message id.
+    pub fn insert_local_copy(&self, account_id: i64, folder_id: i64, raw: &[u8], outgoing_id: i64) -> Result<i64> {
+        let parsed = crate::mime::parse_header_block(raw);
+        let date = parsed.date.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let rec = HeaderRecord {
+            uid: 0,
+            gm_msgid: None,
+            email_id: None,
+            gm_labels: None,
+            keywords: vec![],
+            message_id: parsed.message_id,
+            in_reply_to: parsed.in_reply_to,
+            refs: parsed.refs,
+            subject: parsed.subject,
+            from_name: parsed.from_name,
+            from_addr: parsed.from_addr,
+            to_addrs: parsed.to_addrs,
+            date,
+            size: raw.len() as u32,
+            flags: flags::SEEN,
+            has_attachments: parsed.likely_attachments,
+        };
+        let id = {
+            let mut db = self.db();
+            let tx = db.transaction()?;
+            tx.execute(
+                "INSERT INTO messages (account_id, message_id, in_reply_to, refs, subject, from_name, from_addr,
+                    to_addrs, date, size, flags, has_attachments, identity, keywords, local_copy, pending_send)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'',1,?14)",
+                params![
+                    account_id,
+                    rec.message_id,
+                    rec.in_reply_to,
+                    rec.refs,
+                    rec.subject,
+                    rec.from_name,
+                    rec.from_addr,
+                    rec.to_addrs,
+                    rec.date,
+                    rec.size,
+                    rec.flags,
+                    rec.has_attachments,
+                    message_identity(&rec),
+                    outgoing_id
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            assign_thread(&tx, account_id, id, rec.message_id.as_deref(), rec.in_reply_to.as_deref(), rec.refs.as_deref())?;
+            tx.execute("INSERT INTO entries (folder_id, message_id, uid, date) VALUES (?1, ?2, NULL, ?3)", params![folder_id, id, date])?;
+            tx.execute("UPDATE folders SET total=total+1 WHERE id=?1", [folder_id])?;
+            tx.commit()?;
+            id
+        };
+        let (snippet, has_attachments) = crate::mime::body_summary(raw);
+        self.store_body(id, raw, snippet.as_deref(), has_attachments, None)?;
+        Ok(id)
+    }
+
+    /// The conversation a message belongs to.
+    pub fn message_thread_id(&self, id: i64) -> Result<Option<i64>> {
+        Ok(self.rdb().query_row("SELECT thread_id FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten())
+    }
+
+    /// The local copy of queue entry `outgoing_id`, if it's still local.
+    pub fn local_copy_of(&self, outgoing_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .rdb()
+            .query_row("SELECT id FROM messages WHERE pending_send=?1 AND local_copy=1", [outgoing_id], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Sent: the local copy stays (now a plain message) until the server's copy takes it over.
+    pub fn local_copy_sent(&self, outgoing_id: i64) -> Result<()> {
+        self.db().execute("UPDATE messages SET pending_send=NULL WHERE pending_send=?1", [outgoing_id])?;
+        Ok(())
+    }
+
+    /// Taken back (undo, edit after a failure): the local copy goes. Returns its folders.
+    pub fn drop_local_copy(&self, outgoing_id: i64) -> Result<Vec<i64>> {
+        let Some(id) = self.local_copy_of(outgoing_id)? else { return Ok(vec![]) };
+        let folders = self.message_folder_ids(id)?;
+        {
+            let mut db = self.db();
+            let tx = db.transaction()?;
+            for f in &folders {
+                tx.execute("UPDATE folders SET total=max(0, total-1) WHERE id=?1", [f])?;
+            }
+            tx.execute("DELETE FROM entries WHERE message_id=?1", [id])?;
+            tx.execute("DELETE FROM messages WHERE id=?1", [id])?;
+            tx.commit()?;
+        }
+        self.bodies.lock().unwrap_or_else(|e| e.into_inner()).execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+        Ok(folders)
     }
 
     /// A message's own Message-ID, In-Reply-To and References (for replying to it).

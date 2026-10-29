@@ -153,6 +153,10 @@ pub struct MessageSummary {
     pub answered: bool,
     /// Forwarded (Thunderbird's `$Forwarded` keyword).
     pub forwarded: bool,
+    /// Our message, waiting to be sent (undo window, or retrying).
+    pub sending: bool,
+    /// Our message, refused by the server: not sent.
+    pub send_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +202,9 @@ pub struct ThreadSummary {
     pub answered: bool,
     /// The newest message from someone else was forwarded.
     pub forwarded: bool,
+    /// The newest message is ours, waiting to be sent / refused by the server.
+    pub sending: bool,
+    pub send_failed: bool,
 }
 
 /// A conversation as shown in the reader, plus how many of its messages the scope hid.

@@ -573,6 +573,75 @@ mod tests {
     }
 
     #[test]
+    fn local_copy_of_sent_mail_until_the_server_has_it() {
+        let (env, orig) = gmail_env();
+        let s = &env.store;
+        let sent = env.id("[Gmail]/Sent Mail");
+        let labels = crate::sync::gmail_label_map(&s.folders(env.acct).unwrap());
+        let reply = |mid: &str| {
+            let msg = crate::compose::Outgoing {
+                from: Some(crate::model::Addr { name: None, addr: "x@example.com".into() }),
+                to: vec![crate::model::Addr { name: None, addr: "a@b.c".into() }],
+                subject: "Re: m900".into(),
+                html: "<p>Sounds good</p>".into(),
+                in_reply_to: Some("a@x".into()),
+                references: vec!["a@x".into()],
+                ..Default::default()
+            };
+            crate::compose::build(&msg, mid, 2_000).unwrap()
+        };
+        let queue = |raw: &[u8]| {
+            s.enqueue_outgoing(&crate::store::NewOutgoing {
+                account_id: env.acct,
+                raw: raw.to_vec(),
+                envelope_from: "x@example.com".into(),
+                recipients: vec!["a@b.c".into()],
+                not_before_ms: 0,
+                replied: Some(orig),
+                forwarded: None,
+                draft: None,
+            })
+            .unwrap()
+        };
+        // (The sample original carries \Sent too; leave it out.)
+        let in_sent = || s.list_messages(sent, 0, 10).unwrap().messages.into_iter().filter(|m| m.id != orig).collect::<Vec<_>>();
+
+        // Queued: in Sent at once, marked sending, in the original's conversation.
+        let raw = reply("mine@example.com");
+        let q = queue(&raw);
+        let copy = s.insert_local_copy(env.acct, sent, &raw, q).unwrap();
+        let m = in_sent().into_iter().find(|m| m.id == copy).unwrap();
+        assert!(m.sending && !m.send_failed && m.has_body);
+        let all = crate::model::ThreadScope { all_folders: true, include_trash: false };
+        let view = s.thread_messages(s.message_thread_id(orig).unwrap().unwrap(), env.id("INBOX"), all).unwrap();
+        assert!(view.messages.iter().any(|m| m.id == copy), "the reply shows in its conversation");
+
+        // Refused by the server: shown as not sent. Taken back to edit: gone.
+        s.fail_outgoing(q, "550 nope").unwrap();
+        assert!(in_sent().iter().any(|m| m.id == copy && m.send_failed && !m.sending));
+        s.cancel_outgoing(q).unwrap();
+        assert_eq!(s.drop_local_copy(q).unwrap(), vec![sent]);
+        assert!(in_sent().is_empty());
+
+        // Sent: a plain message, then the server's copy takes over the same row.
+        let raw = reply("mine2@example.com");
+        let q = queue(&raw);
+        let copy = s.insert_local_copy(env.acct, sent, &raw, q).unwrap();
+        s.local_copy_sent(q).unwrap();
+        s.finish_outgoing(q).unwrap();
+        assert!(in_sent().iter().any(|m| m.id == copy && !m.sending));
+        let mut server = rec(41, Some(77), Some(&["\\Sent"]), "mine2@example.com", flags::SEEN);
+        server.in_reply_to = Some("a@x".into());
+        s.upsert_headers(env.acct, sent, &[server.clone()], &labels).unwrap();
+        s.upsert_headers(env.acct, env.id("[Gmail]/All Mail"), &[HeaderRecord { uid: 950, ..server }], &labels).unwrap();
+        let rows = in_sent();
+        assert_eq!(rows.len(), 1, "no duplicate: {rows:?}");
+        assert_eq!(rows[0].id, copy);
+        assert_eq!(env.folder_names(copy), ["[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
+        assert_eq!(s.local_copy_of(q).unwrap(), None);
+    }
+
+    #[test]
     fn markers_after_sending() {
         let (env, msg) = gmail_env();
         let inbox = env.id("INBOX");

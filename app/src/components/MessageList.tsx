@@ -1,4 +1,4 @@
-import { batch, on, createEffect, createMemo, createSelector, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { type JSX, batch, on, createEffect, createMemo, createSelector, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createVirtualizer } from '@tanstack/solid-virtual';
 import { api, type Folder, type MessageSummary, type SearchField, type ThreadSummary } from '../api';
 import { createPagedList } from '../lib/messageList';
@@ -66,6 +66,17 @@ function Hl(props: { text: string; re: RegExp | null }) {
   );
 }
 
+/** "Sending…" / "Not sent" in place of the date for our own outgoing mail. */
+export function SendState(props: { m: { sending: boolean; sendFailed: boolean }; fallback: JSX.Element; class?: string }) {
+  return (
+    <Show when={props.m.sending || props.m.sendFailed} fallback={props.fallback}>
+      <span class={`send-state ${props.class ?? 'row-date'}`} classList={{ failed: props.m.sendFailed }}>
+        {props.m.sendFailed ? 'Not sent' : 'Sending…'}
+      </span>
+    </Show>
+  );
+}
+
 function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: RegExp | null; folderTag?: string }) {
   return (
     // A tag describes the message: shown as a bar in the first tag's colour beside the text
@@ -94,7 +105,7 @@ function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: Reg
             <FlagIcon size={12} class="icon flag" />
           </Show>
         </span>
-        <span class="row-date">{smartDate(props.m.date)}</span>
+        <SendState m={props.m} fallback={<span class="row-date">{smartDate(props.m.date)}</span>} />
       </div>
       <div class="row-line2">
         <span class="row-subject">
@@ -149,7 +160,7 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
             <FlagIcon size={12} class="icon flag" />
           </Show>
         </span>
-        <span class="row-date">{smartDate(props.t.date)}</span>
+        <SendState m={props.t} fallback={<span class="row-date">{smartDate(props.t.date)}</span>} />
       </div>
       <div class="row-line2">
         <span class="row-subject">{props.t.subject || '(no subject)'}</span>

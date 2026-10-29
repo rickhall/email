@@ -19,6 +19,7 @@ import { CardActions, HeaderActions, type ActionTarget } from './Actions';
 import { searchTag, TagChips, TagDots } from './Tags';
 import { runAction } from '../lib/actions';
 import { forwardFrameKeys } from '../lib/frameKeys';
+import { SendState } from './MessageList';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -132,7 +133,7 @@ function CollapsedCard(props: { m: MessageSummary; me: Me; folderTag?: string; o
       <Show when={props.folderTag}>
         <span class="folder-tag cm-folder">{props.folderTag}</span>
       </Show>
-      <span class="cm-date">{smartDate(props.m.date)}</span>
+      <SendState m={props.m} class="cm-date" fallback={<span class="cm-date">{smartDate(props.m.date)}</span>} />
     </button>
   );
 }
@@ -180,9 +181,15 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; ac
             <Show when={props.folderTag}>
               <span class="folder-tag cm-folder">{props.folderTag}</span>
             </Show>
-            <time class="reader-date" dateTime={new Date(props.m.date * 1000).toISOString()}>
-              {longDate(props.m.date)}
-            </time>
+            <SendState
+              m={props.m}
+              class="reader-date"
+              fallback={
+                <time class="reader-date" dateTime={new Date(props.m.date * 1000).toISOString()}>
+                  {longDate(props.m.date)}
+                </time>
+              }
+            />
             {/* Overlays the date on hover/focus: no layout change. */}
             <CardActions target={props.actions} />
           </span>

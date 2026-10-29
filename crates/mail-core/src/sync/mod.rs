@@ -227,6 +227,9 @@ enum Job {
     Body(i64),
     Seen { id: i64, seen: bool },
     Part(PartRequest),
+    /// Sync this folder now (e.g. Sent right after sending), rather than in the headers task's
+    /// turn.
+    Refresh(i64),
 }
 
 /// Download one omitted attachment (a single MIME part) of a stored message.
@@ -912,6 +915,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
         let mut bodies = Vec::new();
         let mut seen = Vec::new();
         let mut parts = Vec::new();
+        let mut refresh: Vec<i64> = Vec::new();
         for j in jobs {
             match j {
                 // Bodies may have landed via a background worker in the meantime.
@@ -921,6 +925,11 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 Job::Body(id) => bodies.push(id),
                 Job::Seen { id, seen: s } => seen.push((id, s)),
                 Job::Part(p) => parts.push(p),
+                Job::Refresh(f) => {
+                    if !refresh.contains(&f) {
+                        refresh.push(f);
+                    }
+                }
             }
         }
         let focus = *shared.focus.borrow();
@@ -988,6 +997,32 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             }
             let _ = part.reply.send(result);
         }
+        for folder_id in refresh {
+            if conn.is_none() {
+                match shared.connect().await {
+                    Ok(c) => conn = Some(c),
+                    Err(e) => {
+                        tracing::debug!("refresh: {e:#}");
+                        shared.dirty.lock().unwrap().insert(folder_id);
+                        shared.refresh.notify_one();
+                        continue;
+                    }
+                }
+            }
+            let c = conn.as_mut().unwrap();
+            // Actions queued just before (replied/forwarded markers) go first: the folder sync
+            // waits for them, and this task is the one that sends them.
+            let synced = async {
+                run_outbox(&shared, c).await?;
+                sync_pushed_folder(&shared, c, folder_id).await
+            };
+            if let Err(e) = synced.await {
+                tracing::debug!("refresh failed: {e:#}");
+                conn = None;
+                shared.dirty.lock().unwrap().insert(folder_id);
+                shared.refresh.notify_one();
+            }
+        }
     }
 }
 
@@ -995,17 +1030,28 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
 /// the account's SMTP server, then marks the original replied/forwarded. A refusal leaves it
 /// queued as failed (with its draft) and is reported; connection trouble retries with backoff.
 async fn send_task(shared: Arc<Shared>) {
+    // Built on first use; its pool keeps the signed-in connection between messages.
+    let mut mailer: Option<crate::smtp::Mailer> = None;
+    let mut warmed_for: Option<i64> = None;
     loop {
         let now = now_ms();
         match shared.store.claim_due_outgoing(shared.account.id, now) {
             Ok(Some(o)) => {
-                send_one(&shared, o).await;
+                send_one(&shared, &mut mailer, o).await;
                 continue;
             }
             Ok(None) => {}
             Err(e) => tracing::warn!("send queue: {e:#}"),
         }
         let due = shared.store.next_outgoing_due(shared.account.id).ok().flatten();
+        // A message is in its undo window: connect and sign in now, so it leaves on time.
+        if let Some(t) = due.filter(|&t| t - now <= WARM_AHEAD_MS && warmed_for != Some(t)) {
+            warmed_for = Some(t);
+            if let Some(m) = mailer_for(&shared, &mut mailer) {
+                let m = m.clone();
+                tokio::spawn(async move { m.warm().await });
+            }
+        }
         let wait = due.map(|t| Duration::from_millis((t - now).max(0) as u64)).unwrap_or(Duration::from_secs(3600));
         tokio::select! {
             _ = shared.sender.notified() => {}
@@ -1016,22 +1062,45 @@ async fn send_task(shared: Arc<Shared>) {
 
 /// Connection trouble: retry after 5 s, 10 s, 20 s… then give up and report.
 const MAX_SEND_ATTEMPTS: i64 = 5;
+/// Open the SMTP connection this long before a message is due (covers the 10 s undo window).
+const WARM_AHEAD_MS: i64 = 15_000;
 
-async fn send_one(shared: &Shared, o: crate::store::OutgoingRow) {
+fn mailer_for<'a>(shared: &Shared, mailer: &'a mut Option<crate::smtp::Mailer>) -> Option<&'a crate::smtp::Mailer> {
+    if mailer.is_none() {
+        let (host, port) = shared.account.smtp()?;
+        let cfg = crate::smtp::SmtpConfig { host, port, user: shared.server.user.clone(), credentials: shared.server.credentials.clone() };
+        match crate::smtp::Mailer::new(&cfg) {
+            Ok(m) => *mailer = Some(m),
+            Err(e) => tracing::warn!("SMTP setup: {e}"),
+        }
+    }
+    mailer.as_ref()
+}
+
+async fn send_one(shared: &Shared, mailer: &mut Option<crate::smtp::Mailer>, o: crate::store::OutgoingRow) {
     let account_id = shared.account.id;
+    // Rows showing the local copy ("Sending…", then "Not sent" or a plain message) refresh.
+    let copy = shared.store.local_copy_of(o.id).ok().flatten();
+    let copy_changed = || {
+        if let Some(folder_ids) = copy.and_then(|c| shared.store.message_folder_ids(c).ok()) {
+            shared.emit(CoreEvent::MessagesChanged { folder_ids });
+        }
+    };
     let fail = |message: String| {
         tracing::warn!(id = o.id, "send failed: {message}");
         let _ = shared.store.fail_outgoing(o.id, &message);
+        copy_changed();
         shared.emit(CoreEvent::SendFailed { account_id, id: o.id, message });
     };
-    let Some((host, port)) = shared.account.smtp() else {
+    let Some(m) = mailer_for(shared, mailer).cloned() else {
         return fail("No outgoing (SMTP) server is set for this account.".into());
     };
-    let cfg = crate::smtp::SmtpConfig { host, port, user: shared.server.user.clone(), credentials: shared.server.credentials.clone() };
     let started = std::time::Instant::now();
-    match crate::smtp::send(&cfg, &o.envelope_from, &o.recipients, &o.raw).await {
+    match m.send(&o.envelope_from, &o.recipients, &o.raw).await {
         Ok(()) => {
             tracing::info!(id = o.id, ms = started.elapsed().as_millis() as u64, "message sent");
+            let _ = shared.store.local_copy_sent(o.id);
+            copy_changed();
             if let Err(e) = shared.store.finish_outgoing(o.id) {
                 tracing::warn!("send queue: {e:#}");
             }
@@ -1043,11 +1112,10 @@ async fn send_one(shared: &Shared, o: crate::store::OutgoingRow) {
                     }
                 }
             }
-            // The copy in Sent (Gmail files it itself) shows up on the next sync of that folder.
+            // Gmail files the sent copy itself: sync Sent now so it takes over our local copy.
             if let Ok(folders) = shared.store.folders(account_id) {
                 if let Some(sent) = folders.iter().find(|f| f.role == Some(FolderRole::Sent)) {
-                    shared.dirty.lock().unwrap().insert(sent.id);
-                    shared.refresh.notify_one();
+                    let _ = shared.urgent.send(Job::Refresh(sent.id));
                 }
             }
         }

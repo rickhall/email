@@ -51,6 +51,10 @@ export interface MessageSummary {
   answered: boolean;
   /** forwarded (Thunderbird's $Forwarded keyword) */
   forwarded: boolean;
+  /** our message, waiting to be sent (undo window, or retrying) */
+  sending: boolean;
+  /** our message, refused by the server: not sent */
+  sendFailed: boolean;
 }
 
 export interface Addr {
@@ -120,6 +124,9 @@ export interface ThreadSummary {
   /** the newest message from someone else was replied to / forwarded */
   answered: boolean;
   forwarded: boolean;
+  /** the newest message is ours, waiting to be sent / refused by the server */
+  sending: boolean;
+  sendFailed: boolean;
 }
 
 /** get_thread result: the selected messages plus how many the scope hid. */

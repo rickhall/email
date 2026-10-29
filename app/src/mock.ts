@@ -33,7 +33,7 @@ import { fieldMatches, norm, parseQuery, tokenize, type Term } from './lib/query
 
 /** Mock send queue: id -> pending timer and the draft to hand back on undo. */
 let sendSeq = 0;
-const outgoing = new Map<number, { draft: unknown; timer: ReturnType<typeof setTimeout> }>();
+const outgoing = new Map<number, { draft: unknown; timer: ReturnType<typeof setTimeout>; copy?: () => void }>();
 
 // ---------------------------------------------------------------- utilities
 
@@ -630,6 +630,8 @@ export function createMockBackend(): Backend {
       // Some read person-to-person mail was replied to, a little forwarded.
       answered: !unread && (kind === 'person' || kind === 'personHtml') && rnd() < 0.35,
       forwarded: !unread && rnd() < 0.05,
+      sending: false,
+      sendFailed: false,
     };
     const attachments: Attachment[] = [];
     if (hasAttachments) {
@@ -829,6 +831,8 @@ export function createMockBackend(): Backend {
       latestMessageId: newestInFolder.id,
       answered: newestInFolder.answered,
       forwarded: newestInFolder.forwarded,
+      sending: newestInFolder.sending,
+      sendFailed: newestInFolder.sendFailed,
     };
   }
 
@@ -1497,11 +1501,58 @@ export function createMockBackend(): Backend {
       if (request.to.length + request.cc.length + request.bcc.length === 0) throw 'Add at least one recipient.';
       const id = ++sendSeq;
       const sendAt = Date.now() + 10_000;
+      // A local copy in Sent, marked sending (like the core's insert_local_copy).
+      const acc = accounts.find((a) => a.id === request.accountId);
+      const sent = [...folders.values()].find((f) => f.accountId === request.accountId && f.role === 'sent');
+      let removeCopy: (() => void) | undefined;
+      let copy: MessageSummary | undefined;
+      if (acc && sent) {
+        copy = {
+          id: nextMsgId++,
+          folderId: sent.id,
+          subject: request.subject || '(no subject)',
+          fromName: acc.displayName,
+          fromAddr: acc.email,
+          date: Math.floor(Date.now() / 1000),
+          snippet: request.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) || null,
+          unread: false,
+          flagged: false,
+          hasAttachments: false,
+          hasBody: true,
+          tags: [],
+          answered: false,
+          forwarded: false,
+          sending: true,
+          sendFailed: false,
+        };
+        const c = copy;
+        meta.set(c.id, { kind: 'person', seed: c.id, accountId: acc.id, attachments: [], cc: false, threadId: c.id });
+        downloaded.add(c.id);
+        byId.set(c.id, c);
+        folderMsgs.get(sent.id)?.unshift(c);
+        recount(sent);
+        emit('messages-changed', { folderIds: [sent.id] });
+        emit('folders-changed', { accountId: acc.id });
+        removeCopy = () => {
+          const list = folderMsgs.get(sent.id) ?? [];
+          const i = list.indexOf(c);
+          if (i >= 0) list.splice(i, 1);
+          byId.delete(c.id);
+          recount(sent);
+          emit('messages-changed', { folderIds: [sent.id] });
+          emit('folders-changed', { accountId: acc.id });
+        };
+      }
       // The real queue sends after the undo window; here it just reports success.
       outgoing.set(id, {
         draft: request.draft,
+        copy: removeCopy,
         timer: setTimeout(() => {
           outgoing.delete(id);
+          if (copy && sent) {
+            copy.sending = false;
+            emit('messages-changed', { folderIds: [sent.id] });
+          }
           emit('message-sent', { accountId: request.accountId, id, message: null });
         }, 10_000),
       });
@@ -1513,6 +1564,7 @@ export function createMockBackend(): Backend {
       if (!o) throw 'Too late to undo: the message was already sent.';
       clearTimeout(o.timer);
       outgoing.delete(id);
+      o.copy?.();
       return o.draft ?? null;
     },
     async next_unread({ folderId, after, threaded }) {

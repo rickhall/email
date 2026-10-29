@@ -52,14 +52,46 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Send an already-built message to `recipients` (the envelope: To, Cc and Bcc).
 pub async fn send(cfg: &SmtpConfig, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError> {
-    crate::imap::ensure_crypto_provider();
-    let sender = from.trim().parse().map_err(|e| SendError::Rejected(format!("sender address {from}: {e}")))?;
-    let mut to = Vec::with_capacity(recipients.len());
-    for r in recipients {
-        to.push(r.trim().parse().map_err(|e| SendError::Rejected(format!("recipient address {r}: {e}")))?);
-    }
-    let envelope = Envelope::new(Some(sender), to).map_err(|e| SendError::Rejected(e.to_string()))?;
+    Mailer::new(cfg)?.send(from, recipients, raw).await
+}
 
+/// One account's SMTP sender. Keeps a signed-in connection for a while after use (pooled), and
+/// can open one ahead of time (`warm`) so a message leaves the moment its undo window ends.
+/// Cheap to clone (the pool is shared).
+#[derive(Clone)]
+pub struct Mailer {
+    transport: AsyncSmtpTransport<Tokio1Executor>,
+}
+
+impl Mailer {
+    pub fn new(cfg: &SmtpConfig) -> Result<Mailer, SendError> {
+        crate::imap::ensure_crypto_provider();
+        Ok(Mailer { transport: transport(cfg)? })
+    }
+
+    /// Connect and sign in now (the connection waits in the pool); errors show up at `send`.
+    pub async fn warm(&self) {
+        if let Err(e) = self.transport.test_connection().await {
+            tracing::debug!("SMTP warm-up: {e}");
+        }
+    }
+
+    pub async fn send(&self, from: &str, recipients: &[String], raw: &[u8]) -> Result<(), SendError> {
+        let sender = from.trim().parse().map_err(|e| SendError::Rejected(format!("sender address {from}: {e}")))?;
+        let mut to = Vec::with_capacity(recipients.len());
+        for r in recipients {
+            to.push(r.trim().parse().map_err(|e| SendError::Rejected(format!("recipient address {r}: {e}")))?);
+        }
+        let envelope = Envelope::new(Some(sender), to).map_err(|e| SendError::Rejected(e.to_string()))?;
+        match self.transport.send_raw(&envelope, raw).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.is_permanent() => Err(SendError::Rejected(e.to_string())),
+            Err(e) => Err(SendError::Failed(e.into())),
+        }
+    }
+}
+
+fn transport(cfg: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>, SendError> {
     let builder = if cfg.port == 465 {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)
     } else {
@@ -72,11 +104,5 @@ pub async fn send(cfg: &SmtpConfig, from: &str, recipients: &[String], raw: &[u8
             (SmtpCredentials::new(cfg.user.clone(), access_token.clone()), vec![Mechanism::Xoauth2])
         }
     };
-    let transport =
-        builder.port(cfg.port).credentials(credentials).authentication(mechanisms).timeout(Some(TIMEOUT)).build();
-    match transport.send_raw(&envelope, raw).await {
-        Ok(_) => Ok(()),
-        Err(e) if e.is_permanent() => Err(SendError::Rejected(e.to_string())),
-        Err(e) => Err(SendError::Failed(e.into())),
-    }
+    Ok(builder.port(cfg.port).credentials(credentials).authentication(mechanisms).timeout(Some(TIMEOUT)).build())
 }
