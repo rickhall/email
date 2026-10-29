@@ -1,7 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { emit as tauriEmit, listen as tauriListen } from '@tauri-apps/api/event';
 import { api, isTauri } from '../api';
-import { loadPref } from './format';
 
 // Windows: the main window, and one compose window per draft ("compose-<draft id>"). In the
 // browser preview a compose window is a popup page (?compose=<id>), and windows talk over a
@@ -21,9 +20,8 @@ export const isComposeWindow = composeDraftId != null;
 
 /** Open draft `id` in its compose window (or bring that window forward). */
 export async function openComposeWindow(id: number): Promise<void> {
-  const size = loadPref<{ w: number; h: number } | null>('ui.composeSize', null);
-  if (isTauri) return api.openCompose(id, size?.w ?? null, size?.h ?? null);
-  window.open(`${location.pathname}?compose=${id}`, `compose-${id}`, `width=${size?.w ?? 760},height=${size?.h ?? 720}`);
+  if (isTauri) return api.openCompose(id);
+  window.open(`${location.pathname}?compose=${id}`, `compose-${id}`, 'width=760,height=720');
 }
 
 export async function closeThisWindow(): Promise<void> {

@@ -18,7 +18,6 @@ import {
 } from '../lib/compose';
 import { api } from '../api';
 import { composeDraftId, onCloseRequested, setWindowTitle } from '../lib/windows';
-import { savePref } from '../lib/format';
 import { MOD } from '../lib/shortcuts';
 import { DRAG } from '../lib/platform';
 import { confirmDialog } from './Actions';
@@ -269,16 +268,7 @@ export function Composer() {
     const cur = c();
     setWindowTitle(cur.subject.trim() || { new: 'New Message', reply: 'Reply', replyAll: 'Reply All', forward: 'Forward' }[cur.mode]);
   });
-  // The next compose window opens at this size.
-  let sizeTimer: ReturnType<typeof setTimeout> | undefined;
-  const onResize = () => {
-    clearTimeout(sizeTimer);
-    sizeTimer = setTimeout(() => savePref('ui.composeSize', { w: window.innerWidth, h: window.innerHeight }), 400);
-  };
-  onMount(() => {
-    window.addEventListener('resize', onResize);
-    onCleanup(() => window.removeEventListener('resize', onResize));
-  });
+
 
   const onKey = (e: KeyboardEvent) => {
     if (!(e.target instanceof Node) || !root.contains(e.target)) return;

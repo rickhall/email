@@ -122,9 +122,8 @@ export const api = {
   saveDraft: (id: number | null, request: SendRequest): Promise<number> => call('save_draft', { id, request }),
   openDraft: (id: number): Promise<unknown> => call('open_draft', { id }),
   deleteDraft: (id: number): Promise<void> => call('delete_draft', { id }),
-  /** Open (or focus) the compose window of draft `draftId`. */
-  openCompose: (draftId: number, width: number | null, height: number | null): Promise<void> =>
-    call('open_compose', { draftId, width, height }),
+  /** Open (or focus) the compose window of draft `draftId` (at the last compose window's size). */
+  openCompose: (draftId: number): Promise<void> => call('open_compose', { draftId }),
   /** Prefill a reply / reply-all / forward of a message (downloads it first if needed). */
   replyContext: (id: number, mode: ReplyMode): Promise<ReplyContext> => call('reply_context', { id, mode }),
   /** Take back a queued (or failed) message: its draft, to reopen the composer. */

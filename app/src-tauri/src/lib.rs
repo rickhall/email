@@ -359,14 +359,14 @@ fn is_app_url(url: &tauri::Url) -> bool {
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let opener = app.handle().clone();
     let nav_opener = app.handle().clone();
-    let saved = window_state::load(app);
+    let saved = window_state::load(app, window_state::MAIN);
     let requested = saved.as_ref().map(|s| (s.width, s.height)).unwrap_or((1360.0, 860.0));
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .title("Email")
         .inner_size(1360.0, 860.0)
         .min_inner_size(900.0, 560.0);
     if let Some(state) = &saved {
-        builder = window_state::apply(app, builder, state);
+        builder = window_state::apply(app, builder, state, window_state::MAIN);
     }
     // macOS: transparent title bar with the traffic lights over the sidebar's top row
     // (like Mail/Notes). The UI reserves room for them and makes the pane tops draggable.
@@ -391,7 +391,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         })
         .build()?;
 
-    window_state::track(&window, saved, requested);
+    window_state::track(&window, saved, requested, window_state::MAIN);
 
     // macOS: closing the window hides it; the app keeps syncing until ⌘Q, and the Dock icon
     // brings the window back (see the Reopen handler in `run`).
@@ -547,7 +547,7 @@ async fn delete_draft(core: State<'_, Arc<Core>>, id: i64) -> Res<()> {
 /// Open draft `draft_id` in its own compose window (or bring that window forward). The page
 /// finds its draft from the window label, `compose-<id>`.
 #[tauri::command]
-async fn open_compose(app: tauri::AppHandle, draft_id: i64, width: Option<f64>, height: Option<f64>) -> Res<()> {
+async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
     let label = format!("compose-{draft_id}");
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();
@@ -557,10 +557,17 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64, width: Option<f64>, 
     }
     let opener = app.clone();
     let nav_opener = app.clone();
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
+    // The size the last compose window was left at (see window_state; same GNOME care).
+    let saved = window_state::load(&app, window_state::COMPOSE);
+    let requested = saved.as_ref().map(|s| (s.width, s.height)).unwrap_or((760.0, 720.0));
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
         .title("New Message")
-        .inner_size(width.unwrap_or(760.0).max(520.0), height.unwrap_or(720.0).max(420.0))
-        .min_inner_size(520.0, 420.0)
+        .inner_size(requested.0, requested.1)
+        .min_inner_size(520.0, 420.0);
+    if let Some(state) = &saved {
+        builder = window_state::apply(&app, builder, state, window_state::COMPOSE);
+    }
+    let window = builder
         // Links in a quoted message open in the browser, as in the main window.
         .on_new_window(move |url, _features| {
             let _ = opener.opener().open_url(url.as_str(), None::<&str>);
@@ -575,6 +582,7 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64, width: Option<f64>, 
         })
         .build()
         .map_err(|e| e.to_string())?;
+    window_state::track(&window, saved, requested, window_state::COMPOSE);
     Ok(())
 }
 

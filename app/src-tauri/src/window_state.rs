@@ -1,4 +1,5 @@
-//! Remember the main window's size, position and maximized state.
+//! Remember a window's size, position and maximized state: the main window's (`MAIN`), and the
+//! last compose window's size (`COMPOSE`, size only: several may be open, so no position).
 //!
 //! Sizes are stored in *logical* units and applied through the window builder, before the
 //! window exists. Storing physical pixels and resizing after creation (what
@@ -22,7 +23,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
-const FILE: &str = "window.json";
+/// Which window's state, and where it's kept.
+#[derive(Clone, Copy)]
+pub struct Kind {
+    file: &'static str,
+    /// Restore the position too (where the platform allows).
+    position: bool,
+}
+pub const MAIN: Kind = Kind { file: "window.json", position: true };
+pub const COMPOSE: Kind = Kind { file: "compose-window.json", position: false };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowState {
@@ -41,8 +50,8 @@ pub struct WindowState {
 /// Largest plausible client-side frame; bigger differences mean the compositor resized us.
 const MAX_FRAME: f64 = 200.0;
 
-fn path<R: Runtime, M: Manager<R>>(app: &M) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join(FILE))
+fn path<R: Runtime, M: Manager<R>>(app: &M, kind: Kind) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join(kind.file))
 }
 
 /// Wayland compositors don't let clients choose or read window positions.
@@ -55,8 +64,8 @@ fn can_position() -> bool {
     !wayland || forced_x11
 }
 
-pub fn load<R: Runtime, M: Manager<R>>(app: &M) -> Option<WindowState> {
-    let s: WindowState = serde_json::from_slice(&std::fs::read(path(app)?).ok()?).ok()?;
+pub fn load<R: Runtime, M: Manager<R>>(app: &M, kind: Kind) -> Option<WindowState> {
+    let s: WindowState = serde_json::from_slice(&std::fs::read(path(app, kind)?).ok()?).ok()?;
     (s.width >= 200.0 && s.height >= 200.0).then_some(s)
 }
 
@@ -65,9 +74,10 @@ pub fn apply<'a, R: Runtime, M: Manager<R>>(
     app: &M,
     builder: WebviewWindowBuilder<'a, R, M>,
     state: &WindowState,
+    kind: Kind,
 ) -> WebviewWindowBuilder<'a, R, M> {
     let mut builder = builder.inner_size(state.width, state.height).maximized(state.maximized);
-    if let (true, Some(x), Some(y)) = (can_position(), state.x, state.y) {
+    if let (true, true, Some(x), Some(y)) = (kind.position, can_position(), state.x, state.y) {
         let on_screen = app.app_handle().available_monitors().unwrap_or_default().iter().any(|m| {
             let scale = m.scale_factor();
             let pos: LogicalPosition<f64> = m.position().to_logical(scale);
@@ -115,8 +125,8 @@ fn snapshot<R: Runtime>(
     })
 }
 
-fn save<R: Runtime>(window: &WebviewWindow<R>, state: &WindowState) {
-    let Some(path) = path(window) else { return };
+fn save<R: Runtime>(window: &WebviewWindow<R>, state: &WindowState, kind: Kind) {
+    let Some(path) = path(window, kind) else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -131,7 +141,7 @@ fn save<R: Runtime>(window: &WebviewWindow<R>, state: &WindowState) {
 
 /// Save the window's state 600 ms after the user stops moving/resizing it, and on close.
 /// `requested` is the logical inner size the window was created with.
-pub fn track<R: Runtime>(window: &WebviewWindow<R>, initial: Option<WindowState>, requested: (f64, f64)) {
+pub fn track<R: Runtime>(window: &WebviewWindow<R>, initial: Option<WindowState>, requested: (f64, f64), kind: Kind) {
     // Frame size: known from a previous run, or measured on the first settle after creation.
     let frame = Arc::new(std::sync::Mutex::new(
         initial.as_ref().filter(|s| s.frame_w > 0.0 || s.frame_h > 0.0).map(|s| (s.frame_w, s.frame_h)),
@@ -158,7 +168,7 @@ pub fn track<R: Runtime>(window: &WebviewWindow<R>, initial: Option<WindowState>
             let f = frame.unwrap_or((0.0, 0.0));
             let mut last = last.lock().unwrap();
             if let Some(state) = snapshot(&w, last.as_ref(), f) {
-                save(&w, &state);
+                save(&w, &state, kind);
                 *last = Some(state);
             }
         }

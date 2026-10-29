@@ -338,7 +338,7 @@ export interface CommandMap {
   save_draft: { args: { id: number | null; request: SendRequest }; ret: number };
   open_draft: { args: { id: number }; ret: unknown };
   delete_draft: { args: { id: number }; ret: void };
-  open_compose: { args: { draftId: number; width: number | null; height: number | null }; ret: void };
+  open_compose: { args: { draftId: number }; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

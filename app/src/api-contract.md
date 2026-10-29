@@ -128,7 +128,7 @@ interface SyncStatus {
 | `save_draft` | `{ id: number \| null, request: SendRequest }` | draft id — keeps the composer state (`request.draft`); listed in Drafts once `request.listed` and not empty, updated in place |
 | `open_draft` | `{ id }` | the draft's composer state |
 | `delete_draft` | `{ id }` | — discards the draft and its copy in Drafts |
-| `open_compose` | `{ draftId, width, height }` | — opens (or focuses) the compose window `compose-<draftId>` |
+| `open_compose` | `{ draftId }` | — opens (or focuses) the compose window `compose-<draftId>`, at the size the last compose window was left at |
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |
