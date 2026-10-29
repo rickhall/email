@@ -74,7 +74,7 @@ const PEOPLE: Person[] = [
   { name: 'Daniel Park', addr: 'dpark@initech.com' },
   { name: 'Hannah Müller', addr: 'hannah.mueller@bergwerk.de' },
   { name: 'Luis Fernández', addr: 'luis@fernandez.dev' },
-  { name: 'Grace Hall', addr: 'grace.hall@gmail.com' },
+  { name: 'Jane Doe', addr: 'jane.doe@example.net' },
   { name: 'Olivia Brooks', addr: 'olivia@brooksandco.com' },
   { name: 'Noah Williams', addr: 'noah.w@umbrella.health' },
   { name: 'Fatima Al-Sayed', addr: 'fatima@sayed-partners.ae' },
@@ -141,7 +141,7 @@ const NOTIFY_SUBJECTS = [
   '[email/core] Fix IMAP IDLE reconnect loop (#{n})',
   '[email/app] Virtualized message list (#{n})',
   'ENG-{n} moved to In Review',
-  'Rick, you were mentioned in “Inbox redesign”',
+  'John, you were mentioned in “Inbox redesign”',
   'Your weekly digest: {n} new comments',
 ];
 
@@ -336,7 +336,7 @@ function personHtml(p: Person, me: Person, snippet: string): string {
   <p>Here's the summary table we discussed:</p>
   <table style="border-collapse:collapse;font-size:13px">
     <tr style="background:#f2f4f7"><th style="border:1px solid #d9dde3;padding:6px 10px;text-align:left">Milestone</th><th style="border:1px solid #d9dde3;padding:6px 10px">Owner</th><th style="border:1px solid #d9dde3;padding:6px 10px">Due</th></tr>
-    <tr><td style="border:1px solid #d9dde3;padding:6px 10px">Sync engine beta</td><td style="border:1px solid #d9dde3;padding:6px 10px">Rick</td><td style="border:1px solid #d9dde3;padding:6px 10px">Nov 4</td></tr>
+    <tr><td style="border:1px solid #d9dde3;padding:6px 10px">Sync engine beta</td><td style="border:1px solid #d9dde3;padding:6px 10px">John</td><td style="border:1px solid #d9dde3;padding:6px 10px">Nov 4</td></tr>
     <tr><td style="border:1px solid #d9dde3;padding:6px 10px">UI polish pass</td><td style="border:1px solid #d9dde3;padding:6px 10px">${escapeHtml(p.name)}</td><td style="border:1px solid #d9dde3;padding:6px 10px">Nov 11</td></tr>
   </table>
   <p>Thanks!<br><b>${escapeHtml(p.name)}</b><br><span style="color:#888">${escapeHtml(p.addr)}</span></p>
@@ -368,7 +368,7 @@ const LONG_HISTORY_HTML = `<p>Hi Elena,</p>
 <p>If all of that holds, I'm happy to sign off on option B.</p>
 <blockquote type="cite"><div class="moz-cite-prefix">On 10/14/26 4:02 PM, Elena Rossi wrote:</div>
 <p>Here's the first draft of the plan. Option A is cheaper but slower; option B gets us to launch three weeks earlier.</p></blockquote>
-<p>Best,<br>Rick</p>`;
+<p>Best,<br>John</p>`;
 
 interface QuoteSample {
   label: string;
@@ -381,14 +381,14 @@ const QUOTE_SAMPLES: QuoteSample[] = [
   {
     label: '(a) Thunderbird top-post',
     from: { name: 'Elena Rossi', addr: 'elena.rossi@studio-rossi.it' },
-    html: `<p>Hi Rick,</p><p>All three check out — hiring stays at two, renewal is Dec 1, assets by the 20th. Option B it is. I'll update the doc tonight.</p><p>Cheers,<br>Elena</p>
-<div class="moz-cite-prefix">On 10/16/26 9:14 AM, Rick Hall wrote:<br></div>
+    html: `<p>Hi John,</p><p>All three check out — hiring stays at two, renewal is Dec 1, assets by the 20th. Option B it is. I'll update the doc tonight.</p><p>Cheers,<br>Elena</p>
+<div class="moz-cite-prefix">On 10/16/26 9:14 AM, John Doe wrote:<br></div>
 <blockquote type="cite">${LONG_HISTORY_HTML}</blockquote>`,
   },
   {
     label: '(b) inline reply',
     from: { name: 'Tom Becker', addr: 'tbecker@globex.com' },
-    html: `<div class="moz-cite-prefix">On 10/16/26 9:14 AM, Rick Hall wrote:</div>
+    html: `<div class="moz-cite-prefix">On 10/16/26 9:14 AM, John Doe wrote:</div>
 <blockquote type="cite">The Q4 hiring numbers still assume two backend engineers.</blockquote>
 <p>Yes — still two. Finance confirmed this morning.</p>
 <blockquote type="cite">The vendor contract renews on December 1st, not January.</blockquote>
@@ -399,16 +399,16 @@ const QUOTE_SAMPLES: QuoteSample[] = [
   {
     label: '(c) bottom-posted reply',
     from: { name: 'Hannah Müller', addr: 'hannah.mueller@bergwerk.de' },
-    html: `<div class="moz-cite-prefix">Am 16.10.26 um 09:14 schrieb Rick Hall:</div>
-<blockquote type="cite"><p>Can you send me the final numbers for the Berlin office? I need them for the board deck on Monday, ideally with the headcount split by team and the projected costs for next year.</p><p>Thanks!<br>Rick</p></blockquote>
-<p>Hi Rick, here they are: 42 people (18 eng, 9 sales, 15 ops), projected cost €3.1M for 2027. Full sheet attached tomorrow.</p><p>Viele Grüße,<br>Hannah</p>`,
+    html: `<div class="moz-cite-prefix">Am 16.10.26 um 09:14 schrieb John Doe:</div>
+<blockquote type="cite"><p>Can you send me the final numbers for the Berlin office? I need them for the board deck on Monday, ideally with the headcount split by team and the projected costs for next year.</p><p>Thanks!<br>John</p></blockquote>
+<p>Hi John, here they are: 42 people (18 eng, 9 sales, 15 ops), projected cost €3.1M for 2027. Full sheet attached tomorrow.</p><p>Viele Grüße,<br>Hannah</p>`,
   },
   {
     label: '(d) Gmail top-post',
     from: { name: 'Ben Carter', addr: 'ben.carter@hey.com' },
     html: `<div dir="ltr">Works for me — Thursday at 2pm, I'll book the room.<div><br></div><div>Ben</div></div><br>
-<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Fri, Oct 16, 2026 at 3:02 PM Rick Hall &lt;rick.hall@gmail.com&gt; wrote:<br></div>
-<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div dir="ltr">Hey Ben,<div><br></div><div>Can we move the design review to later in the week? Tuesday is packed with the launch prep and I'd rather give it proper attention. Thursday afternoon or Friday morning both work for me.</div><div><br></div><div>Rick</div></div><br>
+<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Fri, Oct 16, 2026 at 3:02 PM John Doe &lt;john.doe@example.com&gt; wrote:<br></div>
+<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div dir="ltr">Hey Ben,<div><br></div><div>Can we move the design review to later in the week? Tuesday is packed with the launch prep and I'd rather give it proper attention. Thursday afternoon or Friday morning both work for me.</div><div><br></div><div>John</div></div><br>
 <div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Thu, Oct 15, 2026 at 11:20 AM Ben Carter &lt;ben.carter@hey.com&gt; wrote:<br></div>
 <blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div dir="ltr">Design review is set for Tuesday 10am. Agenda to follow.</div></blockquote></div></blockquote></div>`,
   },
@@ -418,13 +418,13 @@ const QUOTE_SAMPLES: QuoteSample[] = [
     html: `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt">Approved. Please proceed with the filing.<br><br>James</div>
 <div id="appendonsend"></div>
 <hr style="display:inline-block;width:98%" tabindex="-1">
-<div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" style="font-size:11pt"><b>From:</b> Rick Hall &lt;rick.hall@gmail.com&gt;<br><b>Sent:</b> Friday, October 16, 2026 9:30 AM<br><b>To:</b> James Whitfield &lt;james@whitfield.law&gt;<br><b>Subject:</b> Filing</font><div>&nbsp;</div></div>
-<div>Hi James, the paperwork is ready. Can you approve so we can file before the deadline next Wednesday? All three signatures are in.<br><br>Rick</div>`,
+<div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" style="font-size:11pt"><b>From:</b> John Doe &lt;john.doe@example.com&gt;<br><b>Sent:</b> Friday, October 16, 2026 9:30 AM<br><b>To:</b> James Whitfield &lt;james@whitfield.law&gt;<br><b>Subject:</b> Filing</font><div>&nbsp;</div></div>
+<div>Hi James, the paperwork is ready. Can you approve so we can file before the deadline next Wednesday? All three signatures are in.<br><br>John</div>`,
   },
   {
     label: '(f) plain top-post',
     from: { name: 'Ravi Patel', addr: 'ravi@patel.consulting' },
-    text: `Hi Rick,
+    text: `Hi John,
 
 Sounds good — I'll send the revised estimate by Monday. See https://docs.example.com/est for the working copy.
 
@@ -433,7 +433,7 @@ Ravi
 -- 
 Ravi Patel · Patel Consulting
 
-On Thu, Oct 15, 2026 at 4:20 PM Rick Hall <rick.hall@gmail.com> wrote:
+On Thu, Oct 15, 2026 at 4:20 PM John Doe <john.doe@example.com> wrote:
 > Hi Ravi,
 >
 > The client asked for a revised estimate that includes the migration work.
@@ -443,13 +443,13 @@ On Thu, Oct 15, 2026 at 4:20 PM Rick Hall <rick.hall@gmail.com> wrote:
 > > The original estimate covered phases one and two only.
 >
 > Thanks,
-> Rick
+> John
 `,
   },
   {
     label: '(g) plain inline',
     from: { name: 'Zoe Lindqvist', addr: 'zoe.lindqvist@nordlys.se' },
-    text: `On Thu, Oct 15, 2026 at 4:20 PM Rick Hall <rick.hall@gmail.com> wrote:
+    text: `On Thu, Oct 15, 2026 at 4:20 PM John Doe <john.doe@example.com> wrote:
 > Are we still on for the offsite on the 28th?
 
 Yes, confirmed with the venue yesterday.
@@ -957,8 +957,8 @@ export function createMockBackend(): Backend {
 
   const startEmpty = typeof location !== 'undefined' && new URLSearchParams(location.search).has('empty');
   if (!startEmpty) {
-    const g = createAccount('rick.hall@gmail.com', 'Rick Hall', 'gmail', GMAIL_FOLDERS);
-    const w = createAccount('rick@hallworks.dev', 'Hallworks', 'imap', IMAP_FOLDERS);
+    const g = createAccount('john.doe@example.com', 'John Doe', 'gmail', GMAIL_FOLDERS);
+    const w = createAccount('john@example.org', 'Doe Works', 'imap', IMAP_FOLDERS);
     // Quoted-reply samples: single-message conversations near the top of the Inbox.
     {
       const inbox = [...folders.values()].find((f) => f.accountId === g.id && f.role === 'inbox');
@@ -990,19 +990,19 @@ export function createMockBackend(): Backend {
     const params = new URLSearchParams(location.search);
     if (params.has('error')) {
       // `?error`: the second account fails to connect (demonstrates the error footer row).
-      setTimeout(() => setStatus(w.id, 'error', null, 0, 0, 'Connection to mail.hallworks.dev:993 timed out'), 900);
+      setTimeout(() => setStatus(w.id, 'error', null, 0, 0, 'Connection to mail.example.org:993 timed out'), 900);
     } else if (params.has('limited')) {
       // `?limited`: the second account is refused for too many connections (amber, retrying).
       setTimeout(() => setStatus(w.id, 'limited', null, 0, 0, 'Too many simultaneous connections to this account. Other mail apps or devices are using the server\'s connection limit (Gmail allows 15 per account); retrying. Server said: [ALERT] Too many simultaneous connections. (Failure)'), 900);
     } else if (params.has('auth')) {
       setTimeout(() => setStatus(w.id, 'auth', null, 0, 0, 'The server rejected the password: [AUTHENTICATIONFAILED] Invalid credentials'), 900);
     } else {
-      setTimeout(() => void simulateSync(w, 6_000, 'mail.hallworks.dev'), 900);
+      setTimeout(() => void simulateSync(w, 6_000, 'mail.example.org'), 900);
     }
     setInterval(() => deliverNewMail(g), 25_000);
     if (params.has('many')) {
       // `?many`: four more accounts (six total) to exercise the status popover.
-      const extra = ['ops@hallworks.dev', 'rick@side-project.io', 'family.hall@icloud.com', 'rhall@university.edu'];
+      const extra = ['ops@example.org', 'john@side-project.example', 'family@doe.example', 'jdoe@university.example'];
       extra.forEach((email, i) => {
         const acc = createAccount(email, email.split('@')[0] ?? email, 'imap', SMALL_FOLDERS);
         setTimeout(() => void simulateSync(acc, 1_200 + i * 900, `imap.${email.split('@')[1]}`), 1_200 + i * 700);
@@ -1378,7 +1378,7 @@ export function createMockBackend(): Backend {
       const acc = accounts.find((a) => a.id === accountId);
       if (acc) {
         setStatus(acc.id, 'connecting', null, 0, 0, null);
-        setTimeout(() => void simulateSync(acc, 6_000, 'mail.hallworks.dev'), 300);
+        setTimeout(() => void simulateSync(acc, 6_000, 'mail.example.org'), 300);
       }
     },
     async set_allow_remote({ id, allow }) {

@@ -9,17 +9,17 @@ const check = (name, cond, extra = '') => {
   if (!cond) failed++;
 };
 
-const topPost = `Hi Rick,\n\nSounds good.\n\nRavi\n\n-- \nRavi Patel\n\nOn Thu, Oct 15, 2026 Rick Hall <r@x.com> wrote:\n> line one\n>\n> line two\n> > nested\n> line three\n`;
+const topPost = `Hi John,\n\nSounds good.\n\nRavi\n\n-- \nRavi Patel\n\nOn Thu, Oct 15, 2026 John Doe <r@x.com> wrote:\n> line one\n>\n> line two\n> > nested\n> line three\n`;
 let r = analyzePlain(topPost);
 check('top-post collapses', r.collapsed !== null, r.reason);
 check('attribution goes into collapsed part', r.collapsed?.[0]?.t === 'text' && /wrote:$/.test(r.collapsed[0].text));
 check('nested level parsed', parseLines('> > x')[0].level === 2 && parseLines('>> x')[0].level === 2);
 
-r = analyzePlain(`On Thu Rick wrote:\n> a?\n\nYes.\n\n> b?\n\nNo.\n`);
+r = analyzePlain(`On Thu John wrote:\n> a?\n\nYes.\n\n> b?\n\nNo.\n`);
 check('interleaved never collapses', r.collapsed === null, r.reason);
 check('interleaved still renders quote blocks', r.head.filter((n) => n.t === 'quote').length === 2);
 
-r = analyzePlain(`On Thu Rick wrote:\n> one\n> two\n> three\n\nMy answer below.\n`);
+r = analyzePlain(`On Thu John wrote:\n> one\n> two\n> three\n\nMy answer below.\n`);
 check('bottom-post never collapses', r.collapsed === null, r.reason);
 
 r = analyzePlain(`> one\n> two\n> three\n`);
