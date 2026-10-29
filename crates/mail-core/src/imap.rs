@@ -260,10 +260,22 @@ pub struct Connection {
     pub activity: Activity,
 }
 
+/// Pick rustls's crypto backend once for the process. Two are compiled in (aws-lc-rs, ours;
+/// ring, via lettre), and with more than one rustls won't choose: `ClientConfig::builder()`
+/// panics. Call before any TLS (IMAP here, SMTP in `smtp::send`).
+pub fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Err only if something already installed one: fine either way.
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 fn tls_config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
+            ensure_crypto_provider();
             let mut roots = RootCertStore::empty();
             for cert in rustls_native_certs::load_native_certs().certs {
                 let _ = roots.add(cert);
@@ -945,6 +957,12 @@ impl std::error::Error for OpRejected {}
 #[cfg(test)]
 mod wake_tests {
     use super::*;
+
+    /// lettre brings in a second rustls backend: TLS setup must not panic over the choice.
+    #[test]
+    fn tls_setup_with_two_crypto_backends() {
+        let _ = tls_config();
+    }
 
     #[tokio::test]
     async fn a_wake_ends_a_waiting_command_at_once() {

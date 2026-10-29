@@ -13,6 +13,8 @@ futures = "0.3.34"
 hickory-resolver = "0.26.3"
 imap-proto = "0.17"
 keyring = "4.2.0"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "rustls-native-certs", "hostname"] }
+mail-builder = "0.4"
 mail-parser = "0.11.9"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls-native-certs = "0.8.5"

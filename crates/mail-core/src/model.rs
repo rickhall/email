@@ -39,6 +39,22 @@ pub struct Account {
     pub imap_host: String,
     #[serde(skip)]
     pub imap_port: u16,
+    /// The account's own submission server; None = the default for its IMAP server.
+    #[serde(skip)]
+    pub smtp_host: Option<String>,
+    #[serde(skip)]
+    pub smtp_port: Option<u16>,
+}
+
+impl Account {
+    /// Where this account sends mail: its own SMTP server, else the one that goes with its IMAP
+    /// server (`smtp::default_for`).
+    pub fn smtp(&self) -> Option<(String, u16)> {
+        match (&self.smtp_host, self.smtp_port) {
+            (Some(h), p) if !h.trim().is_empty() => Some((h.trim().to_string(), p.unwrap_or(465))),
+            _ => crate::smtp::default_for(&self.imap_host).map(|(h, p)| (h.to_string(), p)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,7 +218,7 @@ pub struct ThreadPage {
     pub threads: Vec<ThreadSummary>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Addr {
     pub name: Option<String>,
     pub addr: String,
@@ -267,6 +283,39 @@ pub struct SyncStatus {
     pub message: Option<String>,
 }
 
+/// A message to send, as the composer has it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendRequest {
+    pub account_id: i64,
+    #[serde(default)]
+    pub to: Vec<Addr>,
+    #[serde(default)]
+    pub cc: Vec<Addr>,
+    #[serde(default)]
+    pub bcc: Vec<Addr>,
+    pub subject: String,
+    /// The body as HTML (editor output plus any quoted original).
+    pub html: String,
+    /// Files to attach, by path.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    /// The message this replies to: threading headers, then \Answered once sent.
+    pub replying_to: Option<i64>,
+    /// The message this forwards: `$Forwarded` once sent.
+    pub forwarding: Option<i64>,
+    /// The composer's own state, handed back by `cancel_send` (undo) to reopen it.
+    pub draft: Option<serde_json::Value>,
+}
+
+/// A queued message: `id` for `cancel_send`, sent at `send_at` (ms) unless taken back.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendQueued {
+    pub id: i64,
+    pub send_at: i64,
+}
+
 /// Where `next_unread` found the next unread item (a message, or a conversation in threaded lists).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +342,10 @@ pub enum CoreEvent {
     MessageReady { id: i64 },
     /// A queued action was rejected by the server and has been rolled back locally.
     ActionFailed { message: String },
+    /// A queued message went out.
+    Sent { account_id: i64, id: i64 },
+    /// A queued message couldn't be sent; it stays queued (with its draft) as failed.
+    SendFailed { account_id: i64, id: i64, message: String },
     Sync(SyncStatus),
 }
 

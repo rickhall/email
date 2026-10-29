@@ -302,6 +302,14 @@ struct IdPayload {
     id: i64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendPayload {
+    account_id: i64,
+    id: i64,
+    message: Option<String>,
+}
+
 /// Forward core events to the webview. `messages-changed` and `folders-changed` can fire
 /// thousands of times a second during sync, so they are coalesced into ~4 updates a second.
 async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
@@ -317,6 +325,12 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
                 Ok(CoreEvent::MessageReady { id }) => { let _ = app.emit("message-ready", IdPayload { id }); }
                 Ok(CoreEvent::ActionFailed { message }) => { let _ = app.emit("action-failed", MessagePayload { message }); }
                 Ok(CoreEvent::Sync(status)) => { let _ = app.emit("sync-status", status); }
+                Ok(CoreEvent::Sent { account_id, id }) => {
+                    let _ = app.emit("message-sent", SendPayload { account_id, id, message: None });
+                }
+                Ok(CoreEvent::SendFailed { account_id, id, message }) => {
+                    let _ = app.emit("send-failed", SendPayload { account_id, id, message: Some(message) });
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::debug!("event forwarder lagged by {n}");
                 }

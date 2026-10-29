@@ -175,6 +175,8 @@ struct Shared {
     refresh: Notify,
     /// Wakes the interactive task: an action was queued or cancelled.
     outbox: Notify,
+    /// Wakes the send task: a message was queued or taken back.
+    sender: Notify,
     /// A STATUS sweep of all folder counts is due (run by the headers task between steps).
     counts_due: std::sync::atomic::AtomicBool,
     /// Folders whose contents changed since their counts were last fetched; recounted
@@ -273,6 +275,7 @@ impl AccountSync {
             dirty: Mutex::new(HashSet::new()),
             refresh: Notify::new(),
             outbox: Notify::new(),
+            sender: Notify::new(),
             counts_due: std::sync::atomic::AtomicBool::new(true),
             counts_dirty: Mutex::new(HashSet::new()),
             urgent: urgent_tx.clone(),
@@ -283,6 +286,7 @@ impl AccountSync {
             tokio::spawn(supervise("headers", shared.clone(), |s| Box::pin(header_task(s)))),
             tokio::spawn(interactive_task(shared.clone(), urgent_rx)),
             tokio::spawn(status_task(shared.clone())),
+            tokio::spawn(send_task(shared.clone())),
             tokio::spawn(supervise("idle-inbox", shared.clone(), |s| Box::pin(idle_task(s, false)))),
             tokio::spawn(supervise("idle-focus", shared.clone(), |s| Box::pin(idle_task(s, true)))),
         ];
@@ -310,6 +314,11 @@ impl AccountSync {
     /// A user action was queued: send it when due.
     pub fn wake_outbox(&self) {
         self.shared.outbox.notify_one();
+    }
+
+    /// A message was queued for sending (or taken back): re-check the send queue.
+    pub fn wake_sender(&self) {
+        self.shared.sender.notify_one();
     }
 
     /// Fetch an omitted attachment on the interactive connection.
@@ -980,6 +989,99 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             let _ = part.reply.send(result);
         }
     }
+}
+
+/// Outgoing mail. Waits for each queued message's send time (the undo window), sends it over
+/// the account's SMTP server, then marks the original replied/forwarded. A refusal leaves it
+/// queued as failed (with its draft) and is reported; connection trouble retries with backoff.
+async fn send_task(shared: Arc<Shared>) {
+    loop {
+        let now = now_ms();
+        match shared.store.claim_due_outgoing(shared.account.id, now) {
+            Ok(Some(o)) => {
+                send_one(&shared, o).await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("send queue: {e:#}"),
+        }
+        let due = shared.store.next_outgoing_due(shared.account.id).ok().flatten();
+        let wait = due.map(|t| Duration::from_millis((t - now).max(0) as u64)).unwrap_or(Duration::from_secs(3600));
+        tokio::select! {
+            _ = shared.sender.notified() => {}
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+/// Connection trouble: retry after 5 s, 10 s, 20 s… then give up and report.
+const MAX_SEND_ATTEMPTS: i64 = 5;
+
+async fn send_one(shared: &Shared, o: crate::store::OutgoingRow) {
+    let account_id = shared.account.id;
+    let fail = |message: String| {
+        tracing::warn!(id = o.id, "send failed: {message}");
+        let _ = shared.store.fail_outgoing(o.id, &message);
+        shared.emit(CoreEvent::SendFailed { account_id, id: o.id, message });
+    };
+    let Some((host, port)) = shared.account.smtp() else {
+        return fail("No outgoing (SMTP) server is set for this account.".into());
+    };
+    let cfg = crate::smtp::SmtpConfig { host, port, user: shared.server.user.clone(), credentials: shared.server.credentials.clone() };
+    let started = std::time::Instant::now();
+    match crate::smtp::send(&cfg, &o.envelope_from, &o.recipients, &o.raw).await {
+        Ok(()) => {
+            tracing::info!(id = o.id, ms = started.elapsed().as_millis() as u64, "message sent");
+            if let Err(e) = shared.store.finish_outgoing(o.id) {
+                tracing::warn!("send queue: {e:#}");
+            }
+            shared.emit(CoreEvent::Sent { account_id, id: o.id });
+            for (m, action) in [(o.replied, crate::actions::Action::MarkReplied), (o.forwarded, crate::actions::Action::MarkForwarded)] {
+                if let Some(m) = m {
+                    if let Err(e) = mark_after_send(shared, m, action) {
+                        tracing::warn!(message = m, "marking after send: {e:#}");
+                    }
+                }
+            }
+            // The copy in Sent (Gmail files it itself) shows up on the next sync of that folder.
+            if let Ok(folders) = shared.store.folders(account_id) {
+                if let Some(sent) = folders.iter().find(|f| f.role == Some(FolderRole::Sent)) {
+                    shared.dirty.lock().unwrap().insert(sent.id);
+                    shared.refresh.notify_one();
+                }
+            }
+        }
+        Err(crate::smtp::SendError::Rejected(message)) => fail(message),
+        Err(crate::smtp::SendError::Failed(e)) if o.attempts + 1 >= MAX_SEND_ATTEMPTS => fail(format!("{e:#}")),
+        Err(crate::smtp::SendError::Failed(e)) => {
+            let backoff = 5_000i64 << o.attempts.min(6);
+            tracing::info!(id = o.id, attempt = o.attempts + 1, "send failed, retrying in {}s: {e:#}", backoff / 1000);
+            let _ = shared.store.retry_outgoing(o.id, now_ms() + backoff);
+        }
+    }
+}
+
+/// Replied/forwarded marker on the original, like a user action (locally now, server via the
+/// outbox).
+fn mark_after_send(shared: &Shared, message_id: i64, action: crate::actions::Action) -> Result<()> {
+    let Some(&folder) = shared.store.message_folder_ids(message_id)?.first() else { return Ok(()) };
+    let gmail = shared.account.provider == crate::model::Provider::Gmail;
+    let planned = crate::actions::plan(&shared.store, shared.account.id, gmail, action, &[message_id], folder)?;
+    let snapshot = shared.store.snapshot(&[message_id])?;
+    shared.store.apply_local(&planned.change)?;
+    let changed = shared.store.message_folder_ids(message_id)?;
+    shared.emit(CoreEvent::MessagesChanged { folder_ids: changed });
+    if !planned.ops.is_empty() {
+        shared.store.enqueue_ops(
+            shared.account.id,
+            &serde_json::to_string(&planned.ops)?,
+            &serde_json::to_string(&snapshot)?,
+            &serde_json::to_string(&planned.folders)?,
+            now_ms(),
+        )?;
+        shared.outbox.notify_one();
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {

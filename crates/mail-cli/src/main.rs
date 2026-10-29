@@ -97,6 +97,15 @@ enum Cmd {
         out: PathBuf,
     },
     /// Diagnose one message: raw IMAP responses for its structure and body-only fetch.
+    /// Send one test message from `email` to `to` over the account's SMTP server (the same
+    /// path the app uses). Uses the password the app stored in the system keychain.
+    SendTest {
+        email: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value = "imap.gmail.com")]
+        imap_host: String,
+    },
     /// Uses the password the app stored in the system keychain.
     Probe {
         email: String,
@@ -191,6 +200,31 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::ActionTest { email, host } => action_test::run(&email, &host).await,
+        Cmd::SendTest { email, to, imap_host } => {
+            use mail_core::compose;
+            use mail_core::model::Addr;
+            let (host, port) = mail_core::smtp::default_for(&imap_host).ok_or_else(|| anyhow!("no SMTP server known for {imap_host}"))?;
+            let password = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let cfg = mail_core::smtp::SmtpConfig {
+                host: host.into(),
+                port,
+                user: email.clone(),
+                credentials: mail_core::imap::Credentials::Password(password),
+            };
+            let msg = compose::Outgoing {
+                from: Some(Addr { name: None, addr: email.clone() }),
+                to: vec![Addr { name: None, addr: to.clone() }],
+                subject: "mailsync send test".into(),
+                html: "<p>This is a <b>test</b> sent by <code>mailsync send-test</code>.</p><ul><li>HTML part</li><li>plain-text part</li></ul>".into(),
+                ..Default::default()
+            };
+            let id = compose::new_message_id(&email);
+            let raw = compose::build(&msg, &id, chrono::Utc::now().timestamp())?;
+            let t = Instant::now();
+            mail_core::smtp::send(&cfg, &email, &msg.recipients(), &raw).await.map_err(|e| anyhow!("{e}"))?;
+            println!("sent <{id}> via {host}:{port} in {:?}", t.elapsed());
+            Ok(())
+        }
         Cmd::Render { data_dir, id, out } => {
             let store = mail_core::store::Store::open(&data_dir)?;
             let raw = store.body(id)?.ok_or_else(|| anyhow!("no body stored for message {id}"))?;

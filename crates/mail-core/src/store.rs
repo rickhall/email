@@ -82,6 +82,23 @@ CREATE INDEX IF NOT EXISTS msgrefs_msg ON msgrefs(message_id);
 -- Server operations for user actions (archive, delete, move, flags), applied locally at once
 -- and sent from here: survives restarts and offline periods. `snapshot` restores the local
 -- state on undo or permanent failure; ops with `started = 0` can still be cancelled.
+-- Outgoing mail: built messages waiting for their send time (the undo window), then SMTP.
+CREATE TABLE IF NOT EXISTS outgoing (
+    id            INTEGER PRIMARY KEY,
+    account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    raw           BLOB NOT NULL,
+    envelope_from TEXT NOT NULL,
+    recipients    TEXT NOT NULL,     -- JSON array of addresses (To, Cc, Bcc)
+    not_before    INTEGER NOT NULL,  -- ms
+    started       INTEGER NOT NULL DEFAULT 0,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    failed        TEXT,              -- set when the server refused it for good
+    replied       INTEGER,           -- message to mark replied once sent
+    forwarded     INTEGER,           -- message to mark forwarded once sent
+    draft         TEXT,              -- the composer's state, to reopen after undo or failure
+    created       INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 CREATE TABLE IF NOT EXISTS pending_ops (
     id         INTEGER PRIMARY KEY,
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -441,6 +458,30 @@ const SCOPE_FILTER: &str = "(
 
 /// Writers (sync) and readers (UI) use separate connections so that WAL lets the UI read
 /// while a large header batch is being written.
+/// A message to queue for sending (see `Store::enqueue_outgoing`).
+pub struct NewOutgoing {
+    pub account_id: i64,
+    pub raw: Vec<u8>,
+    pub envelope_from: String,
+    pub recipients: Vec<String>,
+    pub not_before_ms: i64,
+    pub replied: Option<i64>,
+    pub forwarded: Option<i64>,
+    pub draft: Option<String>,
+}
+
+/// A queued message claimed for sending.
+#[derive(Debug)]
+pub struct OutgoingRow {
+    pub id: i64,
+    pub raw: Vec<u8>,
+    pub envelope_from: String,
+    pub recipients: Vec<String>,
+    pub attempts: i64,
+    pub replied: Option<i64>,
+    pub forwarded: Option<i64>,
+}
+
 pub struct Store {
     db: Mutex<Connection>,
     read: Mutex<Connection>,
@@ -496,16 +537,18 @@ impl Store {
                  PRAGMA user_version=1;",
             )?;
         }
-        for (column, ddl) in [
-            ("omitted", "ALTER TABLE messages ADD COLUMN omitted TEXT"),
-            ("allow_remote", "ALTER TABLE messages ADD COLUMN allow_remote INTEGER NOT NULL DEFAULT 0"),
-            ("thread_id", "ALTER TABLE messages ADD COLUMN thread_id INTEGER"),
-            ("identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
-            ("keywords", "ALTER TABLE messages ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"),
+        for (table, column, ddl) in [
+            ("messages", "omitted", "ALTER TABLE messages ADD COLUMN omitted TEXT"),
+            ("messages", "allow_remote", "ALTER TABLE messages ADD COLUMN allow_remote INTEGER NOT NULL DEFAULT 0"),
+            ("messages", "thread_id", "ALTER TABLE messages ADD COLUMN thread_id INTEGER"),
+            ("messages", "identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
+            ("messages", "keywords", "ALTER TABLE messages ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"),
+            ("accounts", "smtp_host", "ALTER TABLE accounts ADD COLUMN smtp_host TEXT"),
+            ("accounts", "smtp_port", "ALTER TABLE accounts ADD COLUMN smtp_port INTEGER"),
         ] {
             let exists = db
-                .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?1")?
-                .exists([column])?;
+                .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2")?
+                .exists([table, column])?;
             if !exists {
                 db.execute_batch(ddl)?;
             }
@@ -641,6 +684,11 @@ impl Store {
             params![email, display_name, provider.as_str(), host, port],
         )?;
         let id: i64 = db.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))?;
+        let (smtp_host, smtp_port) = db.query_row(
+            "SELECT smtp_host, smtp_port FROM accounts WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         Ok(Account {
             id,
             email: email.into(),
@@ -648,13 +696,16 @@ impl Store {
             provider,
             imap_host: host.into(),
             imap_port: port,
+            smtp_host,
+            smtp_port,
         })
     }
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, email, display_name, provider, imap_host, imap_port FROM accounts ORDER BY id",
+            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port
+             FROM accounts ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Account {
@@ -664,6 +715,8 @@ impl Store {
                 provider: Provider::parse(&r.get::<_, String>(3)?),
                 imap_host: r.get(4)?,
                 imap_port: r.get(5)?,
+                smtp_host: r.get(6)?,
+                smtp_port: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1898,7 +1951,99 @@ impl Store {
     /// Ops interrupted by a crash or quit mid-send are retried, not lost.
     pub fn reset_started_ops(&self) -> Result<()> {
         self.db().execute("UPDATE pending_ops SET started=0 WHERE started=1", [])?;
+        // A send interrupted mid-SMTP is tried again: SMTP has no "did it arrive?", so a rare
+        // duplicate beats a lost message.
+        self.db().execute("UPDATE outgoing SET started=0 WHERE started=1", [])?;
         Ok(())
+    }
+
+    // ---- outgoing mail ---------------------------------------------------------------------
+
+    /// Queue a built message to be sent at `not_before_ms` (after the undo window).
+    pub fn enqueue_outgoing(&self, q: &NewOutgoing) -> Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO outgoing (account_id, raw, envelope_from, recipients, not_before, replied, forwarded, draft)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                q.account_id,
+                q.raw,
+                q.envelope_from,
+                serde_json::to_string(&q.recipients)?,
+                q.not_before_ms,
+                q.replied,
+                q.forwarded,
+                q.draft
+            ],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// Take back a message that hasn't started sending (undo): returns its draft state, or None
+    /// if it's already on its way (or gone).
+    pub fn cancel_outgoing(&self, id: i64) -> Result<Option<String>> {
+        let db = self.db();
+        let draft: Option<Option<String>> = db
+            .query_row("SELECT draft FROM outgoing WHERE id=?1 AND started=0", [id], |r| r.get(0))
+            .optional()?;
+        let Some(draft) = draft else { return Ok(None) };
+        db.execute("DELETE FROM outgoing WHERE id=?1 AND started=0", [id])?;
+        Ok(Some(draft.unwrap_or_default()))
+    }
+
+    /// The next message due to be sent (not failed), marked as started.
+    pub fn claim_due_outgoing(&self, account_id: i64, now_ms: i64) -> Result<Option<OutgoingRow>> {
+        let db = self.db();
+        let row: Option<OutgoingRow> = db
+            .query_row(
+                "SELECT id, raw, envelope_from, recipients, attempts, replied, forwarded FROM outgoing
+                 WHERE account_id=?1 AND not_before<=?2 AND failed IS NULL AND started=0 ORDER BY id LIMIT 1",
+                params![account_id, now_ms],
+                |r| {
+                    Ok(OutgoingRow {
+                        id: r.get(0)?,
+                        raw: r.get(1)?,
+                        envelope_from: r.get(2)?,
+                        recipients: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                        attempts: r.get(4)?,
+                        replied: r.get(5)?,
+                        forwarded: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(o) = &row {
+            db.execute("UPDATE outgoing SET started=1 WHERE id=?1", [o.id])?;
+        }
+        Ok(row)
+    }
+
+    /// Sent: gone from the queue.
+    pub fn finish_outgoing(&self, id: i64) -> Result<()> {
+        self.db().execute("DELETE FROM outgoing WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// Couldn't send this time: try again at `at_ms`.
+    pub fn retry_outgoing(&self, id: i64, at_ms: i64) -> Result<()> {
+        self.db()
+            .execute("UPDATE outgoing SET started=0, attempts=attempts+1, not_before=?2 WHERE id=?1", params![id, at_ms])?;
+        Ok(())
+    }
+
+    /// The server refused it: kept (with its draft) for the user to fix or retry.
+    pub fn fail_outgoing(&self, id: i64, message: &str) -> Result<()> {
+        self.db().execute("UPDATE outgoing SET started=0, failed=?2 WHERE id=?1", params![id, message])?;
+        Ok(())
+    }
+
+    /// When the next waiting message is due (ms), if any.
+    pub fn next_outgoing_due(&self, account_id: i64) -> Result<Option<i64>> {
+        Ok(self.rdb().query_row(
+            "SELECT min(not_before) FROM outgoing WHERE account_id=?1 AND failed IS NULL AND started=0",
+            [account_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Drop messages that are in no folder any more, with their body.
@@ -1932,6 +2077,22 @@ impl Store {
         )?;
         let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A message's own Message-ID, In-Reply-To and References (for replying to it).
+    pub fn threading_of(&self, id: i64) -> Result<Option<crate::compose::Original>> {
+        let row: Option<(Option<String>, Option<String>, Option<String>)> = self
+            .rdb()
+            .query_row("SELECT message_id, in_reply_to, refs FROM messages WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        Ok(row.map(|(message_id, in_reply_to, refs)| crate::compose::Original {
+            message_id,
+            in_reply_to,
+            references: refs.map(|r| r.split_whitespace().map(String::from).collect()).unwrap_or_default(),
+            ..Default::default()
+        }))
     }
 
     /// Gmail's X-GM-MSGID for a message, if known.

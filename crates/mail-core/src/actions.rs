@@ -45,11 +45,18 @@ pub enum Action {
     Unflag,
     /// Add (`on`) or remove a tag keyword (Thunderbird-compatible IMAP keyword).
     Tag { keyword: String, on: bool },
+    /// After sending a reply: \Answered on the original.
+    MarkReplied,
+    /// After forwarding: `$Forwarded` on the original (Thunderbird's keyword).
+    MarkForwarded,
 }
 
 impl Action {
     fn is_flags(&self) -> bool {
-        matches!(self, Action::Read | Action::Unread | Action::Flag | Action::Unflag | Action::Tag { .. })
+        matches!(
+            self,
+            Action::Read | Action::Unread | Action::Flag | Action::Unflag | Action::Tag { .. } | Action::MarkReplied | Action::MarkForwarded
+        )
     }
 }
 
@@ -296,10 +303,15 @@ pub fn plan(
                     touched.insert(inbox.id);
                 }
             }
-            Action::Tag { keyword, on } => {
+            Action::Tag { .. } | Action::MarkForwarded => {
+                let (keyword, on) = match &action {
+                    Action::Tag { keyword, on } => (keyword.clone(), *on),
+                    _ => ("$Forwarded".to_string(), true),
+                };
                 let keyword = &keyword;
                 let k = crate::tags::normalize(keyword);
-                if !crate::tags::is_tag(&k) || k.chars().any(|c| !c.is_ascii_graphic() || "(){%*\"\\]".contains(c)) {
+                let is_marker = matches!(action, Action::MarkForwarded);
+                if !is_marker && (!crate::tags::is_tag(&k) || k.chars().any(|c| !c.is_ascii_graphic() || "(){%*\"\\]".contains(c))) {
                     bail!("\"{keyword}\" can't be used as a tag.");
                 }
                 change.tags.push((id, k.clone(), on));
@@ -315,11 +327,12 @@ pub fn plan(
                     }
                 }
             }
-            Action::Read | Action::Unread | Action::Flag | Action::Unflag => {
+            Action::Read | Action::Unread | Action::Flag | Action::Unflag | Action::MarkReplied => {
                 let (bit, flag, on) = match action {
                     Action::Read => (flags::SEEN, "\\Seen", true),
                     Action::Unread => (flags::SEEN, "\\Seen", false),
                     Action::Flag => (flags::FLAGGED, "\\Flagged", true),
+                    Action::MarkReplied => (flags::ANSWERED, "\\Answered", true),
                     _ => (flags::FLAGGED, "\\Flagged", false),
                 };
                 change.flags.push((id, if on { bit } else { 0 }, if on { 0 } else { bit }));
@@ -557,6 +570,62 @@ mod tests {
         // A step that starts afterwards writes normally.
         let epoch = env.store.local_epoch();
         env.store.upsert_headers_since(Some(epoch), env.acct, all, &[stale], &labels).unwrap();
+    }
+
+    #[test]
+    fn markers_after_sending() {
+        let (env, msg) = gmail_env();
+        let inbox = env.id("INBOX");
+        let p = plan(&env.store, env.acct, true, Action::MarkReplied, &[msg], inbox).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 900, flag: "\\Answered".into(), on: true }]);
+        assert_eq!(p.delay_ms, 0);
+        env.store.apply_local(&p.change).unwrap();
+        let p = plan(&env.store, env.acct, true, Action::MarkForwarded, &[msg], inbox).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 900, flag: "$forwarded".into(), on: true }]);
+        env.store.apply_local(&p.change).unwrap();
+        let m = env.store.list_messages(inbox, 0, 5).unwrap().messages.into_iter().find(|m| m.id == msg).unwrap();
+        assert!(m.answered && m.forwarded && m.tags.is_empty());
+    }
+
+    #[test]
+    fn send_queue_waits_undoes_and_retries() {
+        let env = Env::new("outgoing", Provider::Gmail, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        let q = |not_before_ms: i64, draft: &str| crate::store::NewOutgoing {
+            account_id: env.acct,
+            raw: b"Subject: x\r\n\r\nhi".to_vec(),
+            envelope_from: "x@example.com".into(),
+            recipients: vec!["jane.doe@example.net".into()],
+            not_before_ms,
+            replied: Some(7),
+            forwarded: None,
+            draft: Some(draft.into()),
+        };
+        let s = &env.store;
+        let a = s.enqueue_outgoing(&q(1_000, r#"{"n":1}"#)).unwrap();
+        assert!(s.claim_due_outgoing(env.acct, 999).unwrap().is_none(), "not before its time");
+        assert_eq!(s.next_outgoing_due(env.acct).unwrap(), Some(1_000));
+        // Undo within the window: the draft comes back, nothing is left to send.
+        assert_eq!(s.cancel_outgoing(a).unwrap().as_deref(), Some(r#"{"n":1}"#));
+        assert!(s.claim_due_outgoing(env.acct, 5_000).unwrap().is_none());
+
+        let b = s.enqueue_outgoing(&q(1_000, "{}")).unwrap();
+        let o = s.claim_due_outgoing(env.acct, 1_000).unwrap().unwrap();
+        assert_eq!((o.id, o.replied, o.recipients.len()), (b, Some(7), 1));
+        assert_eq!(s.cancel_outgoing(b).unwrap(), None, "too late once sending started");
+        s.retry_outgoing(b, 9_000).unwrap();
+        assert!(s.claim_due_outgoing(env.acct, 8_999).unwrap().is_none());
+        let o = s.claim_due_outgoing(env.acct, 9_000).unwrap().unwrap();
+        assert_eq!(o.attempts, 1);
+        s.fail_outgoing(b, "550 no such user").unwrap();
+        assert!(s.claim_due_outgoing(env.acct, i64::MAX).unwrap().is_none(), "failed ones wait for the user");
+        assert_eq!(s.next_outgoing_due(env.acct).unwrap(), None);
+
+        // Interrupted mid-send (quit, crash): tried again after restart.
+        let c = s.enqueue_outgoing(&q(0, "{}")).unwrap();
+        s.claim_due_outgoing(env.acct, 0).unwrap().unwrap();
+        s.reset_started_ops().unwrap();
+        assert_eq!(s.claim_due_outgoing(env.acct, 0).unwrap().unwrap().id, c);
+        s.finish_outgoing(c).unwrap();
     }
 
     #[test]

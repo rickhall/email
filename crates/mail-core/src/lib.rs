@@ -2,10 +2,12 @@
 
 pub mod imap;
 pub mod actions;
+pub mod compose;
 pub mod mime;
 pub mod model;
 pub mod partial;
 pub mod search;
+pub mod smtp;
 pub mod store;
 pub mod sync;
 pub mod tags;
@@ -14,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::broadcast;
 
 use crate::imap::{Credentials, ServerConfig};
@@ -84,6 +86,9 @@ pub struct NewAccount {
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
 }
+
+/// The undo-send window: queued mail waits this long before it goes out.
+pub const SEND_DELAY_MS: i64 = 10_000;
 
 pub struct Core {
     pub store: Arc<Store>,
@@ -374,6 +379,63 @@ impl Core {
 
     pub fn index_of(&self, folder_id: i64, id: i64, threaded: bool) -> Result<Option<u32>> {
         self.store.index_of(folder_id, id, threaded)
+    }
+
+    /// Queue a message: built now, sent after the undo window (`SEND_DELAY_MS`) unless taken
+    /// back with `cancel_send`.
+    pub fn send_message(&self, req: SendRequest) -> Result<SendQueued> {
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == req.account_id).ok_or_else(|| anyhow!("no such account"))?;
+        if account.smtp().is_none() {
+            bail!("No outgoing (SMTP) server is set for {}.", account.email);
+        }
+        let mut msg = compose::Outgoing {
+            from: Some(Addr { name: Some(account.display_name.clone()).filter(|n| !n.trim().is_empty()), addr: account.email.clone() }),
+            to: req.to,
+            cc: req.cc,
+            bcc: req.bcc,
+            subject: req.subject,
+            html: req.html,
+            ..Default::default()
+        };
+        let recipients = msg.recipients();
+        if recipients.is_empty() {
+            bail!("Add at least one recipient.");
+        }
+        if let Some(orig) = req.replying_to.map(|id| self.store.threading_of(id)).transpose()?.flatten() {
+            (msg.in_reply_to, msg.references) = compose::reply_threading(&orig);
+        }
+        for path in &req.attachments {
+            let p = std::path::Path::new(path);
+            let data = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
+            msg.attachments.push(compose::OutAttachment { content_type: compose::content_type_for(&name).into(), name, data });
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let raw = compose::build(&msg, &compose::new_message_id(&account.email), now.as_secs() as i64)?;
+        let send_at = now.as_millis() as i64 + SEND_DELAY_MS;
+        let id = self.store.enqueue_outgoing(&store::NewOutgoing {
+            account_id: account.id,
+            raw,
+            envelope_from: account.email.clone(),
+            recipients,
+            not_before_ms: send_at,
+            replied: req.replying_to,
+            forwarded: req.forwarding,
+            draft: req.draft.map(|d| d.to_string()),
+        })?;
+        if let Some(s) = self.running.lock().unwrap().get(&account.id) {
+            s.wake_sender();
+        }
+        Ok(SendQueued { id, send_at })
+    }
+
+    /// Take back a queued message before it's sent (undo send): its draft, to reopen.
+    pub fn cancel_send(&self, id: i64) -> Result<Option<serde_json::Value>> {
+        let draft = self.store.cancel_outgoing(id)?.ok_or_else(|| anyhow!("Too late to undo: the message was already sent."))?;
+        for s in self.running.lock().unwrap().values() {
+            s.wake_sender();
+        }
+        Ok(serde_json::from_str(&draft).ok())
     }
 
     /// The next unread item below `after` in a folder list (wrapping to the top).
