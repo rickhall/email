@@ -17,8 +17,8 @@ async fn find_uid(conn: &mut Connection, folder: &str, msgid: &str) -> Result<Op
 async fn labels_flags(conn: &mut Connection, folder: &str, uid: u32) -> Result<(Vec<String>, i64)> {
     conn.ensure_selected(folder).await?;
     let r = conn.fetch_flags(&uid.to_string(), None).await?;
-    let (_, flags, labels) = r.into_iter().find(|x| x.0 == uid).ok_or_else(|| anyhow!("uid {uid} not found"))?;
-    Ok((labels.unwrap_or_default(), flags))
+    let c = r.into_iter().find(|x| x.uid == uid).ok_or_else(|| anyhow!("uid {uid} not found"))?;
+    Ok((c.labels.unwrap_or_default(), c.flags))
 }
 
 fn check(ok: bool, what: &str, t: Instant) -> Result<()> {
