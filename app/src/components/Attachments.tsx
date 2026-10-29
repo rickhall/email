@@ -157,13 +157,22 @@ function AttachmentMenu(props: {
     const onScroll = (e: Event) => {
       if (!el.contains(e.target as Node)) props.onClose(false);
     };
+    // Clicks in the email body (an iframe) only show up as the window losing focus.
+    const onBlur = () => props.onClose(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') props.onClose(false);
+    };
     document.addEventListener('mousedown', onDown, true);
     document.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', place);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('keydown', onKey);
     onCleanup(() => {
       document.removeEventListener('mousedown', onDown, true);
       document.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', place);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('keydown', onKey);
     });
   });
 

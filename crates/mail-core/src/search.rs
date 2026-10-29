@@ -64,6 +64,39 @@ fn parse(input: &str) -> Vec<Term> {
     terms
 }
 
+/// Split `tag:` terms (`tag:work`, `tag:"to do"`) out of a query: (rest of the query, tag values).
+pub fn split_tags(query: &str) -> (String, Vec<String>) {
+    let mut rest = String::new();
+    let mut tags = Vec::new();
+    let mut chars = query.char_indices().peekable();
+    while let Some(&(i, _)) = chars.peek() {
+        let tail = &query[i..];
+        let at_word_start = i == 0 || query[..i].ends_with(char::is_whitespace);
+        if at_word_start && tail.len() >= 4 && tail[..4].eq_ignore_ascii_case("tag:") {
+            let after = &tail[4..];
+            let (value, used) = if let Some(q) = after.strip_prefix('"') {
+                match q.find('"') {
+                    Some(end) => (q[..end].to_string(), 4 + 1 + end + 1),
+                    None => (q.to_string(), tail.len()),
+                }
+            } else {
+                let end = after.find(char::is_whitespace).unwrap_or(after.len());
+                (after[..end].to_string(), 4 + end)
+            };
+            if !value.trim().is_empty() {
+                tags.push(value.trim().to_string());
+            }
+            for _ in 0..tail[..used].chars().count() {
+                chars.next();
+            }
+            continue;
+        }
+        let (_, c) = chars.next().unwrap();
+        rest.push(c);
+    }
+    (rest, tags)
+}
+
 /// Columns a plain (unprefixed) term may match.
 pub const ALL_FIELDS: &[&str] = &["sender", "recipients", "subject"];
 
@@ -114,6 +147,13 @@ mod tests {
         assert_eq!(to_fts5("AND OR NOT").unwrap(), r#""AND"* AND "OR"* AND "NOT"*"#);
         assert_eq!(to_fts5("-draft"), None);
         assert_eq!(to_fts5(" @ \" "), None);
+    }
+
+    #[test]
+    fn tag_terms() {
+        assert_eq!(super::split_tags("invoice tag:work"), ("invoice ".to_string(), vec!["work".to_string()]));
+        assert_eq!(super::split_tags("tag:\"to do\" from:bob"), (" from:bob".to_string(), vec!["to do".to_string()]));
+        assert_eq!(super::split_tags("hashtag:x"), ("hashtag:x".to_string(), vec![]));
     }
 
     #[test]

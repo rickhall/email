@@ -302,10 +302,14 @@ export function SyncFooter(props: { compact?: boolean }) {
       setOpen(false);
       rowEl.focus();
     };
+    // Clicks in the email body (an iframe) only show up as the window losing focus.
+    const onBlur = () => setOpen(false);
+    window.addEventListener('blur', onBlur);
     document.addEventListener('mousedown', onDown, true);
     window.addEventListener('keydown', onKey, true);
     onCleanup(() => {
       document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('blur', onBlur);
       window.removeEventListener('keydown', onKey, true);
     });
   });
@@ -313,7 +317,7 @@ export function SyncFooter(props: { compact?: boolean }) {
   return (
     <footer class="sync-footer" classList={{ compact: !!props.compact }}>
       <Show when={open()}>
-        <div class="sync-popover" classList={{ rail: !!props.compact }} ref={popEl} role="dialog" aria-label="Account sync status">
+        <div class="sync-popover" classList={{ 'in-rail': !!props.compact }} ref={popEl} role="dialog" aria-label="Account sync status">
           <For each={snap()}>
             {(x) => <SyncPopoverRow account={x.account} status={x.status} onFix={() => setFixFor(x.account)} />}
           </For>

@@ -45,6 +45,8 @@ export interface MessageSummary {
   flagged: boolean;
   hasAttachments: boolean;
   hasBody: boolean;
+  /** tag keywords, e.g. ["$label2"] (see TagDef) */
+  tags: string[];
 }
 
 export interface Addr {
@@ -78,6 +80,7 @@ export interface MessageDetail {
   hasRemoteContent: boolean;
   /** The user chose "Load images" for this message before. */
   remoteAllowed: boolean;
+  tags: string[];
 }
 
 /**
@@ -108,6 +111,8 @@ export interface ThreadSummary {
   date: number;
   snippet: string | null;
   latestMessageId: number;
+  /** tags on any selected message of the conversation */
+  tags: string[];
 }
 
 /** get_thread result: the selected messages plus how many the scope hid. */
@@ -169,8 +174,19 @@ export type Action =
   | { kind: 'read' }
   | { kind: 'unread' }
   | { kind: 'flag' }
-  | { kind: 'unflag' };
+  | { kind: 'unflag' }
+  | { kind: 'tag'; keyword: string; on: boolean };
 export type ActionKind = Action['kind'];
+
+/** Tag definition. Tags are IMAP keywords on messages (Thunderbird-compatible: $label1..$label5).
+ *  `defined: false` = a keyword seen on messages without a definition. */
+export interface TagDef {
+  keyword: string;
+  name: string;
+  color: string;
+  position: number;
+  defined: boolean;
+}
 
 export interface ActionResult {
   /** null when nothing was queued (e.g. no-op, or read/star which apply at once) */
@@ -230,6 +246,9 @@ export interface CommandMap {
   save_all_attachments: { args: { messageId: number }; ret: string[] };
   apply_action: { args: { action: Action; messageIds: number[]; folderId: number }; ret: ActionResult };
   undo_action: { args: { opId: number }; ret: void };
+  list_tags: { args: undefined; ret: TagDef[] };
+  set_tag: { args: { keyword: string | null; name: string; color: string }; ret: string };
+  delete_tag: { args: { keyword: string }; ret: void };
   app_version: { args: undefined; ret: string };
   reveal_path: { args: { path: string }; ret: void };
   index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };

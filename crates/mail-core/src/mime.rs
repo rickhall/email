@@ -234,6 +234,7 @@ pub fn render(id: i64, raw: &[u8], date: i64) -> Option<MessageDetail> {
         attachments,
         has_remote_content,
         remote_allowed: false,
+        tags: Vec::new(),
     })
 }
 

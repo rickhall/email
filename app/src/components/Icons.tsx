@@ -122,6 +122,12 @@ export const MailIcon = (p: P) => (
     <path d="m2.5 4.5 5.5 4 5.5-4" />
   </Svg>
 );
+export const TagIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M2.5 3.5v4.1l6.4 6.4 5.1-5.1-6.4-6.4H3.5a1 1 0 0 0-1 1z" />
+    <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+  </Svg>
+);
 export const SidebarIcon = (p: P) => (
   <Svg {...p}>
     <rect x="2" y="2.75" width="12" height="10.5" rx="1.75" />

@@ -7,6 +7,8 @@ import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } f
 import { avatarColor, initials, linkify, longDate } from '../lib/format';
 import { patchSelectedSummary, restorePending, searchActive, selectedFolderId, selectedMessageId, selectedSummary } from '../state';
 import { HeaderActions, type ActionTarget } from './Actions';
+import { searchTag, TagChips } from './Tags';
+import { runAction } from '../lib/actions';
 import { ImageIcon, MailIcon, PaperclipIcon } from './Icons';
 import { DRAG } from '../lib/platform';
 
@@ -200,7 +202,7 @@ const actionTarget = (): ActionTarget | null => {
   if (!s || s.id !== id) return null;
   // Search results span folders: act in the message's own folder there.
   const folderId = searchActive() ? s.folderId : selectedFolderId() ?? s.folderId;
-  return { ids: [s.id], folderId, anyUnread: s.unread, starId: s.id, starred: s.flagged, advance: !searchActive() };
+  return { ids: [s.id], folderId, anyUnread: s.unread, starId: s.id, starred: s.flagged, advance: !searchActive(), tagSets: [s.tags ?? []] };
 };
 
 export function Reader(props: { ref?: (el: HTMLElement) => void }) {
@@ -345,6 +347,15 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                     <PaperclipIcon size={12} />
                     {h().attachments.length} {h().attachments.length === 1 ? 'attachment' : 'attachments'}
                   </span>
+                </Show>
+                <Show when={actionTarget()}>
+                  {(x) => (
+                    <TagChips
+                      tags={x().tagSets[0] ?? []}
+                      onRemove={(k) => void runAction({ kind: 'tag', keyword: k, on: false }, { ids: x().ids, folderId: x().folderId, advance: false })}
+                      onOpen={searchTag}
+                    />
+                  )}
                 </Show>
                 <HeaderActions target={actionTarget()} />
               </div>

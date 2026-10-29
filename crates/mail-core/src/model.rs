@@ -131,6 +131,8 @@ pub struct MessageSummary {
     pub flagged: bool,
     pub has_attachments: bool,
     pub has_body: bool,
+    /// Tag keywords (see `tags`), e.g. ["$label1", "projectx"].
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +171,8 @@ pub struct ThreadSummary {
     pub date: i64,
     pub snippet: Option<String>,
     pub latest_message_id: i64,
+    /// Tags on any of the conversation's selected messages.
+    pub tags: Vec<String>,
 }
 
 /// A conversation as shown in the reader, plus how many of its messages the scope hid.
@@ -224,6 +228,7 @@ pub struct MessageDetail {
     pub has_remote_content: bool,
     /// The user chose "Load images" for this message before.
     pub remote_allowed: bool,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

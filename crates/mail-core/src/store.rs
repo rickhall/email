@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS pending_ops (
     attempts   INTEGER NOT NULL DEFAULT 0
 );
 
+-- Tag names and colours (keywords are on the server; definitions are local, like Thunderbird's).
+CREATE TABLE IF NOT EXISTS tags (
+    keyword  TEXT PRIMARY KEY,
+    name     TEXT NOT NULL,
+    color    TEXT NOT NULL,
+    position INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS entries (
     folder_id  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -138,11 +146,24 @@ CREATE TABLE IF NOT EXISTS attachment_cache (
 /// How long a stashed body waits for its message to reappear in another folder.
 const STASH_TTL_SECS: i64 = 7 * 24 * 3600;
 
+/// A message's flags as fetched (incremental flag sync).
+#[derive(Debug, Clone, Default)]
+pub struct FlagChange {
+    pub uid: u32,
+    pub flags: i64,
+    pub keywords: Vec<String>,
+    /// Gmail labels, when the server is Gmail.
+    pub labels: Option<Vec<String>>,
+}
+
 /// Local state of some messages before an action (undo restores it).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub entries: Vec<SnapEntry>,
     pub flags: Vec<(i64, i64)>,
+    /// (message, stored keywords)
+    #[serde(default)]
+    pub keywords: Vec<(i64, String)>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -162,6 +183,8 @@ pub struct LocalChange {
     pub add: Vec<(i64, i64)>,
     /// (message, flag bits to set, flag bits to clear).
     pub flags: Vec<(i64, i64, i64)>,
+    /// (message, keyword, add?)
+    pub tags: Vec<(i64, String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +204,8 @@ pub struct HeaderRecord {
     /// RFC 8474 EMAILID (servers with OBJECTID), identical for every copy of a message.
     pub email_id: Option<String>,
     pub gm_labels: Option<Vec<String>>,
+    /// IMAP keywords (tags), lowercase.
+    pub keywords: Vec<String>,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub refs: Option<String>,
@@ -423,7 +448,13 @@ pub struct Store {
 }
 
 // Schema/data versions (PRAGMA user_version): 1 = Gmail label resync, 2 = conversations
-// rebuilt from cleaned references.
+// rebuilt from cleaned references, 3 = keywords (tags) kept: flags re-fetched once.
+//
+// PLANNED CLEANUP: this is a greenfield app with one user. Once all three of the user's
+// machines have run a build at the current version, fold these steps
+// into SCHEMA (all columns/tables/indexes created directly), reset the version baseline, and
+// delete the migration code (version checks, rethread, column-adding loop). Older databases
+// then just resync from scratch.
 
 fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -452,6 +483,7 @@ impl Store {
             ("allow_remote", "ALTER TABLE messages ADD COLUMN allow_remote INTEGER NOT NULL DEFAULT 0"),
             ("thread_id", "ALTER TABLE messages ADD COLUMN thread_id INTEGER"),
             ("identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
+            ("keywords", "ALTER TABLE messages ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"),
         ] {
             let exists = db
                 .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?1")?
@@ -528,6 +560,17 @@ impl Store {
         if version < 2 {
             rethread(&mut db, &bodies)?;
             db.execute_batch("PRAGMA user_version=2;")?;
+        }
+        if version < 3 {
+            // v3: keywords (Thunderbird tags) are now kept. Forget the CONDSTORE position so the
+            // next pass fetches every message's flags once, keywords included.
+            db.execute_batch("UPDATE folders SET highest_modseq=0; PRAGMA user_version=3;")?;
+        }
+        let have_tags: bool = db.prepare("SELECT 1 FROM tags LIMIT 1")?.exists([])?;
+        if !have_tags {
+            for (i, (k, n, c)) in crate::tags::DEFAULTS.iter().enumerate() {
+                db.execute("INSERT INTO tags (keyword, name, color, position) VALUES (?1,?2,?3,?4)", params![k, n, c, i as i64])?;
+            }
         }
         Ok(Store {
             db: Mutex::new(db),
@@ -801,10 +844,10 @@ impl Store {
                 tx.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
             let mut insert = tx.prepare_cached(
                 "INSERT INTO messages (account_id, gm_msgid, message_id, in_reply_to, refs, subject,
-                    from_name, from_addr, to_addrs, date, size, flags, has_attachments, identity)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    from_name, from_addr, to_addrs, date, size, flags, has_attachments, identity, keywords)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             )?;
-            let mut update_flags = tx.prepare_cached("UPDATE messages SET flags=?2 WHERE id=?1")?;
+            let mut update_flags = tx.prepare_cached("UPDATE messages SET flags=?2, keywords=?3 WHERE id=?1")?;
             let mut entry = tx.prepare_cached(
                 "INSERT INTO entries (folder_id, message_id, uid, date) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(folder_id, message_id) DO UPDATE SET uid=coalesce(excluded.uid, entries.uid)",
@@ -841,7 +884,7 @@ impl Store {
                 };
                 let id = match existing {
                     Some(id) => {
-                        update_flags.execute(params![id, rec.flags])?;
+                        update_flags.execute(params![id, rec.flags, crate::tags::join(&rec.keywords)])?;
                         id
                     }
                     None => {
@@ -860,6 +903,7 @@ impl Store {
                             rec.flags,
                             rec.has_attachments,
                             identity,
+                            crate::tags::join(&rec.keywords),
                         ])?;
                         let id = tx.last_insert_rowid();
                         if let Some(key) = identity {
@@ -938,7 +982,7 @@ impl Store {
     pub fn update_flags(
         &self,
         folder_id: i64,
-        changes: &[(u32, i64, Option<Vec<String>>)],
+        changes: &[FlagChange],
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
@@ -948,15 +992,15 @@ impl Store {
             let mut find = tx.prepare_cached(
                 "SELECT e.message_id, e.date FROM entries e WHERE e.folder_id=?1 AND e.uid=?2",
             )?;
-            let mut set = tx.prepare_cached("UPDATE messages SET flags=?2 WHERE id=?1")?;
-            for (uid, flags, labels) in changes {
+            let mut set = tx.prepare_cached("UPDATE messages SET flags=?2, keywords=?3 WHERE id=?1")?;
+            for c in changes {
                 let Some((id, date)): Option<(i64, i64)> =
-                    find.query_row(params![folder_id, uid], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
+                    find.query_row(params![folder_id, c.uid], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
                 else {
                     continue;
                 };
-                set.execute(params![id, flags])?;
-                if let Some(labels) = labels {
+                set.execute(params![id, c.flags, crate::tags::join(&c.keywords)])?;
+                if let Some(labels) = &c.labels {
                     apply_gmail_labels(&tx, id, folder_id, date, labels, label_folders, &mut changed)?;
                 }
             }
@@ -1050,7 +1094,7 @@ impl Store {
             db.query_row("SELECT count(*) FROM entries WHERE folder_id=?1", [folder_id], |r| r.get(0))?;
         let mut stmt = db.prepare_cached(
             "SELECT m.id, m.subject, m.from_name, m.from_addr, m.date, m.snippet, m.flags,
-                    m.has_attachments, m.has_body
+                    m.has_attachments, m.has_body, m.keywords
              FROM entries e JOIN messages m ON m.id = e.message_id
              WHERE e.folder_id=?1 ORDER BY e.date DESC, e.message_id DESC LIMIT ?2 OFFSET ?3",
         )?;
@@ -1068,6 +1112,7 @@ impl Store {
                 flagged: flags & flags::FLAGGED != 0,
                 has_attachments: r.get(7)?,
                 has_body: r.get(8)?,
+                tags: crate::tags::visible(&r.get::<_, String>(9)?),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
@@ -1090,15 +1135,16 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?
         };
         let mut members = db.prepare_cached(&format!(
-            "SELECT m.id, m.subject, m.from_name, m.from_addr, m.flags, m.has_attachments, m.snippet, m.message_id
+            "SELECT m.id, m.subject, m.from_name, m.from_addr, m.flags, m.has_attachments, m.snippet, m.message_id,
+                    m.keywords
              FROM messages m WHERE m.thread_id=?1 AND {SCOPE_FILTER} ORDER BY m.date, m.id"
         ))?;
         let mut threads = Vec::with_capacity(page.len());
         for (thread_id, date) in page {
             #[allow(clippy::type_complexity)]
-            let rows: Vec<(i64, String, String, String, i64, bool, Option<String>, Option<String>)> = members
+            let rows: Vec<(i64, String, String, String, i64, bool, Option<String>, Option<String>, String)> = members
                 .query_map(params![thread_id, folder_id, scope.all_folders, scope.include_trash], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             let Some(first) = rows.first() else { continue };
@@ -1125,6 +1171,17 @@ impl Store {
                 date,
                 snippet: latest.6.clone(),
                 latest_message_id: latest.0,
+                tags: {
+                    let mut t: Vec<String> = Vec::new();
+                    for r in &rows {
+                        for k in crate::tags::visible(&r.8) {
+                            if !t.contains(&k) {
+                                t.push(k);
+                            }
+                        }
+                    }
+                    t
+                },
             });
         }
         Ok(ThreadPage { total, threads })
@@ -1148,7 +1205,8 @@ impl Store {
                     EXISTS (SELECT 1 FROM entries e JOIN folders f ON f.id = e.folder_id
                             WHERE e.message_id = m.id AND coalesce(f.role, '') NOT IN ('trash', 'junk')),
                     EXISTS (SELECT 1 FROM entries e JOIN folders f ON f.id = e.folder_id
-                            WHERE e.message_id = m.id AND f.role IN ('trash', 'junk'))
+                            WHERE e.message_id = m.id AND f.role IN ('trash', 'junk')),
+                    m.keywords
              FROM messages m WHERE m.thread_id = ?1
              ORDER BY m.date, m.has_body DESC, m.id",
         )?;
@@ -1169,6 +1227,7 @@ impl Store {
                     flagged: flags & flags::FLAGGED != 0,
                     has_attachments: r.get(8)?,
                     has_body: r.get(9)?,
+                    tags: crate::tags::visible(&r.get::<_, String>(14)?),
                 },
             ))
         })?;
@@ -1202,17 +1261,38 @@ impl Store {
         offset: u32,
         limit: u32,
     ) -> Result<MessagePage> {
-        let Some(fts) = crate::search::to_fts5(query, fields) else {
+        // `tag:work` / `tag:"to do"` / `tag:$label2` terms filter by keyword; the rest is FTS.
+        let (rest, tag_terms) = crate::search::split_tags(query);
+        let fts = crate::search::to_fts5(&rest, fields);
+        if fts.is_none() && tag_terms.is_empty() {
             return Ok(MessagePage { total: 0, messages: vec![] });
-        };
+        }
+        let keywords: Vec<String> = tag_terms.iter().map(|t| self.tag_keyword(t)).collect::<Result<_>>()?;
         let db = self.rdb();
-        let scope = "msg_fts MATCH ?1 AND m.account_id = ?2
-             AND (?3 IS NULL OR EXISTS (SELECT 1 FROM entries e WHERE e.message_id = m.id AND e.folder_id = ?3))";
-        let total: u32 = db.query_row(
-            &format!("SELECT count(*) FROM msg_fts JOIN messages m ON m.id = msg_fts.rowid WHERE {scope}"),
-            params![fts, account_id, folder_id],
-            |r| r.get(0),
-        )?;
+        let from = if fts.is_some() { "msg_fts JOIN messages m ON m.id = msg_fts.rowid" } else { "messages m" };
+        let mut scope = String::from(if fts.is_some() { "msg_fts MATCH ?1" } else { "?1 IS NULL" });
+        scope.push_str(
+            " AND m.account_id = ?2
+             AND (?3 IS NULL OR EXISTS (SELECT 1 FROM entries e WHERE e.message_id = m.id AND e.folder_id = ?3))
+             AND EXISTS (SELECT 1 FROM entries e WHERE e.message_id = m.id)",
+        );
+        for n in 0..keywords.len() {
+            scope.push_str(&format!(" AND m.keywords LIKE ?{} ESCAPE '\\'", n + 6));
+        }
+        let like: Vec<String> = keywords
+            .iter()
+            .map(|k| format!("% {} %", k.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")))
+            .collect();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(fts.clone()), Box::new(account_id), Box::new(folder_id), Box::new(limit), Box::new(offset)];
+        for l in &like {
+            args.push(Box::new(l.clone()));
+        }
+        let total: u32 = {
+            // Same numbering as the page query; ?4/?5 are unused here but keep positions aligned.
+            let sql = format!("SELECT count(*) FROM {from} WHERE {scope} AND ?4 IS NOT NULL AND ?5 IS NOT NULL");
+            db.query_row(&sql, rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), |r| r.get(0))?
+        };
         // Report each hit in its most specific folder: Inbox, then labels/folders, then
         // Trash/Spam, and Gmail's All Mail last.
         let mut stmt = db.prepare_cached(&format!(
@@ -1221,11 +1301,10 @@ impl Store {
                         ORDER BY CASE f.role WHEN 'inbox' THEN 0 WHEN 'all' THEN 3
                                  WHEN 'trash' THEN 2 WHEN 'junk' THEN 2 ELSE 1 END LIMIT 1), 0),
                     m.subject, m.from_name, m.from_addr, m.date, m.snippet, m.flags,
-                    m.has_attachments, m.has_body
-             FROM msg_fts JOIN messages m ON m.id = msg_fts.rowid
-             WHERE {scope} ORDER BY m.date DESC, m.id DESC LIMIT ?4 OFFSET ?5"
+                    m.has_attachments, m.has_body, m.keywords
+             FROM {from} WHERE {scope} ORDER BY m.date DESC, m.id DESC LIMIT ?4 OFFSET ?5"
         ))?;
-        let rows = stmt.query_map(params![fts, account_id, folder_id, limit, offset], |r| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
             let flags: i64 = r.get(7)?;
             Ok(MessageSummary {
                 id: r.get(0)?,
@@ -1239,6 +1318,7 @@ impl Store {
                 flagged: flags & flags::FLAGGED != 0,
                 has_attachments: r.get(8)?,
                 has_body: r.get(9)?,
+                tags: crate::tags::visible(&r.get::<_, String>(10)?),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
@@ -1487,14 +1567,15 @@ impl Store {
         let db = self.rdb();
         let mut snap = Snapshot::default();
         let mut ent = db.prepare_cached("SELECT folder_id, uid, date FROM entries WHERE message_id=?1")?;
-        let mut fl = db.prepare_cached("SELECT flags FROM messages WHERE id=?1")?;
+        let mut fl = db.prepare_cached("SELECT flags, keywords FROM messages WHERE id=?1")?;
         for &id in ids {
             for row in ent.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?, r.get::<_, i64>(2)?)))? {
                 let (folder_id, uid, date) = row?;
                 snap.entries.push(SnapEntry { folder_id, message_id: id, uid, date });
             }
-            if let Some(f) = fl.query_row([id], |r| r.get(0)).optional()? {
+            if let Some((f, k)) = fl.query_row([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).optional()? {
                 snap.flags.push((id, f));
+                snap.keywords.push((id, k));
             }
         }
         Ok(snap)
@@ -1521,6 +1602,18 @@ impl Store {
             for (m, on, off) in &change.flags {
                 set.execute(params![m, on, off])?;
             }
+            let mut get = tx.prepare_cached("SELECT keywords FROM messages WHERE id=?1")?;
+            let mut put = tx.prepare_cached("UPDATE messages SET keywords=?2 WHERE id=?1")?;
+            for (m, keyword, add) in &change.tags {
+                let Some(cur): Option<String> = get.query_row([m], |r| r.get(0)).optional()? else { continue };
+                let mut ks = crate::tags::parse(&cur);
+                let k = crate::tags::normalize(keyword);
+                ks.retain(|x| *x != k);
+                if *add {
+                    ks.push(k);
+                }
+                put.execute(params![m, crate::tags::join(&ks)])?;
+            }
             Ok(())
         })
     }
@@ -1543,6 +1636,10 @@ impl Store {
             let mut set = tx.prepare_cached("UPDATE messages SET flags=?2 WHERE id=?1")?;
             for (m, f) in &snap.flags {
                 set.execute(params![m, f])?;
+            }
+            let mut kw = tx.prepare_cached("UPDATE messages SET keywords=?2 WHERE id=?1")?;
+            for (m, k) in &snap.keywords {
+                kw.execute(params![m, k])?;
             }
             Ok(())
         })
@@ -1709,6 +1806,94 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // ---- tags --------------------------------------------------------------------------------
+
+    /// Tag definitions plus keywords seen on messages that have none (shown under their keyword).
+    pub fn tags(&self) -> Result<Vec<crate::tags::TagDef>> {
+        let db = self.rdb();
+        let mut out: Vec<crate::tags::TagDef> = {
+            let mut stmt = db.prepare_cached("SELECT keyword, name, color, position FROM tags ORDER BY position, name")?;
+            stmt.query_map([], |r| {
+                Ok(crate::tags::TagDef { keyword: r.get(0)?, name: r.get(1)?, color: r.get(2)?, position: r.get(3)?, defined: true })
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        let mut stmt = db.prepare_cached("SELECT DISTINCT keywords FROM messages WHERE keywords != ''")?;
+        let combos: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let mut extra: Vec<String> = Vec::new();
+        for c in combos {
+            for k in crate::tags::visible(&c) {
+                if !out.iter().any(|t| t.keyword == k) && !extra.contains(&k) {
+                    extra.push(k);
+                }
+            }
+        }
+        extra.sort();
+        let base = out.len() as i64;
+        for (i, k) in extra.into_iter().enumerate() {
+            out.push(crate::tags::TagDef {
+                color: crate::tags::generated_color(&k),
+                name: k.clone(),
+                keyword: k,
+                position: base + i as i64,
+                defined: false,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Create or update a tag definition. A new tag without a keyword gets Thunderbird's keyword
+    /// for its name. Returns the keyword.
+    pub fn set_tag(&self, keyword: Option<&str>, name: &str, color: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("A tag needs a name.");
+        }
+        let db = self.db();
+        let keyword = match keyword {
+            Some(k) => crate::tags::normalize(k),
+            None => {
+                let k = crate::tags::keyword_for_name(name);
+                let taken: bool = db.prepare_cached("SELECT 1 FROM tags WHERE keyword=?1")?.exists([&k])?;
+                if taken {
+                    anyhow::bail!("A tag with that name already exists.");
+                }
+                k
+            }
+        };
+        let position: i64 = db
+            .query_row("SELECT position FROM tags WHERE keyword=?1", [&keyword], |r| r.get(0))
+            .optional()?
+            .unwrap_or(db.query_row("SELECT coalesce(max(position), -1) + 1 FROM tags", [], |r| r.get(0))?);
+        db.execute(
+            "INSERT INTO tags (keyword, name, color, position) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(keyword) DO UPDATE SET name=excluded.name, color=excluded.color",
+            params![keyword, name, color, position],
+        )?;
+        Ok(keyword)
+    }
+
+    /// Forget a tag's definition (messages keep the keyword; it's then shown as an undefined tag).
+    pub fn delete_tag(&self, keyword: &str) -> Result<()> {
+        self.db().execute("DELETE FROM tags WHERE keyword=?1", [crate::tags::normalize(keyword)])?;
+        Ok(())
+    }
+
+    /// Keyword for a `tag:` search term: a defined tag's name (case-insensitive), else the term
+    /// itself as a keyword.
+    pub fn tag_keyword(&self, term: &str) -> Result<String> {
+        let found: Option<String> = self
+            .rdb()
+            .query_row("SELECT keyword FROM tags WHERE lower(name)=lower(?1)", [term.trim()], |r| r.get(0))
+            .optional()?;
+        Ok(found.unwrap_or_else(|| crate::tags::normalize(term)))
+    }
+
+    pub fn message_tags(&self, id: i64) -> Result<Vec<String>> {
+        let k: Option<String> = self.rdb().query_row("SELECT keywords FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(k.map(|k| crate::tags::visible(&k)).unwrap_or_default())
+    }
+
     pub fn message_flags(&self, id: i64) -> Result<i64> {
         Ok(self.db().query_row("SELECT flags FROM messages WHERE id=?1", [id], |r| r.get(0))?)
     }
@@ -1725,6 +1910,7 @@ mod tests {
             gm_msgid: Some(gm),
             email_id: None,
             gm_labels: Some(labels.iter().map(|s| s.to_string()).collect()),
+            keywords: vec![],
             message_id: None,
             in_reply_to: None,
             refs: None,
@@ -2071,7 +2257,9 @@ mod tests {
         assert_eq!(store.list_messages(inbox, 0, 10).unwrap().total, 1);
 
         // Archived and unlabelled via All Mail: leaves Inbox and Work, stays in All Mail.
-        store.update_flags(all, &[(900, flags::SEEN, Some(vec![]))], &labels).unwrap();
+        store
+            .update_flags(all, &[FlagChange { uid: 900, flags: flags::SEEN, keywords: vec![], labels: Some(vec![]) }], &labels)
+            .unwrap();
         assert_eq!(store.list_messages(inbox, 0, 10).unwrap().total, 0);
         assert_eq!(store.list_messages(work, 0, 10).unwrap().total, 0);
         let all_page = store.list_messages(all, 0, 10).unwrap();

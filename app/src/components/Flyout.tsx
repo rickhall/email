@@ -35,10 +35,14 @@ export function Flyout(props: { width: number; onAddAccount: () => void }) {
       e.stopPropagation();
       close();
     };
+    // Clicks in the email body (an iframe) only show up as the window losing focus.
+    const onBlur = () => close();
+    window.addEventListener('blur', onBlur);
     document.addEventListener('mousedown', onDown, true);
     window.addEventListener('keydown', onKey, true);
     onCleanup(() => {
       document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('blur', onBlur);
       window.removeEventListener('keydown', onKey, true);
     });
   });

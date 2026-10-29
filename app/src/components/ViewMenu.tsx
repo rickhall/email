@@ -66,11 +66,15 @@ export function ViewMenuPopover() {
       setOpen(false);
     };
     window.addEventListener('resize', place);
+    // Clicks in the email body (an iframe) only show up as the window losing focus.
+    const onBlur = () => setOpen(false);
+    window.addEventListener('blur', onBlur);
     document.addEventListener('mousedown', onDown, true);
     window.addEventListener('keydown', onKey, true);
     onCleanup(() => {
       window.removeEventListener('resize', place);
       document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('blur', onBlur);
       window.removeEventListener('keydown', onKey, true);
     });
   });

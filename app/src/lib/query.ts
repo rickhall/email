@@ -1,13 +1,15 @@
 // Tiny parser for the quick-search syntax (see api-contract.md). Used by the mock backend
 // and for highlighting matched words in result rows. The real matching happens in core.
 
-export type Field = 'any' | 'from' | 'to' | 'subject';
+export type Field = 'any' | 'from' | 'to' | 'subject' | 'tag';
 
 export interface Term {
   field: Field;
   /** normalized words; more than one = phrase */
   words: string[];
   neg: boolean;
+  /** the term's text as typed (quotes removed) — tag: matches it whole */
+  raw: string;
 }
 
 /** Lowercase and strip accents. */
@@ -19,7 +21,7 @@ export function tokenize(s: string): string[] {
   return norm(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 }
 
-const TERM_RE = /(-)?(?:(from|to|subject):)?(?:"([^"]*)"?|(\S+))/gi;
+const TERM_RE = /(-)?(?:(from|to|subject|tag):)?(?:"([^"]*)"?|(\S+))/gi;
 
 export function parseQuery(q: string): Term[] {
   const out: Term[] = [];
@@ -27,7 +29,7 @@ export function parseQuery(q: string): Term[] {
     const raw = m[3] ?? m[4] ?? '';
     const words = tokenize(raw);
     if (words.length === 0) continue;
-    out.push({ field: (m[2]?.toLowerCase() as Field | undefined) ?? 'any', words, neg: !!m[1] });
+    out.push({ field: (m[2]?.toLowerCase() as Field | undefined) ?? 'any', words, neg: !!m[1], raw });
   }
   return out;
 }

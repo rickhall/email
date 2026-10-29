@@ -23,6 +23,7 @@ import { flyout, RAIL_W, setFlyout, sidebarMode, toggleSidebar } from './lib/lay
 import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { ConfirmHost } from './components/Actions';
+import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
 import { Sidebar } from './components/Sidebar';
@@ -214,6 +215,7 @@ export function App() {
             <AttachmentToast />
           </div>
           <ViewMenuPopover />
+          <ManageTagsHost />
           <ConfirmHost />
           <FolderSwitcherHost />
           <Show when={showAdd()}>

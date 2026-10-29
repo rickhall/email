@@ -970,7 +970,10 @@ async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
                 if rejected || op.attempts >= 5 {
                     tracing::warn!(op = op.id, "action failed, rolling back: {e:#}");
                     shared.store.finish_op(op.id)?;
-                    let changed = shared.store.restore(&snapshot)?;
+                    let mut changed = shared.store.restore(&snapshot)?;
+                    changed.extend(snapshot.entries.iter().map(|e| e.folder_id));
+                    changed.sort_unstable();
+                    changed.dedup();
                     shared.emit(CoreEvent::MessagesChanged { folder_ids: changed });
                     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
                     shared.emit(CoreEvent::ActionFailed {

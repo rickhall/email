@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { Folder, FolderRole } from '../api';
+import { definedTags, TagMenu } from './Tags';
 import { clearHeaderHandler, runAction, setHeaderHandler, type BarCommand } from '../lib/actions';
 import { foldersByAccount, folderById } from '../state';
 import {
@@ -14,6 +15,7 @@ import {
   RoleIcon,
   StarFilledIcon,
   StarIcon,
+  TagIcon,
   TrashIcon,
   UnreadIcon,
 } from './Icons';
@@ -21,7 +23,7 @@ import {
 // ------------------------------------------------------------- popover placement
 
 /** Fixed position for a popover anchored under `anchor` (right edges aligned), flipped up near the bottom. */
-function placeNear(anchor: HTMLElement, w: number, h: number) {
+export function placeNear(anchor: HTMLElement, w: number, h: number) {
   const r = anchor.getBoundingClientRect();
   const below = window.innerHeight - r.bottom - 8;
   const up = below < h && r.top - 8 > below;
@@ -30,7 +32,7 @@ function placeNear(anchor: HTMLElement, w: number, h: number) {
 }
 
 /** Close on outside mousedown / scroll elsewhere / resize while mounted. */
-function useDismiss(el: () => HTMLElement | undefined, anchor: HTMLElement, close: () => void, reposition: () => void) {
+export function useDismiss(el: () => HTMLElement | undefined, anchor: HTMLElement, close: () => void, reposition: () => void) {
   onMount(() => {
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
@@ -41,13 +43,24 @@ function useDismiss(el: () => HTMLElement | undefined, anchor: HTMLElement, clos
     const onScroll = (e: Event) => {
       if (!el()?.contains(e.target as Node)) close();
     };
+    // Clicks in an email body happen inside its iframe and never reach this document; the
+    // window losing focus to the iframe (or another app) is the signal instead.
+    const onBlur = () => close();
+    // Esc anywhere. The popup's own keydown handler stops propagation when focus is inside it.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.querySelector('.modal-backdrop')) close();
+    };
     document.addEventListener('mousedown', onDown, true);
     document.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', reposition);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('keydown', onKey);
     onCleanup(() => {
       document.removeEventListener('mousedown', onDown, true);
       document.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', reposition);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('keydown', onKey);
     });
   });
 }
@@ -209,6 +222,8 @@ export interface ActionTarget {
   starred: boolean;
   /** open the next older item when this removes what's being viewed */
   advance: boolean;
+  /** tags of each viewed message (Tag menu ✓ / mixed state, 1–9 / 0) */
+  tagSets: string[][];
 }
 
 function useActions(t: () => ActionTarget | null) {
@@ -245,8 +260,53 @@ function useActions(t: () => ActionTarget | null) {
       case 'move':
         if (anchor) setPicker(anchor);
         return;
+      case 'tag-menu':
+        if (anchor) setTagMenu(anchor);
+        return;
+      case 'tag-clear':
+        return clearTags();
+      default: {
+        // tag-N: toggle the Nth defined tag
+        const t = definedTags()[Number(c.slice(4)) - 1];
+        if (t) toggleTag(t.keyword, !x.tagSets.every((s) => s.includes(t.keyword)));
+        return;
+      }
     }
   }
+  const [tagMenu, setTagMenu] = createSignal<HTMLElement | null>(null);
+  /** Read/star-like: applied at once, no undo toast. Only sends ids that change. */
+  function toggleTag(keyword: string, on: boolean) {
+    const x = t();
+    if (!x) return;
+    const ids = x.ids.filter((_, i) => (x.tagSets[i]?.includes(keyword) ?? false) !== on);
+    if (ids.length) void runAction({ kind: 'tag', keyword, on }, { ids, folderId: x.folderId, advance: false });
+  }
+  function clearTags() {
+    const x = t();
+    if (!x) return;
+    const all = new Set(x.tagSets.flat());
+    for (const k of all) toggleTag(k, false);
+  }
+  const tagMenuEl = () => {
+    const a = tagMenu();
+    const x = t();
+    if (!a || !x) return null;
+    return (
+      <TagMenu
+        anchor={a}
+        tagSets={x.tagSets}
+        onToggle={toggleTag}
+        onClear={() => {
+          clearTags();
+          setTagMenu(null);
+        }}
+        onClose={(refocus) => {
+          setTagMenu(null);
+          if (refocus) a.focus();
+        }}
+      />
+    );
+  };
   const pickerEl = () => {
     const a = picker();
     const x = t();
@@ -268,7 +328,7 @@ function useActions(t: () => ActionTarget | null) {
       />
     );
   };
-  return { command, inTrash, inSpam, pickerEl };
+  return { command, inTrash, inSpam, pickerEl, tagMenuEl, toggleTag };
 }
 
 function Btn(props: { label: string; key?: string; onClick: (el: HTMLButtonElement) => void; children: any; ref?: (el: HTMLButtonElement) => void; danger?: boolean }) {
@@ -297,7 +357,8 @@ function Btn(props: { label: string; key?: string; onClick: (el: HTMLButtonEleme
 export function HeaderActions(props: { target: ActionTarget | null }) {
   const a = useActions(() => props.target);
   let moveBtn!: HTMLButtonElement;
-  const handler = (c: BarCommand) => void a.command(c, moveBtn);
+  let tagBtn!: HTMLButtonElement;
+  const handler = (c: BarCommand) => void a.command(c, c === 'tag-menu' ? tagBtn : moveBtn);
   setHeaderHandler(handler);
   onCleanup(() => clearHeaderHandler(handler));
   const x = () => props.target;
@@ -343,7 +404,11 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
           <StarFilledIcon class="icon starred" />
         </Show>
       </Btn>
+      <Btn label="Tag" key="1–9, 0" ref={(e) => (tagBtn = e)} onClick={(el) => void a.command('tag-menu', el)}>
+        <TagIcon />
+      </Btn>
       {a.pickerEl()}
+      {a.tagMenuEl()}
     </div>
   );
 }
@@ -384,6 +449,7 @@ export function CardActions(props: { target: ActionTarget }) {
         )}
       </Show>
       {a.pickerEl()}
+      {a.tagMenuEl()}
     </span>
   );
 }
@@ -402,6 +468,7 @@ function CardMenu(props: { anchor: HTMLElement; target: ActionTarget; inSpam: bo
   );
   const items: [BarCommand, () => string][] = [
     ['move', () => 'Move to…'],
+    ['tag-menu', () => 'Tag…'],
     ['spam', () => (props.inSpam ? 'Not spam' : 'Spam')],
     ['unread', () => (props.target.anyUnread ? 'Mark as read' : 'Mark as unread')],
     ['star', () => (props.target.starred ? 'Unstar' : 'Star')],

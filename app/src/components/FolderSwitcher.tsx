@@ -181,11 +181,20 @@ function Switcher() {
       if (el.contains(t) || t.closest?.('.crumb-switch, .crumb.current')) return;
       close(false);
     };
+    // Clicks in the email body (an iframe) only show up as the window losing focus.
+    const onBlur = () => close(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close(false);
+    };
     document.addEventListener('mousedown', onDown, true);
     window.addEventListener('resize', place);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('keydown', onKey);
     onCleanup(() => {
       document.removeEventListener('mousedown', onDown, true);
       window.removeEventListener('resize', place);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('keydown', onKey);
     });
   });
 

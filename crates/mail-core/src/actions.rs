@@ -28,7 +28,7 @@ use crate::store::{LocalChange, Store};
 /// Moves wait this long before being sent, so they can be undone without a server round trip.
 pub const UNDO_WINDOW_MS: i64 = 5_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Action {
     Archive,
@@ -43,11 +43,13 @@ pub enum Action {
     Unread,
     Flag,
     Unflag,
+    /// Add (`on`) or remove a tag keyword (Thunderbird-compatible IMAP keyword).
+    Tag { keyword: String, on: bool },
 }
 
 impl Action {
-    fn is_flags(self) -> bool {
-        matches!(self, Action::Read | Action::Unread | Action::Flag | Action::Unflag)
+    fn is_flags(&self) -> bool {
+        matches!(self, Action::Read | Action::Unread | Action::Flag | Action::Unflag | Action::Tag { .. })
     }
 }
 
@@ -169,7 +171,7 @@ pub fn plan(
             Ok(())
         };
 
-        match action {
+        match action.clone() {
             // Out of Trash/Spam, "unfiled" means back into All Mail with no labels.
             Action::Archive if gmail && in_folders.iter().any(|f| by_id.get(f).is_some_and(|f| matches!(f.role, Some(FolderRole::Trash | FolderRole::Junk)))) => {
                 let target = all_mail.ok_or_else(|| anyhow!("This account has no All Mail folder."))?;
@@ -264,6 +266,25 @@ pub fn plan(
                     touched.insert(inbox.id);
                 }
             }
+            Action::Tag { keyword, on } => {
+                let keyword = &keyword;
+                let k = crate::tags::normalize(keyword);
+                if !crate::tags::is_tag(&k) || k.chars().any(|c| !c.is_ascii_graphic() || "(){%*\"\\]".contains(c)) {
+                    bail!("\"{keyword}\" can't be used as a tag.");
+                }
+                change.tags.push((id, k.clone(), on));
+                let flag = k.clone();
+                if gmail {
+                    let (folder, uid) = need_primary()?;
+                    ops.push(ServerOp::Flags { folder, uid, flag, on });
+                } else {
+                    // Each copy has its own keywords.
+                    for (fid, folder, uid) in &copies {
+                        ops.push(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.clone(), on });
+                        touched.insert(*fid);
+                    }
+                }
+            }
             Action::Read | Action::Unread | Action::Flag | Action::Unflag => {
                 let (bit, flag, on) = match action {
                     Action::Read => (flags::SEEN, "\\Seen", true),
@@ -321,6 +342,7 @@ mod tests {
             gm_msgid: gm,
             email_id: None,
             gm_labels: labels.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            keywords: vec![],
             message_id: Some(mid.into()),
             in_reply_to: None,
             refs: None,
@@ -527,6 +549,51 @@ mod tests {
         assert_eq!(p.ops, vec![ServerOp::Move { folder: "[Gmail]/Trash".into(), uid: 44, target: "[Gmail]/All Mail".into() }]);
         env.store.apply_local(&p.change).unwrap();
         assert_eq!(env.folder_names(m), ["[Gmail]/All Mail"]);
+    }
+
+    #[test]
+    fn tags_sync_act_undo_search() {
+        let (env, msg) = gmail_env();
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        let all = env.id("[Gmail]/All Mail");
+        // Thunderbird tagged it "Work" plus a custom tag elsewhere; junk markers aren't tags.
+        env.store
+            .update_flags(
+                all,
+                &[crate::store::FlagChange { uid: 900, flags: 0, keywords: vec!["$Label2".into(), "projectx".into(), "$Forwarded".into()], labels: Some(vec!["\\Inbox".into()]) }],
+                &labels,
+            )
+            .unwrap();
+        let row = env.store.list_messages(env.id("INBOX"), 0, 10).unwrap().messages.remove(0);
+        assert_eq!(row.tags, vec!["$label2", "projectx"]);
+
+        // Definitions: Thunderbird's five, plus the undefined custom keyword.
+        let defs = env.store.tags().unwrap();
+        assert_eq!(defs.iter().filter(|d| d.defined).count(), 5);
+        assert!(defs.iter().any(|d| d.keyword == "projectx" && !d.defined));
+
+        // Tag as To Do: one STORE on the All Mail copy, sent immediately.
+        let before = env.store.snapshot(&[msg]).unwrap();
+        let p = plan(&env.store, env.acct, true, Action::Tag { keyword: "$label4".into(), on: true }, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 900, flag: "$label4".into(), on: true }]);
+        assert_eq!(p.delay_ms, 0);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.store.message_tags(msg).unwrap(), vec!["$label2", "$label4", "projectx"]);
+
+        // Search by tag name, by keyword, and combined with text.
+        let hits = |q: &str| env.store.search(env.acct, None, q, &[], 0, 10).unwrap().total;
+        assert_eq!(hits("tag:work"), 1);
+        assert_eq!(hits("tag:\"to do\""), 1);
+        assert_eq!(hits("tag:projectx m900"), 1);
+        assert_eq!(hits("tag:later"), 0);
+
+        env.store.restore(&before).unwrap();
+        assert_eq!(env.store.message_tags(msg).unwrap(), vec!["$label2", "projectx"]);
+
+        // Custom tag definition gets Thunderbird's keyword for its name.
+        assert_eq!(env.store.set_tag(None, "Waiting On", "#123456").unwrap(), "waiting_on");
+        assert!(plan(&env.store, env.acct, true, Action::Tag { keyword: "bad tag".into(), on: true }, &[msg], env.id("INBOX")).is_err());
     }
 
     #[test]

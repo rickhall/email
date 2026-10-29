@@ -245,6 +245,22 @@ async fn index_of(core: State<'_, Arc<Core>>, folder_id: i64, id: i64, threaded:
 }
 
 #[tauri::command]
+async fn list_tags(core: State<'_, Arc<Core>>) -> Res<Vec<mail_core::tags::TagDef>> {
+    core.tags().map_err(err)
+}
+
+/// Create (keyword omitted) or update a tag definition; returns its keyword.
+#[tauri::command]
+async fn set_tag(core: State<'_, Arc<Core>>, keyword: Option<String>, name: String, color: String) -> Res<String> {
+    core.set_tag(keyword.as_deref(), &name, &color).map_err(err)
+}
+
+#[tauri::command]
+async fn delete_tag(core: State<'_, Arc<Core>>, keyword: String) -> Res<()> {
+    core.delete_tag(&keyword).map_err(err)
+}
+
+#[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
@@ -508,6 +524,9 @@ pub fn run() {
             apply_action,
             undo_action,
             index_of,
+            list_tags,
+            set_tag,
+            delete_tag,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

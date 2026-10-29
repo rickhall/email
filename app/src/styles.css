@@ -2969,7 +2969,8 @@ html.macos .rail-top {
   left: 6px;
   right: 6px;
 }
-.sync-popover.rail {
+/* Not ".rail": that's the rail's own class (height: 100%) and would squash the popover. */
+.sync-popover.in-rail {
   left: 6px;
   right: auto;
   width: 300px;
@@ -3114,4 +3115,221 @@ html.macos .app.rail-mode .search-bar {
 }
 .fs-group .acct-dot {
   font-size: 8.5px;
+}
+
+/* ==========================================================================
+   Tags (Thunderbird-compatible keywords)
+   ========================================================================== */
+
+.tag-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.tag-dots {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.tag-more {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+/* sender tinted with the first tag's colour (contrast-adjusted per theme) */
+.row-from.tinted {
+  color: var(--tint-l);
+}
+@media (prefers-color-scheme: dark) {
+  .row-from.tinted {
+    color: var(--tint-d);
+  }
+}
+.list-scroll:focus-within .row.selected .row-from.tinted {
+  color: var(--sel-text);
+}
+.list-scroll:focus-within .row.selected .tag-dot {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
+
+/* reader chips: one line in the band's info row */
+.tag-chips {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  overflow: hidden;
+}
+.tag-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow: hidden;
+}
+.tag-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 7px;
+  cursor: pointer;
+}
+.tag-chip-main:hover .tag-chip-name {
+  color: var(--text);
+}
+.tag-chip-name {
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-chip-x {
+  flex: none;
+  width: 18px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 0 10px 10px 0;
+}
+.tag-chip-x:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+.cm-head-date .tag-dots,
+.card-msg.collapsed .tag-dots {
+  margin-right: 2px;
+}
+
+/* tag menu */
+.tag-menu .vm-item {
+  gap: 7px;
+}
+.tag-menu .vm-label.muted {
+  color: var(--text-3);
+}
+.tag-menu .vm-check {
+  font-weight: 700;
+}
+.vm-item:hover .tag-dot {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.8);
+}
+
+/* manage dialog */
+.modal.manage-tags {
+  max-width: 460px;
+}
+.tag-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+.tag-row-main,
+.tag-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+}
+.tag-swatch {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+.tag-swatch.big {
+  width: 20px;
+  height: 20px;
+}
+.tag-swatch.on {
+  box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3.5px var(--accent);
+}
+.tag-name {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 13px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.tag-name:hover {
+  border-color: var(--sep);
+}
+.tag-name:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  background: var(--bg-input);
+}
+.tag-new .tag-name {
+  border-color: var(--sep-strong);
+  background: var(--bg-input);
+}
+.tag-kw {
+  flex: none;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+.tag-from {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.tag-btn {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  min-width: 0 !important;
+}
+.tag-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px 28px;
+}
+.tag-custom {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+  overflow: hidden;
+  cursor: pointer;
+}
+.tag-custom input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }

@@ -28,6 +28,7 @@ import {
 } from '../state';
 import { CheckIcon, FlagIcon, PaperclipIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
+import { TagDots, tintStyle } from './Tags';
 import { climbToParent, FolderCrumbs } from './FolderSwitcher';
 import { registerListNav, runShortcut } from '../lib/actions';
 
@@ -68,12 +69,13 @@ function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: Reg
     <div class="row-inner">
       <span class="unread-dot" />
       <div class="row-line1">
-        <span class="row-from">
+        <span class="row-from" classList={{ tinted: (props.m.tags?.length ?? 0) > 0 }} style={tintStyle(props.m.tags ?? [])}>
           <Hl text={props.m.fromName || props.m.fromAddr} re={props.re ?? null} />
         </span>
         <Show when={props.folderTag}>
           <span class="folder-tag">{props.folderTag}</span>
         </Show>
+        <TagDots tags={props.m.tags ?? []} />
         <span class="row-icons">
           <Show when={props.m.hasAttachments}>
             <PaperclipIcon size={13} class="icon clip" />
@@ -116,10 +118,13 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
     <div class="row-inner">
       <span class="unread-dot" />
       <div class="row-line1">
-        <span class="row-from">{people() || '(no sender)'}</span>
+        <span class="row-from" classList={{ tinted: (props.t.tags?.length ?? 0) > 0 }} style={tintStyle(props.t.tags ?? [])}>
+          {people() || '(no sender)'}
+        </span>
         <Show when={props.t.messageCount > 1}>
           <span class="thread-count">{props.t.messageCount}</span>
         </Show>
+        <TagDots tags={props.t.tags ?? []} />
         <span class="row-icons">
           <Show when={props.t.hasAttachments}>
             <PaperclipIcon size={13} class="icon clip" />
@@ -570,7 +575,7 @@ export function MessageList(props: {
                   </div>
                 </Show>
                 Try <code>from:</code>, <code>to:</code>, <code>subject:</code>, <code>"exact phrase"</code> or{' '}
-                <code>-exclude</code>
+                <code>-exclude</code>, <code>tag:work</code>
               </div>
             </div>
           </Show>

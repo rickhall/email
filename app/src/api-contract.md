@@ -26,6 +26,7 @@ interface MessageSummary {
   date: number; snippet: string | null;
   unread: boolean; flagged: boolean; hasAttachments: boolean;
   hasBody: boolean;        // full message downloaded locally
+  tags: string[];          // tag keywords, e.g. ["$label2"] (see TagDef)
 }
 
 interface Addr { name: string | null; addr: string }
@@ -43,6 +44,7 @@ interface MessageDetail {
   attachments: Attachment[];
   hasRemoteContent: boolean; // true if remote images/css were blocked
   remoteAllowed: boolean;    // user chose "Load images" for this message before
+  tags: string[];
 }
 
 /**
@@ -65,6 +67,7 @@ interface ThreadSummary {
   date: number;             // newest message of the thread in this folder
   snippet: string | null;   // snippet of the newest message
   latestMessageId: number;
+  tags: string[];           // tags on any selected message of the conversation
 }
 
 type SearchField = 'sender' | 'recipients' | 'subject';
@@ -82,7 +85,13 @@ type Action =
   | { kind: 'deleteForever' }  // only in Trash/Spam
   | { kind: 'move'; targetFolderId: number }
   | { kind: 'spam' } | { kind: 'notSpam' }
-  | { kind: 'read' } | { kind: 'unread' } | { kind: 'flag' } | { kind: 'unflag' };
+  | { kind: 'read' } | { kind: 'unread' } | { kind: 'flag' } | { kind: 'unflag' }
+  | { kind: 'tag'; keyword: string; on: boolean };  // add/remove a tag (IMAP keyword), sent at once
+
+/** Tag definition. Tags are IMAP keywords on messages (Thunderbird-compatible: $label1..$label5
+ *  are Important/Work/Personal/To Do/Later); names/colours are local. `defined: false` = a keyword
+ *  seen on messages without a definition (name = keyword, generated colour). */
+interface TagDef { keyword: string; name: string; color: string; position: number; defined: boolean }
 
 type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error'
                | 'auth'     // credentials rejected: sync paused until update_password
@@ -112,6 +121,9 @@ interface SyncStatus {
 | `apply_action` | `{ action: Action, messageIds: number[], folderId }` | `{ opId: number \| null, undoable: boolean }` — applies locally at once (emits `messages-changed` / `folders-changed`); moves are sent to the server after a 5 s undo window, read/star at once. Rejects (string) when the action doesn't apply (e.g. no Archive folder) |
 | `undo_action` | `{ opId }` | `void` — within the undo window; rejects "Too late to undo…" otherwise |
 | `index_of` | `{ folderId, id, threaded }` | `number \| null` — the row index of a message (`threaded: false`) or conversation (`threaded: true`, `id` = thread id) in the folder's list (same ordering as `list_messages` / `list_threads`); `null` when it isn't in the folder |
+| `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
+| `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
+| `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |
 | `app_version` | – | `string` — e.g. "0.1.28" |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
@@ -138,6 +150,7 @@ Matches sender (name + address), recipients (To/Cc names + addresses) and subjec
 - `"exact phrase"` — phrase (last word still prefix-matched)
 - `from:x`, `to:x`, `subject:x` — restrict a term to one field (`from:"Ada L"` works); these override `fields`
 - `-word` — exclude
+- `tag:work`, `tag:"to do"`, `tag:$label2` — messages with that tag (by tag name or keyword); may be used alone
 
 ## macOS menu events
 

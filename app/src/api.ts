@@ -16,6 +16,7 @@ import type {
   SyncStatus,
   ThreadPage,
   ThreadView,
+  TagDef,
 } from './types';
 
 export * from './types';
@@ -120,6 +121,10 @@ export const api = {
   applyAction: (action: Action, messageIds: number[], folderId: number): Promise<ActionResult> =>
     call('apply_action', { action, messageIds, folderId }),
   undoAction: (opId: number): Promise<void> => call('undo_action', { opId }),
+  listTags: (): Promise<TagDef[]> => call('list_tags', undefined),
+  /** Create (keyword null) or rename/recolour; returns the keyword. */
+  setTag: (keyword: string | null, name: string, color: string): Promise<string> => call('set_tag', { keyword, name, color }),
+  deleteTag: (keyword: string): Promise<void> => call('delete_tag', { keyword }),
   appVersion: (): Promise<string> => call('app_version', undefined),
   revealPath: (path: string): Promise<void> => call('reveal_path', { path }),
   setRead: (id: number, read: boolean): Promise<void> => call('set_read', { id, read }),

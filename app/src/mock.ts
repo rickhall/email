@@ -18,6 +18,7 @@ import type {
   MessageDetail,
   MessageSummary,
   ConversationScope,
+  TagDef,
   Action,
   ActionResult,
   MenuActionId,
@@ -28,7 +29,7 @@ import type {
   SyncStatus,
 } from './types';
 
-import { fieldMatches, parseQuery, tokenize, type Term } from './lib/query';
+import { fieldMatches, norm, parseQuery, tokenize, type Term } from './lib/query';
 
 // ---------------------------------------------------------------- utilities
 
@@ -620,6 +621,8 @@ export function createMockBackend(): Backend {
       flagged,
       hasAttachments,
       hasBody: false,
+      // A sprinkling of Thunderbird tags ($label1–5) and one custom keyword.
+      tags: rnd() < 0.08 ? [pick(rnd, ['$label1', '$label2', '$label3', '$label4', '$label5'])].concat(rnd() < 0.2 ? ['projectx'] : []) : [],
     };
     const attachments: Attachment[] = [];
     if (hasAttachments) {
@@ -810,6 +813,7 @@ export function createMockBackend(): Backend {
       subject: first?.subject ?? newestInFolder.subject,
       participants,
       messageCount: all.length,
+      tags: [...new Set(all.flatMap((m) => m.tags))],
       unread: all.some((m) => m.unread),
       flagged: all.some((m) => m.flagged),
       hasAttachments: all.some((m) => m.hasAttachments),
@@ -931,6 +935,7 @@ export function createMockBackend(): Backend {
     const rnd = mulberry32(seed);
     return {
       id: m.id,
+      tags: [...m.tags],
       subject: m.subject,
       from: { name: m.fromName, addr: m.fromAddr },
       to: [{ name: me.name, addr: me.addr }],
@@ -974,6 +979,12 @@ export function createMockBackend(): Backend {
         m.date = (list[1]?.date ?? m.date) - (i + 1) * 90;
       });
       list.sort((x, y) => y.date - x.date);
+      // A few tagged messages near the top so tags are visible right away.
+      const tagSamples: string[][] = [['$label2', 'projectx'], ['$label1'], ['$label4', '$label1', '$label3', '$label5', 'projectx']];
+      [2, 4, 9].forEach((i, k) => {
+        const m = list[i];
+        if (m) m.tags = tagSamples[k]!;
+      });
     }
     setTimeout(() => void simulateSync(g, 48_000, 'imap.gmail.com'), 300);
     const params = new URLSearchParams(location.search);
@@ -1023,7 +1034,9 @@ export function createMockBackend(): Backend {
         const subjT = tokenize(m.subject);
         const ok = terms.every((t) => {
           const hit =
-            t.field === 'from'
+            t.field === 'tag'
+              ? hasTag(m, t.raw)
+              : t.field === 'from'
               ? fieldMatches(fromT, t.words)
               : t.field === 'to'
                 ? fieldMatches(toTokens, t.words)
@@ -1179,6 +1192,13 @@ export function createMockBackend(): Backend {
         return flagChange((m) => (m.flagged = true));
       case 'unflag':
         return flagChange((m) => (m.flagged = false));
+      case 'tag': {
+        const k = action.keyword;
+        const on = action.on;
+        return flagChange((m) => {
+          m.tags = on ? (m.tags.includes(k) ? m.tags : [...m.tags, k]) : m.tags.filter((x) => x !== k);
+        });
+      }
       case 'archive':
         target = acc?.provider === 'gmail' ? roleFolder(ctx.accountId, 'all') : roleFolder(ctx.accountId, 'archive');
         if (!target) throw 'This account has no Archive folder';
@@ -1216,6 +1236,30 @@ export function createMockBackend(): Backend {
     }, 5000);
     pendingOps.set(opId, { rollback, timer });
     return { opId, undoable: true };
+  }
+
+  // ---- tags (Thunderbird-compatible keywords; definitions are local)
+  const tagDefs: TagDef[] = [
+    { keyword: '$label1', name: 'Important', color: '#FF0000', position: 0, defined: true },
+    { keyword: '$label2', name: 'Work', color: '#FF9900', position: 1, defined: true },
+    { keyword: '$label3', name: 'Personal', color: '#009900', position: 2, defined: true },
+    { keyword: '$label4', name: 'To Do', color: '#3333FF', position: 3, defined: true },
+    { keyword: '$label5', name: 'Later', color: '#993399', position: 4, defined: true },
+  ];
+  function hasTag(m: MessageSummary, raw: string): boolean {
+    const want = norm(raw.trim());
+    return m.tags.some((k) => norm(k) === want || norm(tagDefs.find((d) => d.keyword === k)?.name ?? '') === want);
+  }
+  function listTags(): TagDef[] {
+    const seen = new Set<string>();
+    for (const m of byId.values()) for (const k of m.tags) seen.add(k);
+    const out = [...tagDefs].sort((a, b) => a.position - b.position).map((d) => ({ ...d }));
+    let p = out.length;
+    for (const k of [...seen].sort()) {
+      if (tagDefs.some((d) => d.keyword === k)) continue;
+      out.push({ keyword: k, name: k, color: '#8E8E93', position: p++, defined: false });
+    }
+    return out;
   }
 
   const latency = () => sleep(8 + Math.random() * 25);
@@ -1376,6 +1420,34 @@ export function createMockBackend(): Backend {
     },
     async reveal_path() {
       await sleep(5);
+    },
+    async list_tags() {
+      await sleep(3);
+      return listTags();
+    },
+    async set_tag({ keyword, name, color }) {
+      await sleep(5);
+      const nm = name.trim();
+      if (!nm) throw 'A tag needs a name';
+      if (!/^#[0-9a-f]{6}$/i.test(color)) throw 'Invalid colour';
+      const clash = tagDefs.find((d) => norm(d.name) === norm(nm) && d.keyword !== keyword);
+      if (clash) throw `A tag named "${clash.name}" already exists`;
+      const existing = keyword ? tagDefs.find((d) => d.keyword === keyword) : undefined;
+      if (existing) {
+        existing.name = nm;
+        existing.color = color.toUpperCase();
+        return existing.keyword;
+      }
+      // Thunderbird-style keyword from the name for new tags.
+      const k = keyword ?? (nm.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'tag');
+      if (!keyword && tagDefs.some((d) => d.keyword === k)) throw `A tag with keyword "${k}" already exists`;
+      tagDefs.push({ keyword: k, name: nm, color: color.toUpperCase(), position: tagDefs.length, defined: true });
+      return k;
+    },
+    async delete_tag({ keyword }) {
+      await sleep(5);
+      const i = tagDefs.findIndex((d) => d.keyword === keyword);
+      if (i >= 0) tagDefs.splice(i, 1);
     },
     async apply_action({ action, messageIds, folderId }) {
       await sleep(4);

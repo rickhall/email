@@ -121,6 +121,12 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
       for (const id of o.ids) patchSelectedSummary(id, { unread: action.kind === 'unread' });
     } else if (action.kind === 'flag' || action.kind === 'unflag') {
       for (const id of o.ids) patchSelectedSummary(id, { flagged: action.kind === 'flag' });
+    } else if (action.kind === 'tag') {
+      const s = selectedSummary();
+      if (s && o.ids.includes(s.id)) {
+        const k = action.keyword;
+        patchSelectedSummary(s.id, { tags: action.on ? (s.tags.includes(k) ? s.tags : [...s.tags, k]) : s.tags.filter((x) => x !== k) });
+      }
     }
     if (!removing) return;
     if (res.opId == null) {
@@ -168,7 +174,8 @@ export function undoLast(): boolean {
 
 // ------------------------------------------------------------- reader header shortcuts
 
-export type BarCommand = 'archive' | 'delete' | 'move' | 'spam' | 'unread' | 'star';
+/** `tag-N`: toggle the Nth tag (1–9) · `tag-clear`: remove all · `tag-menu`: open the Tag menu */
+export type BarCommand = 'archive' | 'delete' | 'move' | 'spam' | 'unread' | 'star' | 'tag-menu' | 'tag-clear' | `tag-${number}`;
 let headerHandler: ((c: BarCommand) => void) | null = null;
 /** The reader header's action bar registers itself; shortcuts drive it. */
 export function setHeaderHandler(fn: ((c: BarCommand) => void) | null): void {
@@ -181,6 +188,11 @@ export function clearHeaderHandler(fn: (c: BarCommand) => void): void {
 /** e, #, Delete, v, !, Shift+U, s, z — returns true when handled. */
 export function runShortcut(e: KeyboardEvent): boolean {
   if (e.key === 'z') return undoLast() || true;
+  // Thunderbird: 1–9 toggle the tag in that position, 0 removes all tags.
+  if (/^[0-9]$/.test(e.key)) {
+    headerHandler?.(e.key === '0' ? 'tag-clear' : (`tag-${Number(e.key)}` as BarCommand));
+    return true;
+  }
   const cmd: BarCommand | null =
     e.key === 'e'
       ? 'archive'

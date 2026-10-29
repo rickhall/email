@@ -447,11 +447,7 @@ impl Connection {
     }
 
     /// Flags (and labels) changed since `modseq` (CONDSTORE), or all flags when `modseq` is None.
-    pub async fn fetch_flags(
-        &mut self,
-        uid_range: &str,
-        modseq: Option<u64>,
-    ) -> Result<Vec<(u32, i64, Option<Vec<String>>)>> {
+    pub async fn fetch_flags(&mut self, uid_range: &str, modseq: Option<u64>) -> Result<Vec<crate::store::FlagChange>> {
         let gm = if self.caps.gmail { " X-GM-LABELS" } else { "" };
         let q = match modseq {
             Some(m) => format!("(UID FLAGS{gm}) (CHANGEDSINCE {m})"),
@@ -460,7 +456,9 @@ impl Connection {
         let fetches: Vec<Fetch> = self.session.uid_fetch(uid_range, &q).await?.try_collect().await?;
         Ok(fetches
             .iter()
-            .filter_map(|f| Some((f.uid?, flag_bits(f), gmail_labels(f))))
+            .filter_map(|f| {
+                Some(crate::store::FlagChange { uid: f.uid?, flags: flag_bits(f), keywords: keywords(f), labels: gmail_labels(f) })
+            })
             .collect())
     }
 
@@ -627,6 +625,16 @@ fn guess_role(path: &[String]) -> Option<FolderRole> {
     })
 }
 
+/// IMAP keywords on a message (Thunderbird tags such as `$label1`, junk markers, ...), lowercase.
+fn keywords(f: &Fetch) -> Vec<String> {
+    f.flags()
+        .filter_map(|flag| match flag {
+            Flag::Custom(k) if !k.starts_with('\\') => Some(crate::tags::normalize(&k)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn flag_bits(f: &Fetch) -> i64 {
     let mut bits = 0;
     for flag in f.flags() {
@@ -684,6 +692,7 @@ fn parse_header_fetch(f: &Fetch) -> Option<HeaderRecord> {
         gm_msgid: f.gmail_msg_id().copied(),
         email_id: None,
         gm_labels: gmail_labels(f),
+        keywords: keywords(f),
         message_id: parsed.message_id,
         in_reply_to: parsed.in_reply_to,
         refs: parsed.refs,

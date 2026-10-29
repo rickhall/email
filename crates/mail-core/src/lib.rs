@@ -8,6 +8,7 @@ pub mod partial;
 pub mod search;
 pub mod store;
 pub mod sync;
+pub mod tags;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -325,7 +326,14 @@ impl Core {
         let gmail = account.provider == Provider::Gmail;
         let planned = actions::plan(&self.store, account_id, gmail, action, message_ids, folder_id)?;
         let snapshot = self.store.snapshot(message_ids)?;
-        let changed = self.store.apply_local(&planned.change)?;
+        let mut changed = self.store.apply_local(&planned.change)?;
+        // Rows show flags and tags, so every folder holding these messages refreshes, not only
+        // those whose counts changed (a tag or a non-Gmail star changes no count).
+        for id in message_ids {
+            changed.extend(self.store.message_folder_ids(*id)?);
+        }
+        changed.sort_unstable();
+        changed.dedup();
         let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: changed });
         let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
         if planned.ops.is_empty() {
@@ -352,7 +360,10 @@ impl Core {
             .cancel_op(op_id)?
             .ok_or_else(|| anyhow!("Too late to undo: the change was already sent to the server."))?;
         let snapshot: store::Snapshot = serde_json::from_str(&snapshot)?;
-        let changed = self.store.restore(&snapshot)?;
+        let mut changed = self.store.restore(&snapshot)?;
+        changed.extend(snapshot.entries.iter().map(|e| e.folder_id));
+        changed.sort_unstable();
+        changed.dedup();
         let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: changed.clone() });
         for (account_id, _) in changed.iter().filter_map(|f| self.store.folder(*f).ok().flatten()).collect::<std::collections::HashSet<_>>() {
             let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
@@ -362,6 +373,18 @@ impl Core {
 
     pub fn index_of(&self, folder_id: i64, id: i64, threaded: bool) -> Result<Option<u32>> {
         self.store.index_of(folder_id, id, threaded)
+    }
+
+    pub fn tags(&self) -> Result<Vec<tags::TagDef>> {
+        self.store.tags()
+    }
+
+    pub fn set_tag(&self, keyword: Option<&str>, name: &str, color: &str) -> Result<String> {
+        self.store.set_tag(keyword, name, color)
+    }
+
+    pub fn delete_tag(&self, keyword: &str) -> Result<()> {
+        self.store.delete_tag(keyword)
     }
 
     pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
@@ -395,6 +418,7 @@ impl Core {
                 let mut detail = mime::render(id, &raw, self.store.message_date(id)?);
                 if let Some(d) = detail.as_mut() {
                     d.remote_allowed = self.store.allow_remote(id)?;
+                    d.tags = self.store.message_tags(id)?;
                 }
                 // Attachments not downloaded yet are still listed, numbered after the stored ones.
                 if let (Some(d), Some(json)) = (detail.as_mut(), self.store.omitted(id)?) {

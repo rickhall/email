@@ -16,6 +16,8 @@ import { ImageIcon, PaperclipIcon } from './Icons';
 import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
 import { DRAG } from '../lib/platform';
 import { CardActions, HeaderActions, type ActionTarget } from './Actions';
+import { searchTag, TagChips, TagDots } from './Tags';
+import { runAction } from '../lib/actions';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -104,6 +106,7 @@ function CollapsedCard(props: { m: MessageSummary; me: Me; folderTag?: string; o
       <Show when={props.m.hasAttachments}>
         <PaperclipIcon size={13} class="icon cm-clip" />
       </Show>
+      <TagDots tags={props.m.tags ?? []} />
       <Show when={props.folderTag}>
         <span class="folder-tag cm-folder">{props.folderTag}</span>
       </Show>
@@ -150,6 +153,7 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; ac
         </div>
         <span class="cm-head-right">
           <span class="cm-head-date">
+            <TagDots tags={props.m.tags ?? []} />
             <Show when={props.folderTag}>
               <span class="folder-tag cm-folder">{props.folderTag}</span>
             </Show>
@@ -400,6 +404,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
       starId: newest.id,
       starred: newest.flagged,
       advance: true,
+      tagSets: state.list.map((m) => m.tags ?? []),
     };
   };
   /** One card's own actions; it advances only when that message is the last one here. */
@@ -410,6 +415,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
     starId: m.id,
     starred: m.flagged,
     advance: m.folderId === t.folderId && !state.list.some((x) => x.id !== m.id && x.folderId === t.folderId),
+    tagSets: [m.tags ?? []],
   });
 
   const subject = () => state.list[0]?.subject || t.subject || '(no subject)';
@@ -428,6 +434,17 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
               {metaText()}
             </Show>
           </span>
+          <Show when={headerTarget()}>
+            {(x) => (
+              <TagChips
+                tags={[...new Set(x().tagSets.flat())]}
+                onRemove={(k) =>
+                  void runAction({ kind: 'tag', keyword: k, on: false }, { ids: x().ids.filter((_, i) => x().tagSets[i]?.includes(k)), folderId: x().folderId, advance: false })
+                }
+                onOpen={searchTag}
+              />
+            )}
+          </Show>
           <HeaderActions target={headerTarget()} />
         </div>
       </header>
