@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -445,7 +446,24 @@ pub struct Store {
     read: Mutex<Connection>,
     bodies: Mutex<Connection>,
     bodies_read: Mutex<Connection>,
+    /// Bumped by every local change (an action applied or undone). A sync step that read the
+    /// server before the change must not write its results over it: see [`SyncSuperseded`].
+    local_epoch: AtomicU64,
 }
+
+/// A sync step's server data predates a local change (the user acted while it ran), so writing
+/// it would undo that change on screen until the next sync. Nothing was written; the folder is
+/// synced again once the action has reached the server.
+#[derive(Debug)]
+pub struct SyncSuperseded;
+
+impl std::fmt::Display for SyncSuperseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("local change during sync step")
+    }
+}
+
+impl std::error::Error for SyncSuperseded {}
 
 // Schema/data versions (PRAGMA user_version): 1 = Gmail label resync, 2 = conversations
 // rebuilt from cleaned references, 3 = keywords (tags) kept: flags re-fetched once.
@@ -577,11 +595,27 @@ impl Store {
             read: Mutex::new(open(&dir.join("mail.db"))?),
             bodies: Mutex::new(bodies),
             bodies_read: Mutex::new(open(&dir.join("bodies.db"))?),
+            local_epoch: AtomicU64::new(0),
         })
     }
 
     fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The writer, for a sync step that started at local epoch `epoch` (None: unconditional).
+    /// Checked under the writer lock, which local changes also hold, so no change slips between.
+    fn db_for_sync(&self, epoch: Option<u64>) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        let db = self.db();
+        if epoch.is_some_and(|e| e != self.local_epoch()) {
+            return Err(SyncSuperseded.into());
+        }
+        Ok(db)
+    }
+
+    /// See [`SyncSuperseded`]; sync steps capture this when they start.
+    pub fn local_epoch(&self) -> u64 {
+        self.local_epoch.load(Ordering::SeqCst)
     }
 
     fn rdb(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -826,10 +860,23 @@ impl Store {
         records: &[HeaderRecord],
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
+        self.upsert_headers_since(None, account_id, folder_id, records, label_folders)
+    }
+
+    /// [`Self::upsert_headers`] for a sync step that started at local epoch `epoch`: fails with
+    /// [`SyncSuperseded`], writing nothing, if a local change happened since.
+    pub fn upsert_headers_since(
+        &self,
+        epoch: Option<u64>,
+        account_id: i64,
+        folder_id: i64,
+        records: &[HeaderRecord],
+        label_folders: &std::collections::HashMap<String, i64>,
+    ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
         // New rows whose body may be waiting in the stash (moved between folders).
         let mut restore: Vec<(i64, String)> = Vec::new();
-        let mut db = self.db();
+        let mut db = self.db_for_sync(epoch)?;
         let tx = db.transaction()?;
         {
             let mut by_gm = tx.prepare_cached(
@@ -985,8 +1032,20 @@ impl Store {
         changes: &[FlagChange],
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
+        self.update_flags_since(None, folder_id, changes, label_folders)
+    }
+
+    /// [`Self::update_flags`] for a sync step that started at local epoch `epoch` (see
+    /// [`Self::upsert_headers_since`]).
+    pub fn update_flags_since(
+        &self,
+        epoch: Option<u64>,
+        folder_id: i64,
+        changes: &[FlagChange],
+        label_folders: &std::collections::HashMap<String, i64>,
+    ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
-        let mut db = self.db();
+        let mut db = self.db_for_sync(epoch)?;
         let tx = db.transaction()?;
         {
             let mut find = tx.prepare_cached(
@@ -1690,6 +1749,8 @@ impl Store {
             }
         }
         tx.commit()?;
+        // Still under the writer lock: a sync write either landed before this or sees the bump.
+        self.local_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(changed)
     }
 
@@ -1699,6 +1760,9 @@ impl Store {
             "INSERT INTO pending_ops (account_id, ops, snapshot, folders, not_before) VALUES (?1,?2,?3,?4,?5)",
             params![account_id, ops, snapshot, folders, not_before_ms],
         )?;
+        // Also bumped here: a step that started between the local change and this (seeing no
+        // pending op yet) read the server before the action reached it.
+        self.local_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(db.last_insert_rowid())
     }
 

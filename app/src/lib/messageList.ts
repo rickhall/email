@@ -154,6 +154,73 @@ export function createPagedList<T extends { id: number }>(
     );
   }
 
+  /**
+   * Drop rows locally, ahead of the refetch that will confirm it (own actions: the row goes
+   * and the rows below move up in the same update). Rows shift up within the run of loaded
+   * pages holding them; later pages are forgotten (refetched when shown). Returns how many went.
+   */
+  function remove(ids: ReadonlySet<number>): number {
+    const keys = Object.keys(state.pages)
+      .map(Number)
+      .filter((k) => state.pages[k] !== undefined)
+      .sort((a, b) => a - b);
+    let removed = 0;
+    batch(() => {
+      setState(
+        'pages',
+        produce((pages) => {
+          for (let i = 0; i < keys.length; ) {
+            // a run of consecutive loaded pages
+            let j = i;
+            while (j + 1 < keys.length && keys[j + 1] === keys[j]! + 1) j++;
+            const run = keys.slice(i, j + 1);
+            if (removed > 0) {
+              // shifted by earlier removals, with unknown rows moving in from the gap
+              for (const k of run) delete pages[k];
+            } else {
+              const rows = run.flatMap((k) => pages[k]!);
+              const kept = rows.filter((r) => !ids.has(r.id));
+              removed = rows.length - kept.length;
+              if (removed > 0) run.forEach((k, n) => (pages[k] = kept.slice(n * PAGE_SIZE, (n + 1) * PAGE_SIZE)));
+            }
+            i = j + 1;
+          }
+        }),
+      );
+      if (removed > 0 && state.total != null) setState('total', Math.max(0, state.total - removed));
+    });
+    return removed;
+  }
+
+  /** Put a row back at `index` (undo of `remove`), the same way. False if its page isn't loaded. */
+  function insert(item: T, index: number): boolean {
+    const p = pageOf(index);
+    if (state.pages[p] === undefined || indexOfId(item.id) >= 0) return false;
+    const keys = Object.keys(state.pages)
+      .map(Number)
+      .filter((k) => state.pages[k] !== undefined)
+      .sort((a, b) => a - b);
+    batch(() => {
+      setState(
+        'pages',
+        produce((pages) => {
+          let lo = p;
+          let hi = p;
+          while (pages[lo - 1] !== undefined) lo--;
+          while (pages[hi + 1] !== undefined) hi++;
+          const run = keys.filter((k) => k >= lo && k <= hi);
+          const rows = run.flatMap((k) => pages[k]!);
+          rows.splice(index - lo * PAGE_SIZE, 0, item);
+          // the run's last row moves into an unloaded page: dropped, refetched with it
+          run.forEach((k, n) => (pages[k] = rows.slice(n * PAGE_SIZE, (n + 1) * PAGE_SIZE)));
+          for (const k of keys) if (k > hi) delete pages[k];
+        }),
+      );
+      if (state.total != null) setState('total', state.total + 1);
+    });
+    return true;
+  }
+
   function row(i: number): T | undefined {
     return state.pages[pageOf(i)]?.[i % PAGE_SIZE];
   }
@@ -211,6 +278,8 @@ export function createPagedList<T extends { id: number }>(
     indexOfId,
     setVisibleRange,
     invalidate,
+    remove,
+    insert,
     reset,
     locate,
     rowAt,

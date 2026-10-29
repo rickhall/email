@@ -88,7 +88,7 @@ impl ChunkedNewestFirst {
                 recs.retain(|r| r.uid > state.top_uid);
                 if !recs.is_empty() {
                     state.top_uid = recs.iter().map(|r| r.uid).max().unwrap_or(state.top_uid);
-                    let changed = store.upsert_headers(ctx.account.id, folder.id, &recs, ctx.label_folders)?;
+                    let changed = store.upsert_headers_since(Some(ctx.epoch), ctx.account.id, folder.id, &recs, ctx.label_folders)?;
                     (ctx.report)(Progress::Changed(changed));
                     (ctx.report)(Progress::NewMail { folder_id: folder.id, uids: recs.iter().map(|r| r.uid).collect() });
                 }
@@ -106,7 +106,7 @@ impl ChunkedNewestFirst {
                 conn.fetch_flags(&format!("1:{}", state.top_uid), None).await?
             };
             if !changes.is_empty() {
-                let changed = store.update_flags(folder.id, &changes, ctx.label_folders)?;
+                let changed = store.update_flags_since(Some(ctx.epoch), folder.id, &changes, ctx.label_folders)?;
                 (ctx.report)(Progress::Changed(changed));
             }
             if server_modseq > 0 {
@@ -144,7 +144,7 @@ impl ChunkedNewestFirst {
                 for part in missing.chunks(self.chunk as usize) {
                     let recs = conn.fetch_headers_uid(&crate::imap::uid_set(part)).await?;
                     if !recs.is_empty() {
-                        let changed = store.upsert_headers(ctx.account.id, folder.id, &recs, ctx.label_folders)?;
+                        let changed = store.upsert_headers_since(Some(ctx.epoch), ctx.account.id, folder.id, &recs, ctx.label_folders)?;
                         (ctx.report)(Progress::Changed(changed));
                     }
                 }
@@ -179,7 +179,7 @@ impl ChunkedNewestFirst {
                 if let Some(min) = recs.iter().map(|r| r.uid).min() {
                     state.low_uid = if state.low_uid == 0 { min } else { state.low_uid.min(min) };
                     state.top_uid = state.top_uid.max(recs.iter().map(|r| r.uid).max().unwrap_or(0));
-                    let changed = store.upsert_headers(ctx.account.id, folder.id, &recs, ctx.label_folders)?;
+                    let changed = store.upsert_headers_since(Some(ctx.epoch), ctx.account.id, folder.id, &recs, ctx.label_folders)?;
                     (ctx.report)(Progress::Changed(changed));
                 }
                 if start == 1 {

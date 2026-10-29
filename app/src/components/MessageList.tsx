@@ -1,4 +1,4 @@
-import { on, createEffect, createMemo, createSelector, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { batch, on, createEffect, createMemo, createSelector, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createVirtualizer } from '@tanstack/solid-virtual';
 import { api, type Folder, type MessageSummary, type SearchField, type ThreadSummary } from '../api';
 import { createPagedList } from '../lib/messageList';
@@ -433,11 +433,27 @@ export function MessageList(props: {
     registerListNav(search ? 'search' : 'folder', {
       advance() {
         const cur = selIndex();
-        const n = count();
-        if (cur < 0 || n === 0) return;
-        if (cur + 1 < n) selectIndex(cur + 1);
-        else if (cur - 1 >= 0) selectIndex(cur - 1);
-        else threaded ? selectThread(null) : selectMessage(null);
+        const it = model.row(cur);
+        if (!it) return null;
+        // One update: the row goes, the rows below move up, and the next older one (now in the
+        // same place) opens. The last row falls back to the newer one above.
+        batch(() => {
+          model.remove(new Set([it.id]));
+          const n = count();
+          if (n > 0) selectIndex(Math.min(cur, n - 1));
+          else threaded ? selectThread(null) : selectMessage(null);
+        });
+        return { id: it.id, index: cur, row: it };
+      },
+      putBack(r) {
+        // The undone row returns to its place, selected, in one update.
+        batch(() => {
+          if (model.insert(r.row as Item, r.index)) setSelIndex(r.index);
+          select(r.row as Item);
+        });
+      },
+      refresh() {
+        model.invalidate();
       },
       sync() {
         const id = untrack(selectedId);

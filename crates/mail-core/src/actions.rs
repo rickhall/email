@@ -475,6 +475,32 @@ mod tests {
     }
 
     #[test]
+    fn sync_step_from_before_an_action_cannot_undo_it() {
+        let (env, msg) = gmail_env();
+        let inbox = env.id("INBOX");
+        let labels = crate::sync::gmail_label_map(&env.store.folders(env.acct).unwrap());
+        // A sync step starts, then the user deletes; the step's server data still has \Inbox.
+        let epoch = env.store.local_epoch();
+        let p = plan(&env.store, env.acct, true, Action::Trash, &[msg], inbox).unwrap();
+        env.store.apply_local(&p.change).unwrap();
+        let stale = rec(900, Some(1), Some(&["\\Inbox", "Work", "\\Sent"]), "a@x", 0);
+        let all = env.id("[Gmail]/All Mail");
+        let e = env.store.upsert_headers_since(Some(epoch), env.acct, all, &[stale.clone()], &labels).unwrap_err();
+        assert!(e.is::<crate::store::SyncSuperseded>());
+        let change = crate::store::FlagChange { uid: 900, flags: 0, keywords: vec![], labels: Some(vec!["\\Inbox".into()]) };
+        let e = env.store.update_flags_since(Some(epoch), inbox, &[change], &labels).unwrap_err();
+        assert!(e.is::<crate::store::SyncSuperseded>());
+        assert_eq!(env.folder_names(msg), ["[Gmail]/Trash"]);
+        // Queuing the server op counts too (a step may start between the two).
+        let epoch = env.store.local_epoch();
+        env.store.enqueue_ops(env.acct, "[]", "{}", "[]", 0).unwrap();
+        assert!(env.store.upsert_headers_since(Some(epoch), env.acct, all, &[stale.clone()], &labels).is_err());
+        // A step that starts afterwards writes normally.
+        let epoch = env.store.local_epoch();
+        env.store.upsert_headers_since(Some(epoch), env.acct, all, &[stale], &labels).unwrap();
+    }
+
+    #[test]
     fn imap_moves_the_copy_in_view_and_flags_every_copy() {
         let env = Env::new(
             "imap",

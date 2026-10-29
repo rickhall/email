@@ -18,10 +18,21 @@ import { hideToast, showToast } from '../components/Toast';
 
 /** Implemented by the mounted MessageList instances (folder list, search results). */
 export interface ListNav {
-  /** Select the next older row (else the newer one, else nothing), scrolling only if needed. */
-  advance(): void;
+  /** Drop the selected row (an own action is removing it) and select the next older row in its
+   *  place (else the newer one, else nothing), scrolling only if needed. */
+  advance(): Removed | null;
+  /** Undo of `advance`: the row back in its place, selected. */
+  putBack(r: Removed): void;
+  /** Refetch the rows on screen (puts back a row `advance` dropped when the action didn't go). */
+  refresh(): void;
   /** Re-sync the list's keyboard index to the current selection. */
   sync(): void;
+}
+/** The row `advance` dropped. */
+export interface Removed {
+  id: number;
+  index: number;
+  row: MessageSummary | ThreadSummary;
 }
 const navs: { folder?: ListNav; search?: ListNav } = {};
 export function registerListNav(kind: 'folder' | 'search', nav: ListNav): () => void {
@@ -83,6 +94,9 @@ interface UndoEntry {
   /** selection before an auto-advance, and what we advanced to */
   prev: Selection;
   next: number | null;
+  /** the row the advance dropped, and from which list */
+  removed: Removed | null;
+  nav: ListNav | undefined;
   toastId: number;
 }
 let lastUndo: UndoEntry | null = null;
@@ -104,15 +118,19 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
   const removing = REMOVING.has(action.kind);
   let prev: Selection = null;
   let next: number | null = null;
+  let removed: Removed | null = null;
+  const nav = activeNav();
   if (removing && o.advance) {
     // Own action: open the next older item right away (the "left this folder → blank pane"
     // rule is for changes made elsewhere).
     prev = snapshot();
-    activeNav()?.advance();
+    removed = nav?.advance() ?? null;
     next = currentId();
   }
   const putBack = () => {
-    if (prev && currentId() === next) restore(prev);
+    if (!prev) return;
+    nav?.refresh();
+    if (currentId() === next) restore(prev);
   };
   setRunning((n) => n + 1);
   try {
@@ -136,7 +154,7 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
     }
     if (res.undoable) {
       const target = action.kind === 'move' ? folderById(action.targetFolderId)?.displayName : undefined;
-      const entry: UndoEntry = { opId: res.opId, prev, next, toastId: 0 };
+      const entry: UndoEntry = { opId: res.opId, prev, next, removed, nav, toastId: 0 };
       entry.toastId = showToast({
         kind: 'ok',
         text: describe(action, o.ids.length, target),
@@ -156,11 +174,14 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
 async function undo(entry: UndoEntry) {
   if (lastUndo === entry) lastUndo = null;
   hideToast(entry.toastId);
+  // Back to what was open at once, unless the user has since picked something else.
+  const back = entry.prev != null && currentId() === entry.next;
+  if (back && entry.removed && entry.nav) entry.nav.putBack(entry.removed);
+  else if (back) restore(entry.prev);
   try {
     await api.undoAction(entry.opId);
-    // Back to what was open, unless the user has since picked something else.
-    if (entry.prev && currentId() === entry.next) restore(entry.prev);
   } catch (e) {
+    entry.nav?.refresh();
     showToast({ kind: 'error', text: errorMessage(e) });
   }
 }

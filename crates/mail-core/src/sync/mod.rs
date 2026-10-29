@@ -53,6 +53,9 @@ pub struct FolderCtx<'a> {
     /// True on the first step for this folder in the current pass: check for new mail,
     /// flag changes and deletions, not just backfill.
     pub first_in_pass: bool,
+    /// `Store::local_epoch` when the step started (before checking for pending actions): the
+    /// step's writes fail with `SyncSuperseded` if the user changed something meanwhile.
+    pub epoch: u64,
     /// Report progress and changed folders back to the engine.
     pub report: &'a (dyn Fn(Progress) + Sync),
 }
@@ -446,6 +449,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         first_pass = false;
 
         loop {
+            let epoch = shared.store.local_epoch();
             // A pending user action (archive, move, ...) hasn't reached the server yet: syncing
             // now would put the message back. Wait for the outbox to drain (normally ≤ 5 s).
             if shared.store.has_pending_ops(account.id)? {
@@ -531,6 +535,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 folder,
                 label_folders: &label_folders,
                 first_in_pass: started.insert(next),
+                epoch,
                 report: &report,
             };
             let activity = conn.activity.clone();
@@ -542,6 +547,11 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                     done.insert(next);
                 }
                 Ok(Step::More) => {}
+                Err(e) if e.is::<crate::store::SyncSuperseded>() => {
+                    // The user acted while this ran: redo the folder once that's on the server.
+                    started.remove(&next);
+                    shared.dirty.lock().unwrap().insert(next);
+                }
                 Err(e) => {
                     // A broken folder shouldn't stall the rest; skip it this pass. Connection
                     // errors will surface again on the next folder and trigger a reconnect.
@@ -645,6 +655,7 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
 /// One incremental step (new mail, flag changes, expunges) on a folder the server just told
 /// us about, on the caller's connection. Bodies of new mail are queued at top priority.
 async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i64) -> Result<()> {
+    let epoch = shared.store.local_epoch();
     // Leave it to the headers task, which waits for pending actions to be sent first.
     if shared.store.has_pending_ops(shared.account.id)? {
         shared.dirty.lock().unwrap().insert(folder_id);
@@ -676,11 +687,22 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
         folder,
         label_folders: &label_folders,
         first_in_pass: true,
+        epoch,
         report: &report,
     };
     let activity = conn.activity.clone();
     let what = format!("handling a push for {}", folder.raw_name);
-    imap::stall_timeout(&activity, STALL_TIMEOUT, &what, shared.strategy.step(conn, &ctx)).await??;
+    match imap::stall_timeout(&activity, STALL_TIMEOUT, &what, shared.strategy.step(conn, &ctx)).await? {
+        Err(e) if e.is::<crate::store::SyncSuperseded>() => {
+            // The user acted meanwhile: hand the folder to the headers task (see above).
+            shared.dirty.lock().unwrap().insert(folder_id);
+            shared.refresh.notify_one();
+            return Ok(());
+        }
+        r => {
+            r?;
+        }
+    }
     // This folder's counts, now, on this connection (re-SELECT for EXISTS, then count UNSEEN);
     // the other folders catch up in the headers task's next sweep.
     let mb = conn.select(&folder.raw_name).await?;
