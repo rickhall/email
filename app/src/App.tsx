@@ -24,6 +24,8 @@ import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { ConfirmHost } from './components/Actions';
 import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
+import { openSettings, SettingsHost } from './components/Settings';
+import { commandFor } from './lib/shortcuts';
 import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -47,22 +49,42 @@ export function App() {
 
   onMount(() => void initApp());
 
-  // Ctrl/⌘+1: full ↔ rail · Ctrl/⌘+Shift+1: folder flyout · Ctrl/⌘+G: folder switcher.
+  // Ctrl/⌘+1: full ↔ rail · Ctrl/⌘+Shift+1: folder flyout · Ctrl/⌘+G: folder switcher ·
+  // Ctrl/⌘+,: settings — plus any single keys given to these in Settings.
   onMount(() => {
+    const flyoutKey = () => {
+      if (sidebarMode() === 'rail') setFlyout(flyout() ? false : 'keyboard');
+    };
     const onKey = (e: KeyboardEvent) => {
-      // `?` outside text inputs: the shortcuts sheet (the sheet itself handles `?` to close).
-      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey && !isTextInput(e.target) && !document.querySelector('.modal-backdrop')) {
-        e.preventDefault();
-        openShortcuts();
-        return;
+      if (document.querySelector('.modal-backdrop')) return;
+      const ready = (accounts()?.length ?? 0) > 0;
+      if (!isTextInput(e.target)) {
+        const run: Record<string, (() => void) | undefined> = {
+          // `?`: the shortcuts sheet (the sheet itself handles `?` to close)
+          shortcuts: openShortcuts,
+          settings: openSettings,
+          rail: ready ? toggleSidebar : undefined,
+          flyout: ready ? flyoutKey : undefined,
+          goto: ready ? openFolderSwitcher : undefined,
+        };
+        const f = run[commandFor(e) ?? ''];
+        if (f) {
+          e.preventDefault();
+          f();
+          return;
+        }
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      if (document.querySelector('.modal-backdrop') || (accounts()?.length ?? 0) === 0) return;
+      if (e.key === ',' && !e.shiftKey) {
+        e.preventDefault();
+        openSettings();
+        return;
+      }
+      if (!ready) return;
       if (e.code === 'Digit1') {
         e.preventDefault();
-        if (e.shiftKey) {
-          if (sidebarMode() === 'rail') setFlyout(flyout() ? false : 'keyboard');
-        } else toggleSidebar();
+        if (e.shiftKey) flyoutKey();
+        else toggleSidebar();
       } else if (!e.shiftKey && e.key.toLowerCase() === 'g') {
         e.preventDefault();
         openFolderSwitcher();
@@ -91,6 +113,9 @@ export function App() {
           break;
         case 'shortcuts':
           openShortcuts();
+          break;
+        case 'settings':
+          openSettings();
           break;
       }
     });
@@ -228,6 +253,7 @@ export function App() {
           <ManageTagsHost />
           <ConfirmHost />
           <ShortcutsHost />
+          <SettingsHost />
           <FolderSwitcherHost />
           <Show when={showAdd()}>
             <AddAccountModal onAdded={added} onClose={() => setShowAdd(false)} />

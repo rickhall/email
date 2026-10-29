@@ -121,6 +121,7 @@ interface SyncStatus {
 | `apply_action` | `{ action: Action, messageIds: number[], folderId }` | `{ opId: number \| null, undoable: boolean }` — applies locally at once (emits `messages-changed` / `folders-changed`); moves are sent to the server after a 5 s undo window, read/star at once. Rejects (string) when the action doesn't apply (e.g. no Archive folder) |
 | `undo_action` | `{ opId }` | `void` — within the undo window; rejects "Too late to undo…" otherwise |
 | `index_of` | `{ folderId, id, threaded }` | `number \| null` — the row index of a message (`threaded: false`) or conversation (`threaded: true`, `id` = thread id) in the folder's list (same ordering as `list_messages` / `list_threads`); `null` when it isn't in the folder |
+| `next_unread` | `{ folderId, after: number \| null, threaded }` | `{ id, index } \| null` — the next unread message (or conversation with an unread message in this folder) below `after` in the folder's list order, wrapping to the top; `null` when nothing in the folder is unread |
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |

@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { placeNear, useDismiss } from './Actions';
 import { openShortcuts } from './ShortcutsSheet';
-import { hint } from '../lib/shortcuts';
+import { commandFor, hint } from '../lib/shortcuts';
 import { searchActive, searchQuery, setSearchQuery } from '../state';
 import { CloseIcon, HelpIcon, SearchIcon } from './Icons';
 import { DRAG } from '../lib/platform';
@@ -19,7 +19,8 @@ function focusList(selectFirst: boolean) {
   );
   el?.focus({ preventScroll: true });
   if (selectFirst && el && !el.querySelector('.row.selected')) {
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+    // ↓ is a fixed key for "next message" (j may have been remapped)
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
   }
 }
 
@@ -121,7 +122,7 @@ export function SearchBar() {
       e.preventDefault();
       input.focus();
       input.select();
-    } else if (e.key === '/' && !mod && !e.altKey && !isTypingTarget(e.target)) {
+    } else if (commandFor(e) === 'search' && !isTypingTarget(e.target)) {
       e.preventDefault();
       input.focus();
       input.select();

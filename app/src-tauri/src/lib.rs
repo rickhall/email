@@ -245,6 +245,16 @@ async fn index_of(core: State<'_, Arc<Core>>, folder_id: i64, id: i64, threaded:
 }
 
 #[tauri::command]
+async fn next_unread(
+    core: State<'_, Arc<Core>>,
+    folder_id: i64,
+    after: Option<i64>,
+    threaded: bool,
+) -> Res<Option<NextUnread>> {
+    core.next_unread(folder_id, after, threaded).map_err(err)
+}
+
+#[tauri::command]
 async fn list_tags(core: State<'_, Arc<Core>>) -> Res<Vec<mail_core::tags::TagDef>> {
     core.tags().map_err(err)
 }
@@ -396,6 +406,7 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         &[
             &PredefinedMenuItem::about(app, Some("About Email"), Some(AboutMetadata::default()))?,
             &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
             &MenuItem::with_id(app, "add-account", "Add Account…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
@@ -530,6 +541,7 @@ pub fn run() {
             apply_action,
             undo_action,
             index_of,
+            next_unread,
             list_tags,
             set_tag,
             delete_tag,

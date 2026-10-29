@@ -1480,6 +1480,26 @@ export function createMockBackend(): Backend {
       }
       return null;
     },
+    async next_unread({ folderId, after, threaded }) {
+      await sleep(3);
+      // Rows in list order, as (id, unread): messages, or conversations by their newest message.
+      const rows: { id: number; unread: boolean }[] = [];
+      const at = new Map<number, number>();
+      for (const m of folderMsgs.get(folderId) ?? []) {
+        const id = threaded ? threadOf(m) : m.id;
+        const k = at.get(id);
+        if (k == null) {
+          at.set(id, rows.length);
+          rows.push({ id, unread: m.unread });
+        } else if (m.unread) rows[k]!.unread = true;
+      }
+      const from = after == null ? -1 : (at.get(after) ?? -1);
+      for (let step = 1; step <= rows.length; step++) {
+        const i = (from + step) % rows.length;
+        if (rows[i]!.unread) return { id: rows[i]!.id, index: i };
+      }
+      return null;
+    },
     async message_in_folder({ id, folderId }) {
       await sleep(3);
       const m = byId.get(id);

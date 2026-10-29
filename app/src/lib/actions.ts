@@ -13,6 +13,7 @@ import {
   threaded,
 } from '../state';
 import { hideToast, showToast } from '../components/Toast';
+import { commandFor } from './shortcuts';
 
 // ------------------------------------------------------------- list navigation registry
 
@@ -206,30 +207,20 @@ export function clearHeaderHandler(fn: (c: BarCommand) => void): void {
   if (headerHandler === fn) headerHandler = null;
 }
 
-/** e, #, Delete, v, !, Shift+U, s, z — returns true when handled. */
+const BAR_COMMANDS = new Set(['archive', 'delete', 'move', 'spam', 'unread', 'star']);
+
+/** Archive, delete, move, spam, read/unread, star, undo and the tag digits (keys from the
+ *  keymap) — returns true when handled. */
 export function runShortcut(e: KeyboardEvent): boolean {
-  if (e.key === 'z') return undoLast() || true;
-  // Thunderbird: 1–9 toggle the tag in that position, 0 removes all tags.
-  if (/^[0-9]$/.test(e.key)) {
+  // Thunderbird: 1–9 toggle the tag in that position, 0 removes all tags (fixed keys).
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && /^[0-9]$/.test(e.key)) {
     headerHandler?.(e.key === '0' ? 'tag-clear' : (`tag-${Number(e.key)}` as BarCommand));
     return true;
   }
-  const cmd: BarCommand | null =
-    e.key === 'e'
-      ? 'archive'
-      : e.key === '#' || e.key === 'Delete'
-        ? 'delete'
-        : e.key === 'v'
-          ? 'move'
-          : e.key === '!'
-            ? 'spam'
-            : e.key === 'U'
-              ? 'unread'
-              : e.key === 's'
-                ? 'star'
-                : null;
-  if (!cmd) return false;
-  headerHandler?.(cmd);
+  const cmd = commandFor(e);
+  if (cmd === 'undo') return undoLast() || true;
+  if (!cmd || !BAR_COMMANDS.has(cmd)) return false;
+  headerHandler?.(cmd as BarCommand);
   return true;
 }
 

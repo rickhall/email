@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import { SHORTCUTS } from '../lib/shortcuts';
+import { allKeys, COMMANDS, label } from '../lib/shortcuts';
+import { openSettings } from './Settings';
 import { CloseIcon } from './Icons';
 
 const [open, setOpen] = createSignal(false);
@@ -55,7 +56,7 @@ function Sheet() {
           </button>
         </div>
         <div class="sc-grid">
-          <For each={SHORTCUTS}>
+          <For each={COMMANDS}>
             {(sec) => (
               <section class="sc-section">
                 <h3>{sec.title}</h3>
@@ -63,7 +64,7 @@ function Sheet() {
                   {(it) => (
                     <div class="sc-row">
                       <span class="sc-keys">
-                        <For each={it.keys}>
+                        <For each={allKeys(it.id).map(label)}>
                           {(combo, i) => (
                             <>
                               <Show when={i() > 0}>
@@ -83,6 +84,18 @@ function Sheet() {
               </section>
             )}
           </For>
+        </div>
+        <div class="sc-foot">
+          <button
+            class="btn secondary"
+            onClick={() => {
+              close();
+              // after close() has handed focus back, so Settings returns it there too
+              queueMicrotask(openSettings);
+            }}
+          >
+            Customize…
+          </button>
         </div>
       </div>
     </div>

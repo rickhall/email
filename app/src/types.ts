@@ -188,6 +188,12 @@ export interface TagDef {
   defined: boolean;
 }
 
+/** Where `next_unread` found the next unread item: its id and row index in the folder list. */
+export interface NextUnread {
+  id: number;
+  index: number;
+}
+
 export interface ActionResult {
   /** null when nothing was queued (e.g. no-op, or read/star which apply at once) */
   opId: number | null;
@@ -199,7 +205,7 @@ export interface ActionFailedPayload {
 }
 
 /** Native macOS menu bar commands. */
-export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts';
+export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings';
 export interface MenuActionPayload {
   id: MenuActionId;
 }
@@ -252,6 +258,7 @@ export interface CommandMap {
   app_version: { args: undefined; ret: string };
   reveal_path: { args: { path: string }; ret: void };
   index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };
+  next_unread: { args: { folderId: number; after: number | null; threaded: boolean }; ret: NextUnread | null };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

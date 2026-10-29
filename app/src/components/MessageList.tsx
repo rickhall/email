@@ -31,6 +31,8 @@ import { ViewMenuButton } from './ViewMenu';
 import { TagDots, tintStyle } from './Tags';
 import { climbToParent, FolderCrumbs } from './FolderSwitcher';
 import { registerListNav, runShortcut } from '../lib/actions';
+import { commandFor } from '../lib/shortcuts';
+import { showToast } from './Toast';
 
 /** Pages (×200 rows) searched for a remembered item before giving up on restoring it. */
 const RESTORE_MAX_PAGES = 10;
@@ -311,6 +313,52 @@ export function MessageList(props: {
     return Math.max(1, Math.floor(scrollEl.clientHeight / ROW_HEIGHT) - 1);
   }
 
+  /** Select row `idx`, expected to hold `id` (from the core): scrolls only if it's off screen. */
+  async function goTo(idx: number, id: number) {
+    const reveal = (i: number) => {
+      const top = i * ROW_HEIGHT;
+      if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
+        virt.scrollToIndex(i, { align: 'center' });
+      }
+    };
+    setSelIndex(idx);
+    if (idx < count()) reveal(idx);
+    let m = await model.rowAt(idx);
+    let k = idx;
+    if (m?.id !== id) {
+      // the list shifted meanwhile: find it nearby
+      k = model.indexOfId(id);
+      m = k >= 0 ? model.row(k) : undefined;
+    }
+    if (!m) return;
+    setSelIndex(k);
+    select(m);
+    queueMicrotask(() => reveal(k));
+  }
+
+  /** `n`: the next unread item below the selection, wrapping to the top (Thunderbird's N). */
+  async function nextUnread() {
+    const cur = untrack(selectedId);
+    if (search) {
+      // Results: look through what's loaded.
+      const n = count();
+      const from = selIndex();
+      for (let step = 1; step <= n; step++) {
+        const i = (from + step + n) % n;
+        const m = model.row(i);
+        if (m?.unread && m.id !== cur) return selectIndex(i);
+      }
+      return;
+    }
+    const hit = await api.nextUnread(folderId, cur, threaded);
+    if (!hit) {
+      showToast({ kind: 'ok', text: 'No unread messages in this folder', ms: 2500 });
+      return;
+    }
+    if (hit.id === cur) return;
+    await goTo(hit.index, hit.id);
+  }
+
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
     if (isTypingTarget(e.target)) return;
@@ -320,45 +368,46 @@ export function MessageList(props: {
     // Only one list drives the keyboard: results while searching, the folder otherwise.
     if (!!search !== searchActive()) return;
     const cur = selIndex();
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    // Keys come from the keymap (lib/shortcuts.ts), remappable in Settings.
+    switch (commandFor(e)) {
+      case 'next':
         selectIndex(cur < 0 ? 0 : cur + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'prev':
         selectIndex(cur < 0 ? 0 : cur - 1);
         break;
-      case 'Home':
+      case 'next-unread':
+        void nextUnread();
+        break;
+      case 'first':
         selectIndex(0);
         break;
-      case 'End':
+      case 'last':
         selectIndex(count() - 1);
         break;
-      case 'PageDown':
+      case 'page-down':
         selectIndex((cur < 0 ? 0 : cur) + pageRows());
         break;
-      case 'PageUp':
+      case 'page-up':
         selectIndex((cur < 0 ? 0 : cur) - pageRows());
         break;
-      case 'Enter':
-      case 'o':
+      case 'open':
         if (cur < 0) selectIndex(0);
         props.onOpen();
         break;
-      case 't':
+      case 'threaded':
         if (search) return;
         setThreaded(!threaded);
         break;
-      case 'a':
+      case 'scope':
         if (search) return;
         setConversationScope(conversationScope() === 'all' ? 'folder' : 'all');
         break;
-      case 'Escape':
+      case 'escape':
         if (search) setSearchQuery('');
         else scrollEl.focus({ preventScroll: true });
         break;
-      case 'Backspace':
+      case 'parent':
         if (search || !climbToParent()) return;
         break;
       default:

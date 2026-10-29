@@ -375,6 +375,11 @@ impl Core {
         self.store.index_of(folder_id, id, threaded)
     }
 
+    /// The next unread item below `after` in a folder list (wrapping to the top).
+    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool) -> Result<Option<NextUnread>> {
+        Ok(self.store.next_unread(folder_id, after, threaded)?.map(|(id, index)| NextUnread { id, index }))
+    }
+
     pub fn tags(&self) -> Result<Vec<tags::TagDef>> {
         self.store.tags()
     }

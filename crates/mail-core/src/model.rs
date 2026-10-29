@@ -258,6 +258,15 @@ pub struct SyncStatus {
     pub message: Option<String>,
 }
 
+/// Where `next_unread` found the next unread item (a message, or a conversation in threaded lists).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextUnread {
+    pub id: i64,
+    /// Row index in the folder list.
+    pub index: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionResult {

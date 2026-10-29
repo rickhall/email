@@ -2,6 +2,7 @@ import type {
   Account,
   Action,
   ActionResult,
+  NextUnread,
   AddAccountArgs,
   Backend,
   CommandMap,
@@ -108,6 +109,9 @@ export const api = {
   /** Row index of a message / conversation in the folder's list (null = not in it). */
   indexOf: (folderId: number, id: number, threaded: boolean): Promise<number | null> =>
     call('index_of', { folderId, id, threaded }),
+  /** The next unread item below `after` in the folder's list, wrapping to the top (null = none). */
+  nextUnread: (folderId: number, after: number | null, threaded: boolean): Promise<NextUnread | null> =>
+    call('next_unread', { folderId, after, threaded }),
   messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
     call('message_in_folder', { id, folderId }),
   openAttachment: (messageId: number, index: number): Promise<void> =>

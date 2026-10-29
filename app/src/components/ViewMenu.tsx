@@ -11,6 +11,7 @@ import {
 import { CheckIcon, SlidersIcon } from './Icons';
 import { hint } from '../lib/shortcuts';
 import { openShortcuts } from './ShortcutsSheet';
+import { openSettings } from './Settings';
 
 // Module-level so the menu stays open while the list remounts on "Group by conversation".
 const [open, setOpen] = createSignal(false);
@@ -144,6 +145,18 @@ export function ViewMenuPopover() {
             <span class="vm-check" aria-hidden="true" />
             <span class="vm-label">Keyboard shortcuts</span>
             <kbd>{hint('shortcuts')}</kbd>
+          </button>
+          <button
+            role="menuitem"
+            class="vm-item"
+            onClick={() => {
+              setOpen(false);
+              openSettings();
+            }}
+          >
+            <span class="vm-check" aria-hidden="true" />
+            <span class="vm-label">Settings…</span>
+            <kbd>{hint('settings')}</kbd>
           </button>
         </div>
       </Portal>

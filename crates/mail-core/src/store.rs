@@ -1416,6 +1416,56 @@ impl Store {
         }
     }
 
+    /// The first unread item (message, or conversation with an unread message here) below `after`
+    /// in the list's order, wrapping to the top; with its index. None if nothing is unread.
+    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool) -> Result<Option<(i64, u32)>> {
+        let found: Option<i64> = {
+            let db = self.rdb();
+            // The unread rows with their list sort key (date DESC, id DESC); `?2`/`?3` = position.
+            // Conversations: only those holding unread mail get their newest date computed
+            // (~50 ms on a 113k-message folder, vs ~220 ms grouping every conversation).
+            let rows = if threaded {
+                "SELECT t.thread_id AS id,
+                        (SELECT max(x.date) FROM entries x WHERE x.folder_id = ?1 AND x.thread_id = t.thread_id) AS d
+                 FROM (SELECT DISTINCT e.thread_id FROM entries e JOIN messages m ON m.id = e.message_id
+                       WHERE e.folder_id = ?1 AND (m.flags & 1) = 0) t"
+            } else {
+                "SELECT e.message_id AS id, e.date AS d
+                 FROM entries e JOIN messages m ON m.id = e.message_id WHERE e.folder_id = ?1 AND (m.flags & 1) = 0"
+            };
+            let pos: Option<i64> = match after {
+                Some(id) if threaded => db.query_row(
+                    "SELECT max(date) FROM entries WHERE folder_id=?1 AND thread_id=?2",
+                    params![folder_id, id],
+                    |r| r.get(0),
+                )?,
+                Some(id) => db
+                    .query_row("SELECT date FROM entries WHERE folder_id=?1 AND message_id=?2", params![folder_id, id], |r| r.get(0))
+                    .optional()?,
+                None => None,
+            };
+            let first = |below: bool| -> Result<Option<i64>> {
+                let cond = if below { "WHERE d < ?2 OR (d = ?2 AND id < ?3)" } else { "" };
+                let sql = format!("SELECT id FROM ({rows}) {cond} ORDER BY d DESC, id DESC LIMIT 1");
+                let mut stmt = db.prepare_cached(&sql)?;
+                Ok(if below {
+                    stmt.query_row(params![folder_id, pos, after], |r| r.get(0)).optional()?
+                } else {
+                    stmt.query_row(params![folder_id], |r| r.get(0)).optional()?
+                })
+            };
+            match pos {
+                Some(_) => match first(true)? {
+                    Some(id) => Some(id),
+                    None => first(false)?,
+                },
+                None => first(false)?,
+            }
+        };
+        let Some(id) = found else { return Ok(None) };
+        Ok(self.index_of(folder_id, id, threaded)?.map(|i| (id, i)))
+    }
+
     /// Whether message `id` is still in `folder_id`, or (with `None`) still exists at all.
     pub fn message_in_folder(&self, id: i64, folder_id: Option<i64>) -> Result<bool> {
         let db = self.rdb();

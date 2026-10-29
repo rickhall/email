@@ -501,6 +501,31 @@ mod tests {
     }
 
     #[test]
+    fn next_unread_goes_down_then_wraps() {
+        let env = Env::new("unread", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        let inbox = env.id("INBOX");
+        // List order is newest first: uids 5,4,3,2,1; 4 and 1 unread.
+        let recs: Vec<HeaderRecord> =
+            (1..=5).map(|u| rec(u, None, None, &format!("m{u}@x"), if u == 4 || u == 1 { 0 } else { flags::SEEN })).collect();
+        env.store.upsert_headers(env.acct, inbox, &recs, &HashMap::new()).unwrap();
+        let id = |u: u32| env.store.message_ids_for_uids(inbox, &[u]).unwrap()[0];
+        // Each message is its own conversation; the list shows uid u at row 5 - u.
+        let threads = env.store.list_threads(inbox, crate::model::ThreadScope::default(), 0, 10).unwrap().threads;
+        for threaded in [false, true] {
+            let key = |u: u32| if threaded { threads[5 - u as usize].id } else { id(u) };
+            let next = |after: Option<u32>| env.store.next_unread(inbox, after.map(key), threaded).unwrap();
+            assert_eq!(next(None), Some((key(4), 1)));
+            assert_eq!(next(Some(5)), Some((key(4), 1)));
+            assert_eq!(next(Some(4)), Some((key(1), 4)));
+            assert_eq!(next(Some(2)), Some((key(1), 4)));
+            assert_eq!(next(Some(1)), Some((key(4), 1)), "wraps to the top");
+        }
+        let seen = Env::new("noneunread", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        seen.store.upsert_headers(seen.acct, seen.id("INBOX"), &[rec(1, None, None, "a@x", flags::SEEN)], &HashMap::new()).unwrap();
+        assert_eq!(seen.store.next_unread(seen.id("INBOX"), None, false).unwrap(), None);
+    }
+
+    #[test]
     fn imap_moves_the_copy_in_view_and_flags_every_copy() {
         let env = Env::new(
             "imap",
