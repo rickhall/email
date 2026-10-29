@@ -30,9 +30,8 @@ export function TagDots(props: { tags: readonly string[] }) {
 /** CSS vars that tint the sender like Thunderbird (first tag), readable in both themes. */
 export function tintStyle(tags: readonly string[]): Record<string, string> | undefined {
   if (tags.length === 0) return undefined;
-  const color = tagInfo(sortTags(tags)[0]!).color;
-  const t = tagTint(color);
-  return { '--tint-l': t.light, '--tint-d': t.dark, '--tint': color };
+  const t = tagTint(tagInfo(sortTags(tags)[0]!).color);
+  return { '--tint-l': t.light, '--tint-d': t.dark };
 }
 
 /** Reader chips: dot + name, × removes, click runs a tag search. One line, "+N" when crowded. */

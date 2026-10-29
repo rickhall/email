@@ -544,7 +544,8 @@ body.resizing iframe {
   left: 0;
   right: 0;
   height: var(--row-h);
-  padding: 0 8px;
+  /* left: a gutter for the unread dot and tag bar, outside the selection highlight */
+  padding: 0 8px 0 21px;
   contain: strict;
 }
 
@@ -552,15 +553,14 @@ body.resizing iframe {
   position: relative;
   height: 100%;
   /* Content is 56px (20px line + 2px gap + two 17px lines); centre it in the row. */
-  padding: calc((var(--row-h) - 56px) / 2) 14px 0 24px;
+  padding: calc((var(--row-h) - 56px) / 2) 14px 0 11px;
   border-radius: 8px;
-  overflow: hidden;
 }
 /* hairline between rows, inset to align with text */
 .row-inner::after {
   content: '';
   position: absolute;
-  left: 24px;
+  left: 11px;
   right: 14px;
   bottom: 0;
   height: 1px;
@@ -586,8 +586,8 @@ body.resizing iframe {
 
 .unread-dot {
   position: absolute;
-  /* at the row edge, outside the tag bar (17–20px); text starts at 24px */
-  left: 5px;
+  /* in the row's gutter (x 4–12), left of the tag bar; both sit outside the highlight */
+  left: -17px;
   /* Vertically centred on the 20px first line. */
   top: calc((var(--row-h) - 56px) / 2 + 6px);
   width: 8px;
@@ -599,9 +599,6 @@ body.resizing iframe {
 }
 .row.unread .unread-dot {
   transform: scale(1);
-}
-.list-scroll:focus-within .row.selected .unread-dot {
-  background: #fff;
 }
 
 .row-line1 {
@@ -3162,12 +3159,13 @@ html.macos .app.rail-mode .search-bar {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
-/* Tagged rows: a bar in the first tag's colour between the unread dot (row edge) and the
-   text; no text is recoloured. Colour is the theme-adjusted tint so dark tags stay visible. */
+/* Tagged rows: a bar in the first tag's colour in the row's gutter (x 15–18), between the
+   unread dot and the highlight, so selection never covers it; no text is recoloured. Colour is
+   the theme-adjusted tint so dark tags stay visible. */
 .row-inner.tagged::before {
   content: '';
   position: absolute;
-  left: 17px;
+  left: -6px;
   width: 3px;
   top: calc((var(--row-h) - 56px) / 2);
   bottom: calc((var(--row-h) - 56px) / 2);
@@ -3178,15 +3176,6 @@ html.macos .app.rail-mode .search-bar {
   .row-inner.tagged::before {
     background: var(--tint-d);
   }
-}
-.list-scroll:focus-within .row.selected .tag-dot {
-  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
-}
-/* On the blue selection: the tag's own colour (the tints are tuned for the list background),
-   ringed in white so blue and purple tags still separate from the highlight. */
-.list-scroll:focus-within .row.selected .row-inner.tagged::before {
-  background: var(--tint);
-  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
 }
 
 /* reader chips: one line in the band's info row */
