@@ -66,10 +66,12 @@ function Hl(props: { text: string; re: RegExp | null }) {
 
 function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: RegExp | null; folderTag?: string }) {
   return (
-    <div class="row-inner">
+    // A tag describes the message: shown as a bar in the first tag's colour beside the text
+    // (unread dot stays at the edge); all tags appear as dots on the first line.
+    <div class="row-inner" classList={{ tagged: (props.m.tags?.length ?? 0) > 0 }} style={tintStyle(props.m.tags ?? [])}>
       <span class="unread-dot" />
       <div class="row-line1">
-        <span class="row-from" classList={{ tinted: (props.m.tags?.length ?? 0) > 0 }} style={tintStyle(props.m.tags ?? [])}>
+        <span class="row-from">
           <Hl text={props.m.fromName || props.m.fromAddr} re={props.re ?? null} />
         </span>
         <Show when={props.folderTag}>
@@ -115,10 +117,10 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
       .map((p) => (props.me && (p === props.me.name || p.toLowerCase() === props.me.email.toLowerCase()) ? 'me' : p))
       .join(', ');
   return (
-    <div class="row-inner">
+    <div class="row-inner" classList={{ tagged: (props.t.tags?.length ?? 0) > 0 }} style={tintStyle(props.t.tags ?? [])}>
       <span class="unread-dot" />
       <div class="row-line1">
-        <span class="row-from" classList={{ tinted: (props.t.tags?.length ?? 0) > 0 }} style={tintStyle(props.t.tags ?? [])}>
+        <span class="row-from">
           {people() || '(no sender)'}
         </span>
         <Show when={props.t.messageCount > 1}>

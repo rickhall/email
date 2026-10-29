@@ -586,7 +586,8 @@ body.resizing iframe {
 
 .unread-dot {
   position: absolute;
-  left: 9px;
+  /* at the row edge, outside the tag bar (17–20px); text starts at 24px */
+  left: 5px;
   /* Vertically centred on the 20px first line. */
   top: calc((var(--row-h) - 56px) / 2 + 6px);
   width: 8px;
@@ -3141,19 +3142,30 @@ html.macos .app.rail-mode .search-bar {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
-/* sender tinted with the first tag's colour (contrast-adjusted per theme) */
-.row-from.tinted {
-  color: var(--tint-l);
+/* Tagged rows: a bar in the first tag's colour between the unread dot (row edge) and the
+   text; no text is recoloured. Colour is the theme-adjusted tint so dark tags stay visible. */
+.row-inner.tagged::before {
+  content: '';
+  position: absolute;
+  left: 17px;
+  width: 3px;
+  top: calc((var(--row-h) - 56px) / 2);
+  bottom: calc((var(--row-h) - 56px) / 2);
+  border-radius: 2px;
+  background: var(--tint-l);
 }
 @media (prefers-color-scheme: dark) {
-  .row-from.tinted {
-    color: var(--tint-d);
+  .row-inner.tagged::before {
+    background: var(--tint-d);
   }
 }
-.list-scroll:focus-within .row.selected .row-from.tinted {
-  color: var(--sel-text);
-}
 .list-scroll:focus-within .row.selected .tag-dot {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
+/* On the blue selection: the tag's own colour (the tints are tuned for the list background),
+   ringed in white so blue and purple tags still separate from the highlight. */
+.list-scroll:focus-within .row.selected .row-inner.tagged::before {
+  background: var(--tint);
   box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
 }
 
