@@ -1912,6 +1912,13 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Gmail's X-GM-MSGID for a message, if known.
+    pub fn message_gm_msgid(&self, id: i64) -> Result<Option<u64>> {
+        let v: Option<Option<i64>> =
+            self.rdb().query_row("SELECT gm_msgid FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(v.flatten().map(|v| v as u64))
+    }
+
     /// Folder ids a message is in (with or without a UID).
     pub fn message_folder_ids(&self, id: i64) -> Result<Vec<i64>> {
         let db = self.rdb();

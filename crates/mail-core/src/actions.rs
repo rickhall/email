@@ -64,6 +64,22 @@ pub enum ServerOp {
     Flags { folder: String, uid: u32, flag: String, on: bool },
     /// \Deleted + UID EXPUNGE (permanent).
     Expunge { folder: String, uid: u32 },
+    /// Gmail: run `then` on the message's copy in `folder` (All Mail), found by X-GM-MSGID when
+    /// sent, because its UID there wasn't known yet. Label changes must go to All Mail: sent to
+    /// the Inbox (or a label) copy, removing that folder's own label is ignored (`OK`, no change).
+    Find { folder: String, gm_msgid: u64, then: Box<ServerOp> },
+}
+
+impl ServerOp {
+    /// The same command addressed to `uid` (for `Find`, once the UID is known).
+    pub fn with_uid(&self, uid: u32) -> ServerOp {
+        let mut op = self.clone();
+        match &mut op {
+            ServerOp::Labels { uid: u, .. } | ServerOp::Move { uid: u, .. } | ServerOp::Flags { uid: u, .. } | ServerOp::Expunge { uid: u, .. } => *u = uid,
+            ServerOp::Find { .. } => {}
+        }
+        op
+    }
 }
 
 /// What applying an action produced.
@@ -131,11 +147,25 @@ pub fn plan(
             let is_bin = |fid: &i64| by_id.get(fid).is_some_and(|f| matches!(f.role, Some(FolderRole::Trash | FolderRole::Junk)));
             copies.iter().find(|c| !is_bin(&c.0)).or(copies.first()).map(|c| (c.0, c.1.clone(), c.2))
         };
+        // Gmail: All Mail's copy (see `ServerOp::Find`) with its UID, or found by X-GM-MSGID when
+        // sent if that UID isn't known yet (new mail synced through the Inbox first).
+        let all_mail_copy = all_mail.and_then(|a| copies.iter().find(|c| c.0 == a.id)).map(|c| (c.0, c.1.clone(), c.2));
+        // (Messages in Trash/Spam aren't in All Mail: those use their copy there, a real folder.)
+        let in_bin = in_folders.iter().any(|f| by_id.get(f).is_some_and(|f| matches!(f.role, Some(FolderRole::Trash | FolderRole::Junk))));
+        let find: Option<u64> = match (gmail, &all_mail_copy, all_mail) {
+            (true, None, Some(_)) if !in_bin => store.message_gm_msgid(id)?,
+            _ => None,
+        };
+        // Server commands for a Find are built against All Mail with UID 0, then wrapped.
+        let wrap = |op: ServerOp| match (find, all_mail) {
+            (Some(gm_msgid), Some(a)) => ServerOp::Find { folder: a.raw_name.clone(), gm_msgid, then: Box::new(op) },
+            _ => op,
+        };
         // The copy server commands address: (folder id, raw name, uid).
         let primary = if gmail {
-            all_mail
-                .and_then(|a| copies.iter().find(|c| c.0 == a.id))
-                .map(|c| (c.0, c.1.clone(), c.2))
+            all_mail_copy
+                .clone()
+                .or_else(|| find.and(all_mail).map(|a| (a.id, a.raw_name.clone(), 0)))
                 .or_else(|| copies.iter().find(|c| c.0 == context).map(|c| (c.0, c.1.clone(), c.2)))
                 .or_else(any_copy)
         } else {
@@ -154,7 +184,7 @@ pub fn plan(
             }
             let (source, folder, uid) =
                 primary.clone().ok_or_else(|| anyhow!("This message isn't on the server yet; try again after it syncs."))?;
-            ops.push(ServerOp::Move { folder, uid, target: target.raw_name.clone() });
+            ops.push(wrap(ServerOp::Move { folder, uid, target: target.raw_name.clone() }));
             if gmail {
                 // In Gmail a message lives in one of Inbox/labels/All Mail, Trash or Spam.
                 for &f in &in_folders {
@@ -192,7 +222,7 @@ pub fn plan(
                 }
                 if !remove.is_empty() {
                     let (folder, uid) = need_primary()?;
-                    ops.push(ServerOp::Labels { folder, uid, add: vec![], remove });
+                    ops.push(wrap(ServerOp::Labels { folder, uid, add: vec![], remove }));
                 }
             }
             Action::Archive => {
@@ -237,7 +267,7 @@ pub fn plan(
                         let remove: Vec<String> =
                             if in_folders.contains(&context) { gmail_label(ctx).into_iter().collect() } else { vec![] };
                         let (folder, uid) = need_primary()?;
-                        ops.push(ServerOp::Labels { folder, uid, add: vec![add], remove });
+                        ops.push(wrap(ServerOp::Labels { folder, uid, add: vec![add], remove }));
                         if ctx.role != Some(FolderRole::All) && in_folders.contains(&context) {
                             change.remove.push((context, id));
                         }
@@ -276,7 +306,7 @@ pub fn plan(
                 let flag = k.clone();
                 if gmail {
                     let (folder, uid) = need_primary()?;
-                    ops.push(ServerOp::Flags { folder, uid, flag, on });
+                    ops.push(wrap(ServerOp::Flags { folder, uid, flag, on }));
                 } else {
                     // Each copy has its own keywords.
                     for (fid, folder, uid) in &copies {
@@ -295,7 +325,7 @@ pub fn plan(
                 change.flags.push((id, if on { bit } else { 0 }, if on { 0 } else { bit }));
                 if gmail {
                     let (folder, uid) = need_primary()?;
-                    ops.push(ServerOp::Flags { folder, uid, flag: flag.into(), on });
+                    ops.push(wrap(ServerOp::Flags { folder, uid, flag: flag.into(), on }));
                 } else {
                     // Each copy has its own flags.
                     for (fid, folder, uid) in &copies {
@@ -472,6 +502,35 @@ mod tests {
         assert_eq!(p.delay_ms, 0);
         env.store.apply_local(&p.change).unwrap();
         assert_eq!(env.store.message_flags(msg).unwrap() & flags::SEEN, flags::SEEN);
+    }
+
+    #[test]
+    fn gmail_new_mail_known_only_in_inbox_is_addressed_in_all_mail() {
+        // Synced through the Inbox (IDLE) before All Mail: no All Mail UID yet. Removing \Inbox
+        // from the Inbox copy is ignored by Gmail, so the command must find the All Mail copy.
+        let env = gmail_env().0;
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        let r = rec(77, Some(42), Some(&["\\Inbox", "Work"]), "new@x", 0);
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[r], &labels).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("INBOX"), &[77]).unwrap()[0];
+        let find = |then: ServerOp| ServerOp::Find { folder: "[Gmail]/All Mail".into(), gm_msgid: 42, then: Box::new(then) };
+
+        let p = plan(&env.store, env.acct, true, Action::Archive, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![find(ServerOp::Labels { folder: "[Gmail]/All Mail".into(), uid: 0, add: vec![], remove: vec!["\\Inbox".into(), "Work".into()] })]
+        );
+        let p = plan(&env.store, env.acct, true, Action::Trash, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![find(ServerOp::Move { folder: "[Gmail]/All Mail".into(), uid: 0, target: "[Gmail]/Trash".into() })]);
+        let p = plan(&env.store, env.acct, true, Action::Read, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![find(ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 0, flag: "\\Seen".into(), on: true })]);
+
+        // Queued as JSON in pending_ops; the UID is filled in when it's sent.
+        let op = &p.ops[0];
+        assert_eq!(&serde_json::from_str::<ServerOp>(&serde_json::to_string(op).unwrap()).unwrap(), op);
+        let ServerOp::Find { then, .. } = op else { unreachable!() };
+        assert_eq!(then.with_uid(9), ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 9, flag: "\\Seen".into(), on: true });
     }
 
     #[test]

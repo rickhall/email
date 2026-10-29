@@ -522,6 +522,17 @@ impl Connection {
 
     /// Send one queued action command (see `actions::ServerOp`).
     pub async fn run_op(&mut self, op: &crate::actions::ServerOp) -> Result<()> {
+        use crate::actions::ServerOp;
+        let ServerOp::Find { folder, gm_msgid, then } = op else { return self.run_addressed(op).await };
+        self.ensure_selected(folder).await?;
+        let uid = self.session.uid_search(format!("X-GM-MSGID {gm_msgid}")).await?.into_iter().max();
+        let Some(uid) = uid else {
+            return Err(OpRejected(format!("the message is no longer in {folder}")).into());
+        };
+        self.run_addressed(&then.with_uid(uid)).await
+    }
+
+    async fn run_addressed(&mut self, op: &crate::actions::ServerOp) -> Result<()> {
         use crate::actions::{ServerOp, quote};
         async fn store(c: &mut Connection, uid: u32, query: String) -> Result<()> {
             let r: Vec<Fetch> = c.session.uid_store(uid.to_string(), query).await?.try_collect().await?;
@@ -570,6 +581,7 @@ impl Connection {
                     drop(r);
                 }
             }
+            ServerOp::Find { .. } => return Err(anyhow!("nested Find")),
         }
         Ok(())
     }
@@ -863,3 +875,16 @@ mod discovery_tests {
         assert_eq!(found.map(|f| f.0), Some("imap.gmail.com"));
     }
 }
+
+/// The server can't carry out an action as planned (not a connection problem): it's undone
+/// rather than retried, like a NO/BAD response.
+#[derive(Debug)]
+pub struct OpRejected(pub String);
+
+impl std::fmt::Display for OpRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OpRejected {}

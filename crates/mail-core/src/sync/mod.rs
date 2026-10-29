@@ -988,6 +988,7 @@ async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
             Some(e) => {
                 let rejected = e.chain().any(|c| {
                     matches!(c.downcast_ref::<async_imap::error::Error>(), Some(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_)))
+                        || c.is::<imap::OpRejected>()
                 });
                 if rejected || op.attempts >= 5 {
                     tracing::warn!(op = op.id, "action failed, rolling back: {e:#}");
