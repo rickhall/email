@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { hint } from '../lib/shortcuts';
 import { Portal } from 'solid-js/web';
 import type { Folder, FolderRole } from '../api';
 import { definedTags, TagMenu } from './Tags';
@@ -258,10 +259,11 @@ function useActions(t: () => ActionTarget | null) {
         if (x.starId == null) return;
         return runAction({ kind: x.starred ? 'unflag' : 'flag' }, { ids: [x.starId], folderId: x.folderId, advance: false });
       case 'move':
-        if (anchor) setPicker(anchor);
+        // The trigger toggles: a second press closes it.
+        if (anchor) setPicker(picker() ? null : anchor);
         return;
       case 'tag-menu':
-        if (anchor) setTagMenu(anchor);
+        if (anchor) setTagMenu(tagMenu() ? null : anchor);
         return;
       case 'tag-clear':
         return clearTags();
@@ -364,47 +366,47 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
   const x = () => props.target;
   return (
     <div class="act-bar" role="toolbar" aria-label="Message actions" classList={{ off: !x() }}>
-      <Btn label="Archive" key="E" onClick={() => void a.command('archive')}>
+      <Btn label="Archive" key={hint('archive')} onClick={() => void a.command('archive')}>
         <ArchiveIcon />
       </Btn>
       <Show
         when={a.inTrash()}
         fallback={
-          <Btn label="Delete" key="#" onClick={() => void a.command('delete')}>
+          <Btn label="Delete" key={hint('delete')} onClick={() => void a.command('delete')}>
             <TrashIcon />
           </Btn>
         }
       >
-        <Btn label="Delete forever" key="#" danger onClick={() => void a.command('delete')}>
+        <Btn label="Delete forever" key={hint('delete')} danger onClick={() => void a.command('delete')}>
           <DeleteForeverIcon />
         </Btn>
       </Show>
-      <Btn label="Move to…" key="V" ref={(e) => (moveBtn = e)} onClick={(el) => void a.command('move', el)}>
+      <Btn label="Move to…" key={hint('move')} ref={(e) => (moveBtn = e)} onClick={(el) => void a.command('move', el)}>
         <MoveIcon />
       </Btn>
       <Show
         when={a.inSpam()}
         fallback={
-          <Btn label="Spam" key="!" onClick={() => void a.command('spam')}>
+          <Btn label="Spam" key={hint('spam')} onClick={() => void a.command('spam')}>
             <JunkIcon />
           </Btn>
         }
       >
-        <Btn label="Not spam" key="!" onClick={() => void a.command('spam')}>
+        <Btn label="Not spam" key={hint('spam')} onClick={() => void a.command('spam')}>
           <InboxIcon />
         </Btn>
       </Show>
-      <Btn label={x()?.anyUnread ? 'Mark as read' : 'Mark as unread'} key="⇧U" onClick={() => void a.command('unread')}>
+      <Btn label={x()?.anyUnread ? 'Mark as read' : 'Mark as unread'} key={hint('unread')} onClick={() => void a.command('unread')}>
         <Show when={x()?.anyUnread} fallback={<UnreadIcon />}>
           <ReadIcon />
         </Show>
       </Btn>
-      <Btn label={x()?.starred ? 'Unstar' : 'Star'} key="S" onClick={() => void a.command('star')}>
+      <Btn label={x()?.starred ? 'Unstar' : 'Star'} key={hint('star')} onClick={() => void a.command('star')}>
         <Show when={x()?.starred} fallback={<StarIcon />}>
           <StarFilledIcon class="icon starred" />
         </Show>
       </Btn>
-      <Btn label="Tag" key="1–9, 0" ref={(e) => (tagBtn = e)} onClick={(el) => void a.command('tag-menu', el)}>
+      <Btn label="Tag" key={`${hint('tag-n')}, ${hint('tag-clear')}`} ref={(e) => (tagBtn = e)} onClick={(el) => void a.command('tag-menu', el)}>
         <TagIcon />
       </Btn>
       {a.pickerEl()}

@@ -23,6 +23,7 @@ import { flyout, RAIL_W, setFlyout, sidebarMode, toggleSidebar } from './lib/lay
 import { events } from './api';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { ConfirmHost } from './components/Actions';
+import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
 import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -49,6 +50,12 @@ export function App() {
   // Ctrl/⌘+1: full ↔ rail · Ctrl/⌘+Shift+1: folder flyout · Ctrl/⌘+G: folder switcher.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      // `?` outside text inputs: the shortcuts sheet (the sheet itself handles `?` to close).
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey && !isTextInput(e.target) && !document.querySelector('.modal-backdrop')) {
+        e.preventDefault();
+        openShortcuts();
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       if (document.querySelector('.modal-backdrop') || (accounts()?.length ?? 0) === 0) return;
       if (e.code === 'Digit1') {
@@ -81,6 +88,9 @@ export function App() {
         case 'add-account':
           // With no accounts the onboarding form is already the whole window.
           if ((accounts()?.length ?? 0) > 0) setShowAdd(true);
+          break;
+        case 'shortcuts':
+          openShortcuts();
           break;
       }
     });
@@ -217,6 +227,7 @@ export function App() {
           <ViewMenuPopover />
           <ManageTagsHost />
           <ConfirmHost />
+          <ShortcutsHost />
           <FolderSwitcherHost />
           <Show when={showAdd()}>
             <AddAccountModal onAdded={added} onClose={() => setShowAdd(false)} />

@@ -312,6 +312,8 @@ export function MessageList(props: {
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
     if (isTypingTarget(e.target)) return;
+    // Enter/Space on a focused button, link or menu item activates it (popup triggers, toolbar…).
+    if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof Element && e.target.closest('button, a[href], summary, [role="button"], [role^="menuitem"], [role="option"]')) return;
     if (document.querySelector('.modal-backdrop')) return;
     // Only one list drives the keyboard: results while searching, the folder otherwise.
     if (!!search !== searchActive()) return;

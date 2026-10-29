@@ -199,7 +199,7 @@ export interface ActionFailedPayload {
 }
 
 /** Native macOS menu bar commands. */
-export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account';
+export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts';
 export interface MenuActionPayload {
   id: MenuActionId;
 }

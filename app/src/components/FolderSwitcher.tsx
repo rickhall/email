@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { hint } from '../lib/shortcuts';
 import { Portal } from 'solid-js/web';
 import type { Account, Folder } from '../api';
 import { avatarColor, fmtNum } from '../lib/format';
@@ -53,7 +54,12 @@ export function parentFolder(f: Folder): Folder | undefined {
 const [open, setOpen] = createSignal(false);
 let returnFocus: HTMLElement | null = null;
 
+/** Its triggers (title, ▾, Ctrl/⌘+G) toggle it. */
 export function openFolderSwitcher(): void {
+  if (open()) {
+    setOpen(false);
+    return;
+  }
   returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   setOpen(true);
 }
@@ -108,14 +114,14 @@ export function FolderCrumbs(props: { folder: Folder }) {
                 </Show>
               }
             >
-              <button class="crumb current" title="Switch folder (Ctrl+G)" onClick={() => openFolderSwitcher()}>
+              <button class="crumb current" title={`Switch folder (${hint('goto')})`} onClick={() => openFolderSwitcher()}>
                 {s.label}
               </button>
             </Show>
           </>
         )}
       </For>
-      <button class="crumb-switch" title="Switch folder (Ctrl+G)" aria-label="Switch folder" aria-haspopup="dialog" aria-expanded={open()} onClick={() => openFolderSwitcher()}>
+      <button class="crumb-switch" title={`Switch folder (${hint('goto')})`} aria-label="Switch folder" aria-haspopup="dialog" aria-expanded={open()} onClick={() => openFolderSwitcher()}>
         <ChevronIcon size={11} />
       </button>
     </h2>
@@ -208,7 +214,10 @@ function Switcher() {
       onKeyDown={(e) => {
         e.stopPropagation();
         const n = folders().length;
-        if (e.key === 'Escape') {
+        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'g') {
+          e.preventDefault();
+          close(true);
+        } else if (e.key === 'Escape') {
           e.preventDefault();
           close(true);
         } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

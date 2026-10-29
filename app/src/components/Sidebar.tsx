@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js';
+import { hint } from '../lib/shortcuts';
 import { createStore } from 'solid-js/store';
 import { api, type Account, type Folder, type FolderRole, type SyncStatus } from '../api';
 import { foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
@@ -505,7 +506,7 @@ export function Sidebar(props: { onAddAccount: () => void; flyout?: boolean }) {
           <button
             class="icon-btn"
             onClick={() => toggleSidebar()}
-            title={props.flyout ? 'Keep sidebar open (Ctrl+1)' : 'Collapse sidebar (Ctrl+1)'}
+            title={`${props.flyout ? 'Keep sidebar open' : 'Collapse sidebar'} (${hint('rail')})`}
             aria-label={props.flyout ? 'Keep sidebar open' : 'Collapse sidebar'}
           >
             <SidebarIcon />

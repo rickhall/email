@@ -156,4 +156,4 @@ Matches sender (name + address), recipients (To/Cc names + addresses) and subjec
 
 | name | payload |
 |---|---|
-| `menu-action` | `{ id: 'search' \| 'toggle-threaded' \| 'toggle-scope' \| 'add-account' }` — sent by the native macOS menu bar (the window is shown/focused first) |
+| `menu-action` | `{ id: 'search' \| 'toggle-threaded' \| 'toggle-scope' \| 'add-account' \| 'shortcuts' }` — sent by the native macOS menu bar (the window is shown/focused first) |

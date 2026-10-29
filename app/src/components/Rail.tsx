@@ -1,4 +1,5 @@
 import { createMemo, For, Show } from 'solid-js';
+import { hint } from '../lib/shortcuts';
 import type { Account, Folder } from '../api';
 import { avatarColor, fmtNum } from '../lib/format';
 import { flyout, setFlyout, toggleSidebar } from '../lib/layout';
@@ -56,12 +57,12 @@ export function Rail() {
   return (
     <nav class="rail" aria-label="Mailboxes">
       <div class="rail-top" data-tauri-drag-region={DRAG}>
-        <button class="rail-btn" title="Expand sidebar (Ctrl+1)" aria-label="Expand sidebar" onClick={() => toggleSidebar()}>
+        <button class="rail-btn" title={`Expand sidebar (${hint('rail')})`} aria-label="Expand sidebar" onClick={() => toggleSidebar()}>
           <SidebarIcon size={17} />
         </button>
         <button
           class="rail-btn"
-          title="All folders (Ctrl+Shift+1)"
+          title={`All folders (${hint('flyout')})`}
           aria-label="Show all folders"
           onClick={(e) => {
             if (flyout()) {

@@ -9,6 +9,8 @@ import {
   threaded,
 } from '../state';
 import { CheckIcon, SlidersIcon } from './Icons';
+import { hint } from '../lib/shortcuts';
+import { openShortcuts } from './ShortcutsSheet';
 
 // Module-level so the menu stays open while the list remounts on "Group by conversation".
 const [open, setOpen] = createSignal(false);
@@ -97,7 +99,7 @@ export function ViewMenuPopover() {
           >
             <Check on={threaded()} />
             <span class="vm-label">Group by conversation</span>
-            <kbd>T</kbd>
+            <kbd>{hint('threaded')}</kbd>
           </button>
           <div class="vm-sep" />
           <div class="vm-section">Conversations show</div>
@@ -109,7 +111,7 @@ export function ViewMenuPopover() {
           >
             <Check on={conversationScope() === 'folder'} radio />
             <span class="vm-label">This folder</span>
-            <kbd>A</kbd>
+            <kbd>{hint('scope')}</kbd>
           </button>
           <button
             role="menuitemradio"
@@ -129,6 +131,19 @@ export function ViewMenuPopover() {
           >
             <Check on={includeTrash()} />
             <span class="vm-label">Include Trash</span>
+          </button>
+          <div class="vm-sep" />
+          <button
+            role="menuitem"
+            class="vm-item"
+            onClick={() => {
+              setOpen(false);
+              openShortcuts();
+            }}
+          >
+            <span class="vm-check" aria-hidden="true" />
+            <span class="vm-label">Keyboard shortcuts</span>
+            <kbd>{hint('shortcuts')}</kbd>
           </button>
         </div>
       </Portal>

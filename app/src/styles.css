@@ -3333,3 +3333,142 @@ html.macos .app.rail-mode .search-bar {
   opacity: 0;
   cursor: pointer;
 }
+
+/* ==========================================================================
+   Search help + keyboard shortcuts sheet
+   ========================================================================== */
+
+/* fixed slot at the field's right end: "?" while empty, × while typing */
+.search-slot {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+}
+.search-help-btn {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.search-help-btn:hover,
+.search-help-btn[aria-expanded='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.search-help {
+  position: fixed;
+  z-index: 130;
+  padding: 12px 14px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--sep);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-card);
+  animation: pop-in 120ms var(--ease);
+  transform-origin: top left;
+  font-size: 12.5px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sh-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+.sh-table {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 3px 12px;
+}
+.sh-ex {
+  justify-self: start;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg-hover);
+  cursor: pointer;
+}
+.sh-ex code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+.sh-ex:hover {
+  background: var(--accent-soft);
+}
+.sh-ex:hover code {
+  color: var(--accent);
+}
+.sh-desc {
+  color: var(--text-3);
+}
+.sh-note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.sh-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--sep);
+  font-size: 12px;
+}
+
+.modal.shortcuts-sheet {
+  max-width: 980px;
+  width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  outline: none;
+}
+.sc-grid {
+  columns: 3 270px;
+  column-gap: 28px;
+}
+.sc-section {
+  break-inside: avoid;
+  margin-bottom: 18px;
+}
+.sc-section h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.sc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 26px;
+  font-size: 12.5px;
+}
+.sc-keys {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 112px;
+}
+.sc-combo {
+  display: inline-flex;
+  gap: 2px;
+}
+.sc-or {
+  color: var(--text-4);
+  font-size: 11px;
+}
+.sc-desc {
+  color: var(--text-2);
+}

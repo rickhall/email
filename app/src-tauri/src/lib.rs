@@ -433,6 +433,12 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
             &PredefinedMenuItem::fullscreen(app, None)?,
         ],
     )?;
+    let help = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[&MenuItem::with_id(app, "shortcuts", "Keyboard Shortcuts", true, Some("CmdOrCtrl+/"))?],
+    )?;
     let window = Submenu::with_items(
         app,
         "Window",
@@ -444,7 +450,7 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
             &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &edit, &view, &window])
+    Menu::with_items(app, &[&app_menu, &edit, &view, &window, &help])
 }
 
 #[cfg(target_os = "macos")]

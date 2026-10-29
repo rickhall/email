@@ -122,6 +122,13 @@ export const MailIcon = (p: P) => (
     <path d="m2.5 4.5 5.5 4 5.5-4" />
   </Svg>
 );
+export const HelpIcon = (p: P) => (
+  <Svg {...p}>
+    <circle cx="8" cy="8" r="6" />
+    <path d="M6.3 6.2a1.8 1.8 0 0 1 3.5.5c0 1.2-1.8 1.5-1.8 2.6" />
+    <path d="M8 11.4h.01" />
+  </Svg>
+);
 export const TagIcon = (p: P) => (
   <Svg {...p}>
     <path d="M2.5 3.5v4.1l6.4 6.4 5.1-5.1-6.4-6.4H3.5a1 1 0 0 0-1 1z" />

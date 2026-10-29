@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
+import { hint } from '../lib/shortcuts';
 import { createStore } from 'solid-js/store';
 import { Portal } from 'solid-js/web';
 import { api, errorMessage, type Attachment } from '../api';
@@ -253,7 +254,7 @@ function AttachmentMenu(props: {
                     tabIndex={-1}
                     aria-label={`Save ${a.name}`}
                     aria-disabled={!!b()}
-                    title="Save to Downloads (Shift+Enter)"
+                    title={`Save to Downloads (${hint('att-save')})`}
                     onClick={(e) => {
                       e.stopPropagation();
                       void runAttachment(props.messageId, a, 'save');
