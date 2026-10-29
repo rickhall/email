@@ -33,7 +33,7 @@ const CARD_FRAME_CSS = 'html{overflow-y:hidden}body{padding:4px 20px 20px}';
  * email can't run code: it's sanitised and the document's CSP has script-src 'none' (see
  * `buildSrcdoc`). Built imperatively so sandbox + srcdoc are set before attachment.
  */
-function AutoHeightFrame(props: { doc: string }) {
+export function AutoHeightFrame(props: { doc: string }) {
   let host!: HTMLDivElement;
   createEffect(() => {
     const f = document.createElement('iframe');
@@ -432,6 +432,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
       folderId: t.folderId,
       anyUnread: state.list.some((m) => m.unread),
       starId: newest.id,
+      replyId: newest.id,
       starred: newest.flagged,
       advance: true,
       tagSets: state.list.map((m) => m.tags ?? []),
@@ -443,6 +444,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
     folderId: t.folderId,
     anyUnread: m.unread,
     starId: m.id,
+    replyId: m.id,
     starred: m.flagged,
     advance: m.folderId === t.folderId && !state.list.some((x) => x.id !== m.id && x.folderId === t.folderId),
     tagSets: [m.tags ?? []],

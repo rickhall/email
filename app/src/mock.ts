@@ -1558,6 +1558,44 @@ export function createMockBackend(): Backend {
       });
       return { id, sendAt };
     },
+    async reply_context({ id, mode }) {
+      await sleep(30);
+      const m = byId.get(id);
+      if (!m) throw 'no such message';
+      const d = buildDetail(m, false);
+      const md = meta.get(id);
+      const acc = accounts.find((a) => a.id === md?.accountId) ?? accounts[0]!;
+      const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const who = (a: { name: string | null; addr: string }) => (a.name ? `${esc(a.name)} &lt;${esc(a.addr)}&gt;` : esc(a.addr));
+      const original = d.html ?? `<div>${esc(d.text ?? '').replace(/\n/g, '<br>')}</div>`;
+      const when = new Date(d.date * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+      const strip = (x: string) => x.replace(/^((re|fwd?|aw|wg)(\[\d+\])?:\s*)+/i, '');
+      if (mode === 'forward') {
+        return {
+          accountId: acc.id,
+          to: [],
+          cc: [],
+          subject: `Fwd: ${strip(d.subject)}`,
+          quoteHtml: `<div class="gmail_quote"><div dir="ltr" class="gmail_attr">---------- Forwarded message ---------<br>From: ${who(d.from)}<br>Date: ${esc(when)}<br>Subject: ${esc(d.subject)}<br>To: ${d.to.map(who).join(', ')}<br></div><br><br>${original}</div>`,
+          replyingTo: null,
+          forwarding: id,
+          attachments: d.attachments,
+        };
+      }
+      const me = acc.email.toLowerCase();
+      const to = [d.from].filter((a) => a.addr.toLowerCase() !== me);
+      const cc = mode === 'replyAll' ? [...d.to, ...d.cc].filter((a) => a.addr.toLowerCase() !== me && !to.some((t) => t.addr === a.addr)) : [];
+      return {
+        accountId: acc.id,
+        to: to.length ? to : [d.from],
+        cc,
+        subject: `Re: ${strip(d.subject)}`,
+        quoteHtml: `<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On ${esc(when)}, ${who(d.from)} wrote:<br></div><blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">${original}</blockquote></div>`,
+        replyingTo: id,
+        forwarding: null,
+        attachments: [],
+      };
+    },
     async cancel_send({ id }) {
       await sleep(10);
       const o = outgoing.get(id);

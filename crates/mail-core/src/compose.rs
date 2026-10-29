@@ -178,6 +178,48 @@ pub struct Original {
     pub in_reply_to: Option<String>,
 }
 
+// ------------------------------------------------------------- quoting
+
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Plain text as HTML for quoting: escaped, line breaks kept.
+pub fn text_to_html(text: &str) -> String {
+    escape_html(text.trim_end()).replace("\r\n", "\n").replace('\n', "<br>\n")
+}
+
+/// "Jane Doe <jane@example.net>" (escaped), or just the address.
+pub fn display_addr(a: &Addr) -> String {
+    match a.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => format!("{} &lt;{}&gt;", escape_html(n), escape_html(&a.addr)),
+        None => escape_html(&a.addr),
+    }
+}
+
+const QUOTE_STYLE: &str = "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex";
+
+/// The original under a reply, in Gmail's markup (Gmail and Thunderbird fold it away; our own
+/// reader recognises it too). `attribution`: "On …, Jane <jane@…> wrote:" (escaped HTML).
+pub fn reply_quote(attribution: &str, original_html: &str) -> String {
+    format!(
+        "<div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">{attribution}<br></div>\
+         <blockquote class=\"gmail_quote\" style=\"{QUOTE_STYLE}\">{original_html}</blockquote></div>"
+    )
+}
+
+/// A forwarded message under the new text: Gmail's "Forwarded message" header block, then the
+/// original. `headers`: (label, escaped value) pairs, e.g. ("From", …).
+pub fn forward_quote(headers: &[(&str, String)], original_html: &str) -> String {
+    let mut h = String::from("---------- Forwarded message ---------<br>");
+    for (label, value) in headers {
+        if !value.is_empty() {
+            h.push_str(&format!("{label}: {value}<br>"));
+        }
+    }
+    format!("<div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">{h}</div><br><br>{original_html}</div>")
+}
+
 /// To and Cc for a reply. `me`: this account's addresses (never replied to, unless the
 /// original is our own message, then it goes back to its recipients).
 pub fn reply_recipients(orig: &Original, me: &[String], all: bool) -> (Vec<Addr>, Vec<Addr>) {
@@ -306,6 +348,35 @@ mod tests {
         // Replying to our own sent message goes to its recipients.
         let sent = Original { from: vec![a("john.doe@example.com")], to: vec![a("bob@example.org")], cc: vec![a("carol@example.org")], ..Default::default() };
         assert_eq!(reply_recipients(&sent, &me, true), (vec![a("bob@example.org")], vec![a("carol@example.org")]));
+    }
+
+    #[test]
+    fn quotes() {
+        assert_eq!(text_to_html("a < b\r\nc & d\n"), "a &lt; b<br>\nc &amp; d");
+        assert_eq!(display_addr(&n("Jane <x>", "jane@example.net")), "Jane &lt;x&gt; &lt;jane@example.net&gt;");
+        let q = reply_quote("On Thu, Jane wrote:", "<p>hi</p>");
+        assert!(q.starts_with("<div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">On Thu, Jane wrote:<br></div><blockquote"));
+        assert!(q.ends_with("<p>hi</p></blockquote></div>"));
+        let f = forward_quote(&[("From", "Jane".into()), ("Cc", String::new()), ("Subject", "Plans".into())], "<p>body</p>");
+        assert!(f.contains("Forwarded message") && f.contains("From: Jane<br>") && f.contains("Subject: Plans<br>"));
+        assert!(!f.contains("Cc:"), "empty headers are left out");
+
+        // A reply as sent: threading headers, our text, then the quote.
+        let msg = Outgoing {
+            from: Some(a("john.doe@example.com")),
+            to: vec![n("Jane", "jane@example.net")],
+            subject: reply_subject("Plans"),
+            html: format!("<p>Sounds good.</p>{q}"),
+            in_reply_to: Some("c@x".into()),
+            references: vec!["a@x".into(), "c@x".into()],
+            ..Default::default()
+        };
+        let parsed_raw = build(&msg, "r@example.com", 1_700_000_000).unwrap();
+        let parsed = mail_parser::MessageParser::default().parse(&parsed_raw).unwrap();
+        assert_eq!(parsed.subject(), Some("Re: Plans"));
+        assert_eq!(parsed.in_reply_to().as_text(), Some("c@x"));
+        let text = parsed.body_text(0).unwrap();
+        assert!(text.contains("Sounds good.") && text.contains("Jane wrote:") && text.contains("hi"), "{text}");
     }
 
     #[test]

@@ -103,6 +103,11 @@ export const ReplyIcon = (p: P) => (
     <path d="M6 3.5 2.5 7 6 10.5M2.5 7H9a4.5 4.5 0 0 1 4.5 4.5v1" />
   </Svg>
 );
+export const ReplyAllIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M5 3.5 1.5 7 5 10.5M8.5 3.5 5 7l3.5 3.5M5 7h5a4 4 0 0 1 4 4v1.5" />
+  </Svg>
+);
 export const ForwardIcon = (p: P) => (
   <Svg {...p}>
     <path d="M10 3.5 13.5 7 10 10.5M13.5 7H7a4.5 4.5 0 0 0-4.5 4.5v1" />

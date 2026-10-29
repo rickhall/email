@@ -526,7 +526,12 @@ fn init_logging(dir: Option<std::path::PathBuf>) {
 
 #[tauri::command]
 async fn send_message(core: State<'_, Arc<Core>>, request: SendRequest) -> Res<SendQueued> {
-    core.send_message(request).map_err(err)
+    core.send_message(request).await.map_err(err)
+}
+
+#[tauri::command]
+async fn reply_context(core: State<'_, Arc<Core>>, id: i64, mode: ReplyMode) -> Res<ReplyContext> {
+    core.reply_context(id, mode).await.map_err(err)
 }
 
 #[tauri::command]
@@ -615,6 +620,7 @@ pub fn run() {
             next_unread,
             show_log,
             send_message,
+            reply_context,
             cancel_send,
             list_tags,
             set_tag,

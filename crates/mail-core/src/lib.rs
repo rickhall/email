@@ -381,9 +381,80 @@ impl Core {
         self.store.index_of(folder_id, id, threaded)
     }
 
+    /// A message's detail, downloading its body first if it isn't local yet (waits up to 30 s).
+    async fn detail_now(&self, id: i64) -> Result<MessageDetail> {
+        let mut rx = self.events.subscribe();
+        if let Some(d) = self.get_message(id)? {
+            return Ok(d);
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Err(_) => bail!("Couldn't download the original message."),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => bail!("shutting down"),
+                Ok(_) => {}
+            }
+            if let Some(d) = self.get_message(id)? {
+                return Ok(d);
+            }
+        }
+    }
+
+    /// Prefill a reply, reply-all or forward of message `id`: recipients (Reply-To honoured; our
+    /// own address left out), subject, and the quoted original in Gmail's markup.
+    pub async fn reply_context(&self, id: i64, mode: ReplyMode) -> Result<ReplyContext> {
+        let account_id = self.store.message_account(id)?.ok_or_else(|| anyhow!("no such message"))?;
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
+        let d = self.detail_now(id).await?;
+        let raw = self.store.body(id)?.unwrap_or_default();
+        let original = d.html.clone().unwrap_or_else(|| compose::text_to_html(d.text.as_deref().unwrap_or("")));
+        let when = chrono::DateTime::from_timestamp(d.date, 0)
+            .map(|t| t.with_timezone(&chrono::Local).format("%a, %b %-d, %Y at %-I:%M %p").to_string())
+            .unwrap_or_default();
+        if mode == ReplyMode::Forward {
+            let list = |l: &[Addr]| l.iter().map(compose::display_addr).collect::<Vec<_>>().join(", ");
+            let headers = [
+                ("From", compose::display_addr(&d.from)),
+                ("Date", compose::escape_html(&when)),
+                ("Subject", compose::escape_html(&d.subject)),
+                ("To", list(&d.to)),
+                ("Cc", list(&d.cc)),
+            ];
+            return Ok(ReplyContext {
+                account_id,
+                to: vec![],
+                cc: vec![],
+                subject: compose::forward_subject(&d.subject),
+                quote_html: compose::forward_quote(&headers, &original),
+                replying_to: None,
+                forwarding: Some(id),
+                attachments: d.attachments,
+            });
+        }
+        let orig = compose::Original {
+            from: vec![d.from.clone()],
+            reply_to: mime::reply_to(&raw),
+            to: d.to.clone(),
+            cc: d.cc.clone(),
+            ..Default::default()
+        };
+        let (to, cc) = compose::reply_recipients(&orig, &[account.email.clone()], mode == ReplyMode::ReplyAll);
+        let attribution = format!("On {}, {} wrote:", compose::escape_html(&when), compose::display_addr(&d.from));
+        Ok(ReplyContext {
+            account_id,
+            to,
+            cc,
+            subject: compose::reply_subject(&d.subject),
+            quote_html: compose::reply_quote(&attribution, &original),
+            replying_to: Some(id),
+            forwarding: None,
+            attachments: vec![],
+        })
+    }
+
     /// Queue a message: built now, sent after the undo window (`SEND_DELAY_MS`) unless taken
     /// back with `cancel_send`.
-    pub fn send_message(&self, req: SendRequest) -> Result<SendQueued> {
+    pub async fn send_message(&self, req: SendRequest) -> Result<SendQueued> {
         let account = self.store.accounts()?.into_iter().find(|a| a.id == req.account_id).ok_or_else(|| anyhow!("no such account"))?;
         if account.smtp().is_none() {
             bail!("No outgoing (SMTP) server is set for {}.", account.email);
@@ -403,6 +474,12 @@ impl Core {
         }
         if let Some(orig) = req.replying_to.map(|id| self.store.threading_of(id)).transpose()?.flatten() {
             (msg.in_reply_to, msg.references) = compose::reply_threading(&orig);
+        }
+        if let Some(fwd) = req.forwarding {
+            for &index in &req.forward_attachments {
+                let (name, content_type, data) = self.attachment(fwd, index).await?;
+                msg.attachments.push(compose::OutAttachment { name, content_type, data });
+            }
         }
         for path in &req.attachments {
             let p = std::path::Path::new(path);

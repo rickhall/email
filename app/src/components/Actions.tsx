@@ -5,21 +5,8 @@ import type { Folder, FolderRole } from '../api';
 import { definedTags, TagMenu } from './Tags';
 import { clearHeaderHandler, runAction, setHeaderHandler, type BarCommand } from '../lib/actions';
 import { foldersByAccount, folderById } from '../state';
-import {
-  ArchiveIcon,
-  DeleteForeverIcon,
-  InboxIcon,
-  JunkIcon,
-  MoreIcon,
-  MoveIcon,
-  ReadIcon,
-  RoleIcon,
-  StarFilledIcon,
-  StarIcon,
-  TagIcon,
-  TrashIcon,
-  UnreadIcon,
-} from './Icons';
+import { ArchiveIcon, DeleteForeverIcon, ForwardIcon, InboxIcon, JunkIcon, MoreIcon, MoveIcon, ReadIcon, ReplyAllIcon, ReplyIcon, RoleIcon, StarFilledIcon, StarIcon, TagIcon, TrashIcon, UnreadIcon } from './Icons';
+import { startReply } from '../lib/compose';
 
 // ------------------------------------------------------------- popover placement
 
@@ -220,6 +207,8 @@ export interface ActionTarget {
   anyUnread: boolean;
   /** message whose star the Star button toggles */
   starId: number | null;
+  /** message Reply / Reply all / Forward start from (a conversation's newest) */
+  replyId: number | null;
   starred: boolean;
   /** open the next older item when this removes what's being viewed */
   advance: boolean;
@@ -267,6 +256,11 @@ function useActions(t: () => ActionTarget | null) {
         return;
       case 'tag-clear':
         return clearTags();
+      case 'reply':
+      case 'replyAll':
+      case 'forward':
+        if (x.replyId != null) return startReply(x.replyId, c);
+        return;
       default: {
         // tag-N: toggle the Nth defined tag
         const t = definedTags()[Number(c.slice(4)) - 1];
@@ -366,6 +360,16 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
   const x = () => props.target;
   return (
     <div class="act-bar" role="toolbar" aria-label="Message actions" classList={{ off: !x() }}>
+      <Btn label="Reply" key={hint('reply')} onClick={() => void a.command('reply')}>
+        <ReplyIcon />
+      </Btn>
+      <Btn label="Reply all" key={hint('reply-all')} onClick={() => void a.command('replyAll')}>
+        <ReplyAllIcon />
+      </Btn>
+      <Btn label="Forward" key={hint('forward')} onClick={() => void a.command('forward')}>
+        <ForwardIcon />
+      </Btn>
+      <span class="act-sep" />
       <Btn label="Archive" key={hint('archive')} onClick={() => void a.command('archive')}>
         <ArchiveIcon />
       </Btn>
@@ -422,6 +426,9 @@ export function CardActions(props: { target: ActionTarget }) {
   let moreBtn!: HTMLButtonElement;
   return (
     <span class="card-acts" onClick={(e) => e.stopPropagation()}>
+      <Btn label="Reply" onClick={() => void a.command('reply')}>
+        <ReplyIcon size={14} />
+      </Btn>
       <Btn label="Archive" onClick={() => void a.command('archive')}>
         <ArchiveIcon size={14} />
       </Btn>
@@ -469,6 +476,8 @@ function CardMenu(props: { anchor: HTMLElement; target: ActionTarget; inSpam: bo
     }),
   );
   const items: [BarCommand, () => string][] = [
+    ['replyAll', () => 'Reply all'],
+    ['forward', () => 'Forward'],
     ['move', () => 'Move to…'],
     ['tag-menu', () => 'Tag…'],
     ['spam', () => (props.inSpam ? 'Not spam' : 'Spam')],

@@ -1,7 +1,8 @@
 import { createSignal } from 'solid-js';
 import { accounts, folderById, selectedFolderId } from '../state';
-import { api, errorMessage, events, type Addr } from '../api';
+import { api, errorMessage, events, type Addr, type Attachment, type ReplyMode } from '../api';
 import { hideToast, showToast } from '../components/Toast';
+import { confirmDialog } from '../components/Actions';
 
 // The composer: one message at a time, written in the reader pane. Sending queues it in the
 // core, which sends after the undo window; Undo (or a failure's "Edit") reopens it as it was.
@@ -23,6 +24,10 @@ export interface ComposeState {
   html: string;
   replyingTo: number | null;
   forwarding: number | null;
+  /** the original, sent under the new text (Gmail-style quote / forward block); null for new */
+  quoteHtml: string | null;
+  /** forward: the original's attachments still to send along */
+  fwdAttachments: Attachment[];
 }
 
 let keySeq = 0;
@@ -52,7 +57,36 @@ export function newMessage(): void {
     html: '',
     replyingTo: null,
     forwarding: null,
+    quoteHtml: null,
+    fwdAttachments: [],
   });
+}
+
+/** Reply, reply all or forward message `id` (prefilled by the core). A message already being
+ *  written is only replaced after asking. */
+export async function startReply(id: number, mode: ReplyMode): Promise<void> {
+  const cur = compose();
+  if (cur && hasContent(cur) && !(await confirmDialog('Discard the message you’re writing?', 'Discard'))) return;
+  try {
+    const r = await api.replyContext(id, mode);
+    setCompose({
+      key: ++keySeq,
+      mode,
+      accountId: r.accountId,
+      to: r.to,
+      cc: r.cc,
+      bcc: [],
+      showCc: r.cc.length > 0,
+      subject: r.subject,
+      html: '',
+      replyingTo: r.replyingTo,
+      forwarding: r.forwarding,
+      quoteHtml: r.quoteHtml,
+      fwdAttachments: r.attachments,
+    });
+  } catch (e) {
+    showToast({ kind: 'error', text: errorMessage(e) });
+  }
 }
 
 /** Keep the composer's latest fields (editor typing, address edits). */
@@ -94,10 +128,12 @@ export async function send(c: ComposeState): Promise<void> {
       cc: c.cc,
       bcc: c.bcc,
       subject: c.subject,
-      html: c.html,
+      // Top-posting: the new text, then the original.
+      html: c.html + (c.quoteHtml ?? ''),
       attachments: [],
       replyingTo: c.replyingTo,
       forwarding: c.forwarding,
+      forwardAttachments: c.fwdAttachments.map((a) => a.index),
       draft: c,
     });
     if (compose()?.key === c.key) setCompose(null);

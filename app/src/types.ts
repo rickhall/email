@@ -217,8 +217,26 @@ export interface SendRequest {
   replyingTo: number | null;
   /** message being forwarded (marked forwarded once sent) */
   forwarding: number | null;
+  /** attachments of `forwarding` to send along (their index) */
+  forwardAttachments: number[];
   /** the composer's own state, handed back by cancel_send to reopen it */
   draft: unknown;
+}
+
+export type ReplyMode = 'reply' | 'replyAll' | 'forward';
+
+/** A reply / forward, prefilled by the core (recipients, subject, quoted original). */
+export interface ReplyContext {
+  accountId: number;
+  to: Addr[];
+  cc: Addr[];
+  subject: string;
+  /** HTML sent under the new text (Gmail-style quote or forward block) */
+  quoteHtml: string;
+  replyingTo: number | null;
+  forwarding: number | null;
+  /** forward: the original's attachments (sent along unless removed) */
+  attachments: Attachment[];
 }
 
 /** queued: sent at `sendAt` (ms) unless taken back with cancel_send(id) */
@@ -310,6 +328,7 @@ export interface CommandMap {
   show_log: { args: undefined; ret: void };
   send_message: { args: { request: SendRequest }; ret: SendQueued };
   cancel_send: { args: { id: number }; ret: unknown | null };
+  reply_context: { args: { id: number; mode: ReplyMode }; ret: ReplyContext };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

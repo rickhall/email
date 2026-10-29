@@ -3944,3 +3944,71 @@ html.macos .app.rail-mode .search-bar {
 .list-scroll:focus-within .row.selected .send-state {
   color: var(--sel-muted);
 }
+
+/* composer: forwarded attachments and the quoted original under the text */
+.cmp-atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 14px;
+}
+.cmp-att {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 280px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--sep);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.cmp-att-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmp-att-size {
+  flex: none;
+  color: var(--text-4);
+}
+.cmp-quote {
+  margin-top: 4px;
+  cursor: default;
+}
+.act-sep {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--sep);
+}
+/* replies: less room reserved above the quote */
+.cmp-editor.has-quote .ProseMirror {
+  min-height: 64px;
+}
+.cmp-quote-pill {
+  margin: 2px 0 8px;
+}
+/* borderless composer inputs: the caret is the focus indication */
+.addr-input:focus-visible,
+.cmp-subject:focus-visible,
+.cmp-select:focus-visible {
+  box-shadow: none;
+}
+/* the reply quote's "•••" pill: same look as the reader's (lib/quotes.ts) */
+.cmp-quote-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 10px;
+  border-radius: 9px;
+  background: #eef0f3;
+  color: #5c6170;
+  font: 500 11.5px/18px var(--font);
+}
+.cmp-quote-pill:hover {
+  background: #e3e6eb;
+  color: #3b3f48;
+}

@@ -8,7 +8,13 @@ import { closeCompose, compose, hasContent, isAddress, parseAddresses, send, upd
 import { MOD } from '../lib/shortcuts';
 import { DRAG } from '../lib/platform';
 import { confirmDialog } from './Actions';
-import { CloseIcon, TrashIcon } from './Icons';
+import { CloseIcon, PaperclipIcon, TrashIcon } from './Icons';
+import { AutoHeightFrame } from './Conversation';
+import { buildSrcdoc } from './Reader';
+import { fmtSize } from '../lib/format';
+
+/** The quoted original under the text: read-only, at the composer's margins. */
+const QUOTE_FRAME_CSS = 'html{overflow-y:hidden}body{padding:0 0 12px}';
 
 // ------------------------------------------------------------- address field
 
@@ -191,6 +197,7 @@ export function Composer() {
   const [editor, setEditor] = createSignal<Editor>();
   const [tick, setTick] = createSignal(0);
   const [linking, setLinking] = createSignal(false);
+  const [showQuote, setShowQuote] = createSignal(false);
   const c = () => compose() as ComposeState;
 
   onMount(() => {
@@ -251,7 +258,7 @@ export function Composer() {
     <section class="reader composer" aria-label="New message" ref={root}>
       <header class="reader-band cmp-band" data-tauri-drag-region={DRAG}>
         <h1 class="reader-subject" title={c().subject || 'New message'}>
-          {c().subject.trim() || 'New message'}
+          {c().subject.trim() || { new: 'New message', reply: 'Reply', replyAll: 'Reply all', forward: 'Forward' }[c().mode]}
         </h1>
         <div class="band-meta cmp-actions" data-tauri-drag-region={DRAG}>
           <span class="cmp-hint">{MOD === '⌘' ? '⌘↵' : 'Ctrl+Enter'} to send · Esc to close</span>
@@ -316,7 +323,45 @@ export function Composer() {
       </div>
       <Toolbar editor={editor} tick={tick} linking={linking()} setLinking={setLinking} />
       <div class="cmp-scroll" onMouseDown={(e) => e.target === e.currentTarget && (e.preventDefault(), editor()?.commands.focus('end'))}>
-        <div class="cmp-editor" ref={editorEl} />
+        <div class="cmp-editor" classList={{ 'has-quote': !!c().quoteHtml || c().fwdAttachments.length > 0 }} ref={editorEl} />
+        <Show when={c().fwdAttachments.length > 0}>
+          <div class="cmp-atts" aria-label="Attachments">
+            <For each={c().fwdAttachments}>
+              {(a) => (
+                <span class="cmp-att" title={a.name}>
+                  <PaperclipIcon size={12} />
+                  <span class="cmp-att-name">{a.name}</span>
+                  <span class="cmp-att-size">{fmtSize(a.size)}</span>
+                  <button
+                    class="addr-x"
+                    aria-label={`Don't send ${a.name}`}
+                    title="Remove"
+                    onClick={() => updateCompose({ fwdAttachments: c().fwdAttachments.filter((x) => x.index !== a.index) })}
+                  >
+                    <CloseIcon size={9} />
+                  </button>
+                </span>
+              )}
+            </For>
+          </div>
+        </Show>
+        <Show when={c().quoteHtml}>
+          {(q) => (
+            // A reply's quote is folded (it can be a whole conversation); a forward's is the content.
+            <Show
+              when={c().mode === 'forward' || showQuote()}
+              fallback={
+                <button class="quote-pill cmp-quote-pill" title="Show quoted text" aria-label="Show quoted text" onClick={() => setShowQuote(true)}>
+                  •••
+                </button>
+              }
+            >
+              <div class="cmp-quote" aria-label={c().mode === 'forward' ? 'Forwarded message' : 'Quoted message'}>
+                <AutoHeightFrame doc={buildSrcdoc(q(), false, QUOTE_FRAME_CSS)} />
+              </div>
+            </Show>
+          )}
+        </Show>
       </div>
     </section>
   );

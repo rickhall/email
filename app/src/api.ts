@@ -3,6 +3,8 @@ import type {
   Action,
   ActionResult,
   NextUnread,
+  ReplyContext,
+  ReplyMode,
   SendQueued,
   SendRequest,
   AddAccountArgs,
@@ -116,6 +118,8 @@ export const api = {
     call('next_unread', { folderId, after, threaded }),
   /** Queue a message; it goes out after the undo window unless cancelSend(id) takes it back. */
   sendMessage: (request: SendRequest): Promise<SendQueued> => call('send_message', { request }),
+  /** Prefill a reply / reply-all / forward of a message (downloads it first if needed). */
+  replyContext: (id: number, mode: ReplyMode): Promise<ReplyContext> => call('reply_context', { id, mode }),
   /** Take back a queued (or failed) message: its draft, to reopen the composer. */
   cancelSend: (id: number): Promise<unknown | null> => call('cancel_send', { id }),
   /** Reveal the app's log file in the file manager. */

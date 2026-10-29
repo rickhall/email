@@ -42,6 +42,11 @@ fn addr_list(a: Option<&Address>) -> Vec<Addr> {
     .unwrap_or_default()
 }
 
+/// The Reply-To addresses of a raw message (empty if none).
+pub fn reply_to(raw: &[u8]) -> Vec<Addr> {
+    mail_parser::MessageParser::default().parse(raw).map(|m| addr_list(m.reply_to())).unwrap_or_default()
+}
+
 /// Message-IDs in a raw Message-ID / In-Reply-To / References value, without angle brackets.
 ///
 /// Tolerant of what's found in real archives (after the emailer prototype's parser): only

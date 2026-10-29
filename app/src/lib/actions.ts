@@ -197,7 +197,19 @@ export function undoLast(): boolean {
 // ------------------------------------------------------------- reader header shortcuts
 
 /** `tag-N`: toggle the Nth tag (1–9) · `tag-clear`: remove all · `tag-menu`: open the Tag menu */
-export type BarCommand = 'archive' | 'delete' | 'move' | 'spam' | 'unread' | 'star' | 'tag-menu' | 'tag-clear' | `tag-${number}`;
+export type BarCommand =
+  | 'archive'
+  | 'delete'
+  | 'move'
+  | 'spam'
+  | 'unread'
+  | 'star'
+  | 'reply'
+  | 'replyAll'
+  | 'forward'
+  | 'tag-menu'
+  | 'tag-clear'
+  | `tag-${number}`;
 let headerHandler: ((c: BarCommand) => void) | null = null;
 /** The reader header's action bar registers itself; shortcuts drive it. */
 export function setHeaderHandler(fn: ((c: BarCommand) => void) | null): void {
@@ -207,7 +219,18 @@ export function clearHeaderHandler(fn: (c: BarCommand) => void): void {
   if (headerHandler === fn) headerHandler = null;
 }
 
-const BAR_COMMANDS = new Set(['archive', 'delete', 'move', 'spam', 'unread', 'star']);
+/** Keymap command → reader bar command. */
+const BAR_COMMANDS: Record<string, BarCommand> = {
+  archive: 'archive',
+  delete: 'delete',
+  move: 'move',
+  spam: 'spam',
+  unread: 'unread',
+  star: 'star',
+  reply: 'reply',
+  'reply-all': 'replyAll',
+  forward: 'forward',
+};
 
 /** Archive, delete, move, spam, read/unread, star, undo and the tag digits (keys from the
  *  keymap) — returns true when handled. */
@@ -219,8 +242,9 @@ export function runShortcut(e: KeyboardEvent): boolean {
   }
   const cmd = commandFor(e);
   if (cmd === 'undo') return undoLast() || true;
-  if (!cmd || !BAR_COMMANDS.has(cmd)) return false;
-  headerHandler?.(cmd as BarCommand);
+  const bar = cmd ? BAR_COMMANDS[cmd] : undefined;
+  if (!bar) return false;
+  headerHandler?.(bar);
   return true;
 }
 

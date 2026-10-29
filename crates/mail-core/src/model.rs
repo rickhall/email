@@ -311,8 +311,37 @@ pub struct SendRequest {
     pub replying_to: Option<i64>,
     /// The message this forwards: `$Forwarded` once sent.
     pub forwarding: Option<i64>,
+    /// Attachments of `forwarding` to send along (their `index`).
+    #[serde(default)]
+    pub forward_attachments: Vec<usize>,
     /// The composer's own state, handed back by `cancel_send` (undo) to reopen it.
     pub draft: Option<serde_json::Value>,
+}
+
+/// What a reply or forward starts from (see `Core::reply_context`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplyMode {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+/// A reply or forward, prefilled: recipients, subject, and the quoted original to send under
+/// the new text.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyContext {
+    pub account_id: i64,
+    pub to: Vec<Addr>,
+    pub cc: Vec<Addr>,
+    pub subject: String,
+    /// HTML appended under the new text (Gmail-style quote or forward block).
+    pub quote_html: String,
+    pub replying_to: Option<i64>,
+    pub forwarding: Option<i64>,
+    /// Forward: the original's attachments, sent along unless removed (`forward_attachments`).
+    pub attachments: Vec<Attachment>,
 }
 
 /// A queued message: `id` for `cancel_send`, sent at `send_at` (ms) unless taken back.
