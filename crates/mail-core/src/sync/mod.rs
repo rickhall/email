@@ -460,8 +460,9 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 continue;
             }
             // Counts: after the first step (so the focused folder's new mail isn't delayed
-            // at startup), or whenever there's nothing else to do.
-            if first_step_done {
+            // at startup), or whenever there's nothing else to do. Not while folders wait to be
+            // synced: a count would get ahead of the list (an unread "1" with no new message).
+            if first_step_done && shared.dirty.lock().unwrap().is_empty() {
                 if shared.counts_due.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     sweep_counts(&shared, &mut conn, None).await?;
                     last_full_sweep = Some(tokio::time::Instant::now());
@@ -476,8 +477,13 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
             let label_folders = gmail_label_map(&folders);
             let current_focus = *focus.borrow_and_update();
             let mut plan = shared.strategy.plan(account, &folders, current_focus, conn.caps.gmail);
-            // Server-pushed changes jump the queue and get a fresh incremental check.
-            let dirty: Vec<i64> = shared.dirty.lock().unwrap().drain().collect();
+            // Server-pushed changes jump the queue and get a fresh incremental check: the folder
+            // on screen first, then the Inbox, All Mail (a long step on big accounts) last.
+            let mut dirty: Vec<i64> = shared.dirty.lock().unwrap().drain().collect();
+            let role_of = |id: &i64| folders.iter().find(|f| f.id == *id).and_then(|f| f.role);
+            dirty.sort_by_key(|id| {
+                (Some(*id) != current_focus, role_of(id) != Some(FolderRole::Inbox), role_of(id) == Some(FolderRole::All), *id)
+            });
             for id in dirty.iter().rev() {
                 done.remove(id);
                 started.remove(id);
@@ -565,6 +571,10 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         }
     }
 }
+
+/// How long an IDLE push waits for pending actions to be sent before handing the folder to the
+/// headers task (the undo window is 5 s).
+const PUSH_WAITS_FOR_OUTBOX: Duration = Duration::from_secs(12);
 
 /// How often every folder's counts are refreshed with STATUS (changed folders sooner).
 const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -655,13 +665,23 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
 /// One incremental step (new mail, flag changes, expunges) on a folder the server just told
 /// us about, on the caller's connection. Bodies of new mail are queued at top priority.
 async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i64) -> Result<()> {
-    let epoch = shared.store.local_epoch();
-    // Leave it to the headers task, which waits for pending actions to be sent first.
-    if shared.store.has_pending_ops(shared.account.id)? {
-        shared.dirty.lock().unwrap().insert(folder_id);
-        shared.refresh.notify_one();
-        return Ok(());
-    }
+    // A pending user action hasn't reached the server yet, and syncing now would undo it on
+    // screen. The outbox sends it within its undo window, so wait for that here: handing the
+    // push to the headers task instead can leave new mail waiting behind a long step elsewhere
+    // (tens of seconds on a large All Mail). Only if the outbox stays busy is it handed over.
+    let deadline = tokio::time::Instant::now() + PUSH_WAITS_FOR_OUTBOX;
+    let epoch = loop {
+        let epoch = shared.store.local_epoch();
+        if !shared.store.has_pending_ops(shared.account.id)? {
+            break epoch;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            shared.dirty.lock().unwrap().insert(folder_id);
+            shared.refresh.notify_one();
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     let folders = shared.store.folders(shared.account.id)?;
     let Some(folder) = folders.iter().find(|f| f.id == folder_id) else { return Ok(()) };
     let label_folders = gmail_label_map(&folders);
