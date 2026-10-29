@@ -3177,6 +3177,9 @@ html.macos .app.rail-mode .search-bar {
     background: var(--tint-d);
   }
 }
+.list-scroll:focus-within .row.selected .tag-dot {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
 
 /* reader chips: one line in the band's info row */
 .tag-chips {
