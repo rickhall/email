@@ -9,7 +9,7 @@ import { patchSelectedSummary, restorePending, searchActive, selectedFolderId, s
 import { HeaderActions, type ActionTarget } from './Actions';
 import { searchTag, TagChips } from './Tags';
 import { runAction } from '../lib/actions';
-import { ImageIcon, MailIcon, PaperclipIcon } from './Icons';
+import { ForwardIcon, ImageIcon, MailIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { DRAG } from '../lib/platform';
 import { forwardFrameKeys } from '../lib/frameKeys';
 
@@ -348,6 +348,19 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
               </h1>
               <div class="band-meta" data-tauri-drag-region={DRAG}>
                 <time dateTime={new Date(h().date * 1000).toISOString()}>{longDate(h().date)}</time>
+                {/* Icon only (title says which): the band's date mustn't be squeezed. */}
+                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.answered}>
+                  <span class="dot-sep">·</span>
+                  <span class="band-mark" title="Replied" aria-label="Replied">
+                    <ReplyIcon size={13} />
+                  </span>
+                </Show>
+                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.forwarded}>
+                  <span class="dot-sep">·</span>
+                  <span class="band-mark" title="Forwarded" aria-label="Forwarded">
+                    <ForwardIcon size={13} />
+                  </span>
+                </Show>
                 <Show when={h().attachments.length > 0}>
                   <span class="dot-sep">·</span>
                   <span class="band-attach">

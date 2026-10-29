@@ -26,7 +26,7 @@ import {
   selectThread,
   setThreaded,
 } from '../state';
-import { CheckIcon, FlagIcon, PaperclipIcon } from './Icons';
+import { CheckIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
 import { TagDots, tintStyle } from './Tags';
 import { climbToParent, FolderCrumbs } from './FolderSwitcher';
@@ -81,6 +81,12 @@ function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: Reg
         </Show>
         <TagDots tags={props.m.tags ?? []} />
         <span class="row-icons">
+          <Show when={props.m.answered}>
+            <ReplyIcon size={12} class="icon marker" />
+          </Show>
+          <Show when={props.m.forwarded}>
+            <ForwardIcon size={12} class="icon marker" />
+          </Show>
           <Show when={props.m.hasAttachments}>
             <PaperclipIcon size={13} class="icon clip" />
           </Show>
@@ -130,6 +136,12 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
         </Show>
         <TagDots tags={props.t.tags ?? []} />
         <span class="row-icons">
+          <Show when={props.t.answered}>
+            <ReplyIcon size={12} class="icon marker" />
+          </Show>
+          <Show when={props.t.forwarded}>
+            <ForwardIcon size={12} class="icon marker" />
+          </Show>
           <Show when={props.t.hasAttachments}>
             <PaperclipIcon size={13} class="icon clip" />
           </Show>

@@ -63,6 +63,12 @@ pub fn join(keywords: &[String]) -> String {
     if v.is_empty() { String::new() } else { format!(" {} ", v.join(" ")) }
 }
 
+/// Whether a message's stored keywords mark it as forwarded (`$Forwarded`, set by Thunderbird
+/// and by us).
+pub fn is_forwarded(stored: &str) -> bool {
+    parse(stored).iter().any(|k| k == "$forwarded")
+}
+
 /// The visible tags among a message's stored keywords.
 pub fn visible(stored: &str) -> Vec<String> {
     parse(stored).into_iter().filter(|k| is_tag(k)).collect()

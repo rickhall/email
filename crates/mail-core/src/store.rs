@@ -1172,6 +1172,8 @@ impl Store {
                 has_attachments: r.get(7)?,
                 has_body: r.get(8)?,
                 tags: crate::tags::visible(&r.get::<_, String>(9)?),
+                answered: flags & flags::ANSWERED != 0,
+                forwarded: crate::tags::is_forwarded(&r.get::<_, String>(9)?),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })
@@ -1193,6 +1195,15 @@ impl Store {
             stmt.query_map(params![folder_id, limit, offset], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        // The account's own address, to tell our messages from others' (replied markers).
+        let me: String = db
+            .query_row(
+                "SELECT lower(a.email) FROM folders f JOIN accounts a ON a.id = f.account_id WHERE f.id=?1",
+                [folder_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
         let mut members = db.prepare_cached(&format!(
             "SELECT m.id, m.subject, m.from_name, m.from_addr, m.flags, m.has_attachments, m.snippet, m.message_id,
                     m.keywords
@@ -1218,6 +1229,11 @@ impl Store {
             participants.truncate(4);
             let mut seen_ids = std::collections::HashSet::new();
             let count = rows.iter().filter(|r| r.7.as_ref().is_none_or(|m| seen_ids.insert(m.clone()))).count();
+            // Replied/forwarded describe the newest message from someone else.
+            let mine = |r: &(i64, String, String, String, i64, bool, Option<String>, Option<String>, String)| r.3.to_lowercase() == me;
+            let incoming = rows.iter().rposition(|r| !mine(r));
+            let answered = incoming.is_some_and(|i| rows[i].4 & flags::ANSWERED != 0 || rows[i + 1..].iter().any(mine));
+            let forwarded = incoming.is_some_and(|i| crate::tags::is_forwarded(&rows[i].8));
             threads.push(ThreadSummary {
                 id: thread_id,
                 folder_id,
@@ -1241,6 +1257,8 @@ impl Store {
                     }
                     t
                 },
+                answered,
+                forwarded,
             });
         }
         Ok(ThreadPage { total, threads })
@@ -1287,6 +1305,8 @@ impl Store {
                     has_attachments: r.get(8)?,
                     has_body: r.get(9)?,
                     tags: crate::tags::visible(&r.get::<_, String>(14)?),
+                    answered: flags & flags::ANSWERED != 0,
+                    forwarded: crate::tags::is_forwarded(&r.get::<_, String>(14)?),
                 },
             ))
         })?;
@@ -1378,6 +1398,8 @@ impl Store {
                 has_attachments: r.get(8)?,
                 has_body: r.get(9)?,
                 tags: crate::tags::visible(&r.get::<_, String>(10)?),
+                answered: flags & flags::ANSWERED != 0,
+                forwarded: crate::tags::is_forwarded(&r.get::<_, String>(10)?),
             })
         })?;
         Ok(MessagePage { total, messages: rows.collect::<rusqlite::Result<_>>()? })

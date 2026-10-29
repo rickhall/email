@@ -47,6 +47,10 @@ export interface MessageSummary {
   hasBody: boolean;
   /** tag keywords, e.g. ["$label2"] (see TagDef) */
   tags: string[];
+  /** replied to (\\Answered, from any client) */
+  answered: boolean;
+  /** forwarded (Thunderbird's $Forwarded keyword) */
+  forwarded: boolean;
 }
 
 export interface Addr {
@@ -113,6 +117,9 @@ export interface ThreadSummary {
   latestMessageId: number;
   /** tags on any selected message of the conversation */
   tags: string[];
+  /** the newest message from someone else was replied to / forwarded */
+  answered: boolean;
+  forwarded: boolean;
 }
 
 /** get_thread result: the selected messages plus how many the scope hid. */

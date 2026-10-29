@@ -12,7 +12,7 @@ import {
   selectedThreadId,
   selectThread,
 } from '../state';
-import { ImageIcon, PaperclipIcon } from './Icons';
+import { ForwardIcon, ImageIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
 import { DRAG } from '../lib/platform';
 import { CardActions, HeaderActions, type ActionTarget } from './Actions';
@@ -99,6 +99,24 @@ function senderLabel(m: MessageSummary, me: Me) {
   return m.fromName || m.fromAddr;
 }
 
+/** Replied / forwarded arrows for a message card. */
+function Marks(props: { m: MessageSummary }) {
+  return (
+    <>
+      <Show when={props.m.answered}>
+        <span class="cm-mark" title="Replied">
+          <ReplyIcon size={12} />
+        </span>
+      </Show>
+      <Show when={props.m.forwarded}>
+        <span class="cm-mark" title="Forwarded">
+          <ForwardIcon size={12} />
+        </span>
+      </Show>
+    </>
+  );
+}
+
 function CollapsedCard(props: { m: MessageSummary; me: Me; folderTag?: string; onToggle: () => void }) {
   return (
     <button class="card-msg collapsed" classList={{ unread: props.m.unread }} onClick={() => props.onToggle()}>
@@ -106,6 +124,7 @@ function CollapsedCard(props: { m: MessageSummary; me: Me; folderTag?: string; o
       <Avatar name={props.m.fromName} addr={props.m.fromAddr} size={28} />
       <span class="cm-from">{senderLabel(props.m, props.me)}</span>
       <span class="cm-snippet">{props.m.snippet ?? ''}</span>
+      <Marks m={props.m} />
       <Show when={props.m.hasAttachments}>
         <PaperclipIcon size={13} class="icon cm-clip" />
       </Show>
@@ -156,6 +175,7 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; ac
         </div>
         <span class="cm-head-right">
           <span class="cm-head-date">
+            <Marks m={props.m} />
             <TagDots tags={props.m.tags ?? []} />
             <Show when={props.folderTag}>
               <span class="folder-tag cm-folder">{props.folderTag}</span>

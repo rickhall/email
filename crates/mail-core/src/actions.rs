@@ -560,6 +560,43 @@ mod tests {
     }
 
     #[test]
+    fn replied_and_forwarded_markers() {
+        let env = Env::new("marks", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        let inbox = env.id("INBOX");
+        let none = HashMap::new();
+        let scope = crate::model::ThreadScope::default();
+        let threads = || env.store.list_threads(inbox, scope, 0, 10).unwrap().threads;
+
+        // Someone writes; no markers yet.
+        env.store.upsert_headers(env.acct, inbox, &[rec(1, None, None, "a@x", 0)], &none).unwrap();
+        assert!(!threads()[0].answered && !threads()[0].forwarded);
+
+        // Our reply in the conversation (sent from a client that didn't set \Answered).
+        let mut mine = rec(2, None, None, "b@x", flags::SEEN);
+        mine.from_addr = "X@Example.com".into();
+        mine.in_reply_to = Some("a@x".into());
+        env.store.upsert_headers(env.acct, inbox, &[mine], &none).unwrap();
+        assert!(threads()[0].answered, "a later message of ours counts as replied");
+
+        // Another message from them: not replied to yet, until it's flagged \Answered.
+        let mut next = rec(3, None, None, "c@x", 0);
+        next.in_reply_to = Some("b@x".into());
+        env.store.upsert_headers(env.acct, inbox, &[next.clone()], &none).unwrap();
+        assert!(!threads()[0].answered);
+        next.flags = flags::ANSWERED;
+        next.keywords = vec!["$Forwarded".into()];
+        env.store.upsert_headers(env.acct, inbox, &[next], &none).unwrap();
+        let t = &threads()[0];
+        assert!(t.answered && t.forwarded && t.tags.is_empty(), "markers, not tags");
+
+        let msgs = env.store.list_messages(inbox, 0, 10).unwrap().messages;
+        let m3 = msgs.iter().find(|m| m.subject == "m3").unwrap();
+        assert!(m3.answered && m3.forwarded);
+        let m1 = msgs.iter().find(|m| m.subject == "m1").unwrap();
+        assert!(!m1.answered && !m1.forwarded);
+    }
+
+    #[test]
     fn next_unread_goes_down_then_wraps() {
         let env = Env::new("unread", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
         let inbox = env.id("INBOX");

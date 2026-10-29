@@ -3661,3 +3661,22 @@ html.macos .app.rail-mode .search-bar {
 .st-status.error {
   color: var(--danger, #d93025);
 }
+
+/* Replied / forwarded markers: list rows, conversation cards, reader band */
+.row-icons .marker {
+  color: var(--text-3);
+}
+.list-scroll:focus-within .row.selected .row-icons .marker {
+  color: var(--sel-muted);
+}
+.cm-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+}
+.band-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}

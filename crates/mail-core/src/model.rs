@@ -133,6 +133,10 @@ pub struct MessageSummary {
     pub has_body: bool,
     /// Tag keywords (see `tags`), e.g. ["$label1", "projectx"].
     pub tags: Vec<String>,
+    /// Replied to (\Answered, set by any client).
+    pub answered: bool,
+    /// Forwarded (Thunderbird's `$Forwarded` keyword).
+    pub forwarded: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +177,11 @@ pub struct ThreadSummary {
     pub latest_message_id: i64,
     /// Tags on any of the conversation's selected messages.
     pub tags: Vec<String>,
+    /// The newest message from someone else was replied to (flagged \Answered, or a message
+    /// of ours came after it).
+    pub answered: bool,
+    /// The newest message from someone else was forwarded.
+    pub forwarded: bool,
 }
 
 /// A conversation as shown in the reader, plus how many of its messages the scope hid.

@@ -623,6 +623,9 @@ export function createMockBackend(): Backend {
       hasBody: false,
       // A sprinkling of Thunderbird tags ($label1–5) and one custom keyword.
       tags: rnd() < 0.08 ? [pick(rnd, ['$label1', '$label2', '$label3', '$label4', '$label5'])].concat(rnd() < 0.2 ? ['projectx'] : []) : [],
+      // Some read person-to-person mail was replied to, a little forwarded.
+      answered: !unread && (kind === 'person' || kind === 'personHtml') && rnd() < 0.35,
+      forwarded: !unread && rnd() < 0.05,
     };
     const attachments: Attachment[] = [];
     if (hasAttachments) {
@@ -820,6 +823,8 @@ export function createMockBackend(): Backend {
       date: newestInFolder.date,
       snippet: newestInFolder.snippet,
       latestMessageId: newestInFolder.id,
+      answered: newestInFolder.answered,
+      forwarded: newestInFolder.forwarded,
     };
   }
 

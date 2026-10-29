@@ -98,6 +98,16 @@ export const FlagIcon = (p: P) => (
     <path d="M3.5 1.75a.75.75 0 0 1 .75.75v.3c1.1-.5 2.3-.6 3.7-.1 1.4.5 2.6.5 3.9-.1a.6.6 0 0 1 .85.55v6.6a.7.7 0 0 1-.4.6c-1.6.8-3.1.8-4.7.2-1.3-.5-2.3-.4-3.35.15v4.8a.75.75 0 0 1-1.5 0V2.5a.75.75 0 0 1 .75-.75z" />
   </Svg>
 );
+export const ReplyIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M6 3.5 2.5 7 6 10.5M2.5 7H9a4.5 4.5 0 0 1 4.5 4.5v1" />
+  </Svg>
+);
+export const ForwardIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M10 3.5 13.5 7 10 10.5M13.5 7H7a4.5 4.5 0 0 0-4.5 4.5v1" />
+  </Svg>
+);
 export const PlusIcon = (p: P) => (
   <Svg {...p}>
     <path d="M8 3v10M3 8h10" />
