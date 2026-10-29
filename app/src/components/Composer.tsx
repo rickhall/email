@@ -4,7 +4,21 @@ import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import type { Addr } from '../api';
 import { accounts } from '../state';
-import { closeCompose, compose, hasContent, isAddress, parseAddresses, send, updateCompose, type ComposeState } from '../lib/compose';
+import {
+  compose,
+  discardAndClose,
+  hasContent,
+  isAddress,
+  parseAddresses,
+  saveAndClose,
+  saveNow,
+  send,
+  updateCompose,
+  type ComposeState,
+} from '../lib/compose';
+import { api } from '../api';
+import { composeDraftId, onCloseRequested, setWindowTitle } from '../lib/windows';
+import { savePref } from '../lib/format';
 import { MOD } from '../lib/shortcuts';
 import { DRAG } from '../lib/platform';
 import { confirmDialog } from './Actions';
@@ -222,11 +236,49 @@ export function Composer() {
     onCleanup(() => ed.destroy());
   });
 
+  // Closing (Esc, ⌘W, the window's close button): keep it as a draft, or not.
+  const [asking, setAsking] = createSignal<((d: 'save' | 'discard' | 'cancel') => void) | null>(null);
+  const decide = (): Promise<'save' | 'discard' | 'cancel'> => {
+    const cur = compose();
+    if (!cur || !hasContent(cur)) return Promise.resolve('discard');
+    return new Promise((resolve) => setAsking(() => resolve));
+  };
+  const answer = (d: 'save' | 'discard' | 'cancel') => {
+    asking()?.(d);
+    setAsking(null);
+  };
+  const close = async () => {
+    const d = await decide();
+    if (d === 'save') await saveAndClose();
+    else if (d === 'discard') await discardAndClose();
+  };
+  onCloseRequested(async () => {
+    const d = await decide();
+    if (d === 'cancel') return false;
+    if (d === 'save') await saveNow();
+    else if (composeDraftId != null) await api.deleteDraft(composeDraftId).catch(() => {});
+    return true;
+  });
   const discard = async () => {
     const cur = compose();
     if (cur && hasContent(cur) && !(await confirmDialog('Discard this message?', 'Discard'))) return;
-    closeCompose();
+    await discardAndClose();
   };
+
+  createEffect(() => {
+    const cur = c();
+    setWindowTitle(cur.subject.trim() || { new: 'New Message', reply: 'Reply', replyAll: 'Reply All', forward: 'Forward' }[cur.mode]);
+  });
+  // The next compose window opens at this size.
+  let sizeTimer: ReturnType<typeof setTimeout> | undefined;
+  const onResize = () => {
+    clearTimeout(sizeTimer);
+    sizeTimer = setTimeout(() => savePref('ui.composeSize', { w: window.innerWidth, h: window.innerHeight }), 400);
+  };
+  onMount(() => {
+    window.addEventListener('resize', onResize);
+    onCleanup(() => window.removeEventListener('resize', onResize));
+  });
 
   const onKey = (e: KeyboardEvent) => {
     if (!(e.target instanceof Node) || !root.contains(e.target)) return;
@@ -237,15 +289,16 @@ export function Composer() {
     } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'k' && editorEl.contains(document.activeElement)) {
       e.preventDefault();
       setLinking(true);
+    } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'w') {
+      e.preventDefault();
+      void close();
     } else if (e.key === 'Escape' && !(e.target as Element).closest?.('.link-edit') && !document.querySelector('.modal-backdrop')) {
       e.preventDefault();
-      void discard();
+      void close();
     }
-    // Single-key app shortcuts (e, #, j…) act on the list behind: not while writing here.
-    if (!mod) e.stopPropagation();
   };
   // On the document, after the fields' own handlers (Solid delegates those to the document
-  // too, registered earlier), but before the app's shortcuts on the window.
+  // too, registered earlier): the link input's Esc is handled there first.
   onMount(() => {
     document.addEventListener('keydown', onKey);
     onCleanup(() => document.removeEventListener('keydown', onKey));
@@ -262,6 +315,25 @@ export function Composer() {
         </h1>
         <div class="band-meta cmp-actions" data-tauri-drag-region={DRAG}>
           <span class="cmp-hint">{MOD === '⌘' ? '⌘↵' : 'Ctrl+Enter'} to send · Esc to close</span>
+          <Show when={asking()}>
+            <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && answer('cancel')}>
+              <div class="card modal confirm cmp-close" role="dialog" aria-modal="true" aria-label="Close message">
+                <p>Keep this message as a draft?</p>
+                <div class="cmp-close-btns">
+                  <button class="btn secondary" onClick={() => answer('discard')}>
+                    Discard
+                  </button>
+                  <span class="cmp-close-gap" />
+                  <button class="btn secondary" onClick={() => answer('cancel')}>
+                    Cancel
+                  </button>
+                  <button class="btn primary" ref={(el) => queueMicrotask(() => el.focus())} onClick={() => answer('save')}>
+                    Save draft
+                  </button>
+                </div>
+              </div>
+            </div>
+          </Show>
           <button class="icon-btn" title="Discard" aria-label="Discard" onClick={() => void discard()}>
             <TrashIcon />
           </button>

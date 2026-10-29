@@ -20,6 +20,7 @@ import { searchTag, TagChips, TagDots } from './Tags';
 import { runAction } from '../lib/actions';
 import { forwardFrameKeys } from '../lib/frameKeys';
 import { SendState } from './MessageList';
+import { editDraft } from '../lib/compose';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -176,6 +177,19 @@ function ExpandedCard(props: { m: MessageSummary; me: Me; folderTag?: string; ac
         </div>
         <span class="cm-head-right">
           <span class="cm-head-date">
+            <Show when={props.m.draftId}>
+              {(d) => (
+                <button
+                  class="link-btn cm-edit-draft"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    editDraft(d());
+                  }}
+                >
+                  Edit draft
+                </button>
+              )}
+            </Show>
             <Marks m={props.m} />
             <TagDots tags={props.m.tags ?? []} />
             <Show when={props.folderTag}>

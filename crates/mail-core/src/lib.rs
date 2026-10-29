@@ -455,25 +455,15 @@ impl Core {
     /// Queue a message: built now, sent after the undo window (`SEND_DELAY_MS`) unless taken
     /// back with `cancel_send`.
     pub async fn send_message(&self, req: SendRequest) -> Result<SendQueued> {
-        let account = self.store.accounts()?.into_iter().find(|a| a.id == req.account_id).ok_or_else(|| anyhow!("no such account"))?;
+        let account = self.account(req.account_id)?;
         if account.smtp().is_none() {
             bail!("No outgoing (SMTP) server is set for {}.", account.email);
         }
-        let mut msg = compose::Outgoing {
-            from: Some(Addr { name: Some(account.display_name.clone()).filter(|n| !n.trim().is_empty()), addr: account.email.clone() }),
-            to: req.to,
-            cc: req.cc,
-            bcc: req.bcc,
-            subject: req.subject,
-            html: req.html,
-            ..Default::default()
-        };
+        let draft_id = req.draft_id;
+        let mut msg = self.outgoing_of(&account, &req)?;
         let recipients = msg.recipients();
         if recipients.is_empty() {
             bail!("Add at least one recipient.");
-        }
-        if let Some(orig) = req.replying_to.map(|id| self.store.threading_of(id)).transpose()?.flatten() {
-            (msg.in_reply_to, msg.references) = compose::reply_threading(&orig);
         }
         if let Some(fwd) = req.forwarding {
             for &index in &req.forward_attachments {
@@ -503,6 +493,9 @@ impl Core {
         if let Some(s) = self.running.lock().unwrap().get(&account.id) {
             s.wake_sender();
         }
+        if let Some(d) = draft_id {
+            self.delete_draft(d)?;
+        }
         // Shown in Sent (and its conversation) right away, marked as sending.
         let sent = self.store.folders(account.id)?.into_iter().find(|f| f.role == Some(FolderRole::Sent));
         if let Some(sent) = sent {
@@ -512,6 +505,82 @@ impl Core {
             let _ = self.events.send(CoreEvent::FoldersChanged { account_id: account.id });
         }
         Ok(SendQueued { id, send_at })
+    }
+
+    fn account(&self, id: i64) -> Result<Account> {
+        self.store.accounts()?.into_iter().find(|a| a.id == id).ok_or_else(|| anyhow!("no such account"))
+    }
+
+    /// The message a composer request describes (without attachments): From, recipients,
+    /// subject, body, and threading headers for a reply.
+    fn outgoing_of(&self, account: &Account, req: &SendRequest) -> Result<compose::Outgoing> {
+        let mut msg = compose::Outgoing {
+            from: Some(Addr { name: Some(account.display_name.clone()).filter(|n| !n.trim().is_empty()), addr: account.email.clone() }),
+            to: req.to.clone(),
+            cc: req.cc.clone(),
+            bcc: req.bcc.clone(),
+            subject: req.subject.clone(),
+            html: req.html.clone(),
+            ..Default::default()
+        };
+        if let Some(orig) = req.replying_to.map(|id| self.store.threading_of(id)).transpose()?.flatten() {
+            (msg.in_reply_to, msg.references) = compose::reply_threading(&orig);
+        }
+        Ok(msg)
+    }
+
+    /// Save the composer's state as draft `id` (created when None): kept in the core, and
+    /// shown in Drafts with "Edit draft". Returns the draft id.
+    pub fn save_draft(&self, id: Option<i64>, req: SendRequest) -> Result<i64> {
+        let account = self.account(req.account_id)?;
+        let state = req.draft.as_ref().map(|d| d.to_string()).unwrap_or_else(|| "{}".into());
+        let (id, message_id) = match id.map(|i| self.store.draft(i)).transpose()?.flatten() {
+            Some((_, _, mid)) => {
+                let id = id.unwrap();
+                self.store.update_draft(id, account.id, &state)?;
+                (id, mid)
+            }
+            None => {
+                let mid = compose::new_message_id(&account.email);
+                (self.store.create_draft(account.id, &state, &mid)?, mid)
+            }
+        };
+        let msg = self.outgoing_of(&account, &req)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        let raw = compose::build(&msg, &message_id, now)?;
+        // A just-opened, still empty composer isn't a draft worth listing.
+        let empty = !req.listed
+            || msg.recipients().is_empty()
+            && msg.subject.trim().is_empty()
+            && mail_parser::decoders::html::html_to_text(&req.html).trim().is_empty();
+        if let Some(drafts) = self.store.folders(account.id)?.into_iter().find(|f| f.role == Some(FolderRole::Drafts)) {
+            let folders = if empty {
+                self.store.delete_draft_copy(id)?
+            } else {
+                self.store.upsert_draft_copy(id, account.id, drafts.id, &raw)?
+            };
+            let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders });
+            let _ = self.events.send(CoreEvent::FoldersChanged { account_id: account.id });
+        }
+        Ok(id)
+    }
+
+    /// The composer state of a draft (to open it in a window).
+    pub fn open_draft(&self, id: i64) -> Result<serde_json::Value> {
+        let (_, state, _) = self.store.draft(id)?.ok_or_else(|| anyhow!("That draft no longer exists."))?;
+        Ok(serde_json::from_str(&state)?)
+    }
+
+    /// Discard a draft (and its copy in Drafts).
+    pub fn delete_draft(&self, id: i64) -> Result<()> {
+        let folders = self.store.delete_draft(id)?;
+        if !folders.is_empty() {
+            let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders.clone() });
+            for (account_id, _) in folders.iter().filter_map(|f| self.store.folder(*f).ok().flatten()).collect::<std::collections::HashSet<_>>() {
+                let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
+            }
+        }
+        Ok(())
     }
 
     /// Take back a queued message before it's sent (undo send): its draft, to reopen.

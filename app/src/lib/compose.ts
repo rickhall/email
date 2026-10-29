@@ -1,16 +1,17 @@
 import { createSignal } from 'solid-js';
 import { accounts, folderById, selectedFolderId } from '../state';
-import { api, errorMessage, events, type Addr, type Attachment, type ReplyMode } from '../api';
+import { api, errorMessage, events, type Addr, type Attachment, type ReplyMode, type SendRequest } from '../api';
 import { hideToast, showToast } from '../components/Toast';
-import { confirmDialog } from '../components/Actions';
+import { broadcast, closeThisWindow, composeDraftId, isComposeWindow, onBroadcast, openComposeWindow } from './windows';
 
-// The composer: one message at a time, written in the reader pane. Sending queues it in the
-// core, which sends after the undo window; Undo (or a failure's "Edit") reopens it as it was.
+// Writing mail happens in compose windows, one per draft (see lib/windows.ts). The main window
+// starts them (new message, reply, forward) and shows "Sending… Undo" once one sends; the core
+// keeps each draft, saved as it changes and shown in Drafts.
 
 export type ComposeMode = 'new' | 'reply' | 'replyAll' | 'forward';
 
 export interface ComposeState {
-  /** changes when a different message is opened in the composer (remounts the editor) */
+  /** changes when a different message is loaded into the composer (remounts the editor) */
   key: number;
   mode: ComposeMode;
   accountId: number;
@@ -28,11 +29,40 @@ export interface ComposeState {
   quoteHtml: string | null;
   /** forward: the original's attachments still to send along */
   fwdAttachments: Attachment[];
+  /** the user has changed something (only then is it a draft worth keeping or listing) */
+  edited?: boolean;
 }
 
 let keySeq = 0;
-const [compose, setCompose] = createSignal<ComposeState | null>(null);
-export { compose };
+
+/** What the core needs to build (save or send) the message this state describes. */
+function request(c: ComposeState, draftId: number | null): SendRequest {
+  return {
+    accountId: c.accountId,
+    to: c.to,
+    cc: c.cc,
+    bcc: c.bcc,
+    subject: c.subject,
+    // Top-posting: the new text, then the original.
+    html: c.html + (c.quoteHtml ?? ''),
+    attachments: [],
+    replyingTo: c.replyingTo,
+    forwarding: c.forwarding,
+    forwardAttachments: c.fwdAttachments.map((a) => a.index),
+    draft: c,
+    draftId,
+    listed: !!c.edited,
+  };
+}
+
+/** Has the user written anything worth keeping? (A reply opened and closed again hasn't.) */
+export function hasContent(c: ComposeState): boolean {
+  if (!c.edited) return false;
+  const text = c.html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+  return text.length > 0 || c.subject.trim().length > 0 || c.to.length + c.cc.length + c.bcc.length > 0;
+}
+
+// ------------------------------------------------------------- main window: starting one
 
 /** Default account for a new message: the folder on screen's, else the first. */
 function defaultAccount(): number | null {
@@ -40,13 +70,20 @@ function defaultAccount(): number | null {
   return f?.accountId ?? accounts()?.[0]?.id ?? null;
 }
 
-/** Open the composer for a new message (no-op if one is open: it's kept). */
+/** Save `state` as a new draft and open it in its own window. */
+async function openDraftWindow(state: Omit<ComposeState, 'key'>): Promise<void> {
+  try {
+    const id = await api.saveDraft(null, request({ ...state, key: 0 }, null));
+    await openComposeWindow(id);
+  } catch (e) {
+    showToast({ kind: 'error', text: errorMessage(e) });
+  }
+}
+
 export function newMessage(): void {
-  if (compose()) return;
   const accountId = defaultAccount();
   if (accountId == null) return;
-  setCompose({
-    key: ++keySeq,
+  void openDraftWindow({
     mode: 'new',
     accountId,
     to: [],
@@ -62,15 +99,11 @@ export function newMessage(): void {
   });
 }
 
-/** Reply, reply all or forward message `id` (prefilled by the core). A message already being
- *  written is only replaced after asking. */
+/** Reply, reply all or forward message `id` (prefilled by the core) in a new compose window. */
 export async function startReply(id: number, mode: ReplyMode): Promise<void> {
-  const cur = compose();
-  if (cur && hasContent(cur) && !(await confirmDialog('Discard the message you’re writing?', 'Discard'))) return;
   try {
     const r = await api.replyContext(id, mode);
-    setCompose({
-      key: ++keySeq,
+    await openDraftWindow({
       mode,
       accountId: r.accountId,
       to: r.to,
@@ -89,28 +122,83 @@ export async function startReply(id: number, mode: ReplyMode): Promise<void> {
   }
 }
 
-/** Keep the composer's latest fields (editor typing, address edits). */
-export function updateCompose(patch: Partial<ComposeState>): void {
-  const c = compose();
-  if (c) setCompose({ ...c, ...patch });
+/** Open an existing draft (from Drafts) in its compose window. */
+export function editDraft(draftId: number): void {
+  void openComposeWindow(draftId).catch((e) => showToast({ kind: 'error', text: errorMessage(e) }));
 }
 
-export function closeCompose(): void {
-  setCompose(null);
-}
-
-/** Has the user written anything worth confirming before discarding? */
-export function hasContent(c: ComposeState): boolean {
-  const text = c.html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
-  return text.length > 0 || c.subject.trim().length > 0 || c.to.length + c.cc.length + c.bcc.length > 0;
-}
-
+/** A message taken back (undo, or edit after a failure): back into a compose window. */
 function reopen(draft: unknown): void {
   const d = draft as ComposeState | null;
-  if (d && typeof d === 'object' && 'accountId' in d) setCompose({ ...d, key: ++keySeq });
+  if (d && typeof d === 'object' && 'accountId' in d) void openDraftWindow(d);
 }
 
-/** Queue the message; the composer closes and a "Sending… Undo" toast covers the window. */
+if (!isComposeWindow) {
+  // A compose window sent a message (and closed): the undo window plays out here.
+  onBroadcast('compose-sent', ({ id, sendAt }) => {
+    const toast = showToast({
+      kind: 'ok',
+      text: 'Sending…',
+      action: {
+        label: 'Undo',
+        run: () => {
+          hideToast(toast);
+          void api.cancelSend(id).then(reopen, (e) => showToast({ kind: 'error', text: errorMessage(e) }));
+        },
+      },
+      ms: Math.max(1000, sendAt - Date.now()),
+    });
+  });
+  void events.onMessageSent(() => showToast({ kind: 'ok', text: 'Message sent', ms: 2500 }));
+  void events.onSendFailed(({ id, message }) =>
+    showToast({
+      kind: 'error',
+      text: `Couldn't send: ${message ?? 'unknown error'}`,
+      action: {
+        label: 'Edit',
+        run: () => void api.cancelSend(id).then(reopen, (e) => showToast({ kind: 'error', text: errorMessage(e) })),
+      },
+    }),
+  );
+}
+
+// ------------------------------------------------------------- compose window: the draft
+
+const [compose, setCompose] = createSignal<ComposeState | null>(null);
+export { compose };
+
+/** Load this window's draft. */
+export async function loadDraft(): Promise<void> {
+  if (composeDraftId == null) return;
+  const d = (await api.openDraft(composeDraftId)) as ComposeState;
+  setCompose({ ...d, key: ++keySeq });
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+/** Saved shortly after the last change (and right away before sending or closing). */
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => void saveNow(), 800);
+}
+export async function saveNow(): Promise<void> {
+  clearTimeout(saveTimer);
+  const c = compose();
+  if (!c || composeDraftId == null) return;
+  try {
+    await api.saveDraft(composeDraftId, request(c, composeDraftId));
+  } catch (e) {
+    console.warn('saving draft', e);
+  }
+}
+
+export function updateCompose(patch: Partial<ComposeState>): void {
+  const c = compose();
+  if (!c) return;
+  setCompose({ ...c, ...patch, edited: true });
+  scheduleSave();
+}
+
+/** Queue the message; the window closes and the main window shows "Sending… Undo". */
 export async function send(c: ComposeState): Promise<void> {
   const bad = [...c.to, ...c.cc, ...c.bcc].find((a) => !isAddress(a.addr));
   if (bad) {
@@ -121,50 +209,28 @@ export async function send(c: ComposeState): Promise<void> {
     showToast({ kind: 'error', text: 'Add at least one recipient.' });
     return;
   }
+  clearTimeout(saveTimer);
   try {
-    const q = await api.sendMessage({
-      accountId: c.accountId,
-      to: c.to,
-      cc: c.cc,
-      bcc: c.bcc,
-      subject: c.subject,
-      // Top-posting: the new text, then the original.
-      html: c.html + (c.quoteHtml ?? ''),
-      attachments: [],
-      replyingTo: c.replyingTo,
-      forwarding: c.forwarding,
-      forwardAttachments: c.fwdAttachments.map((a) => a.index),
-      draft: c,
-    });
-    if (compose()?.key === c.key) setCompose(null);
-    const toast = showToast({
-      kind: 'ok',
-      text: 'Sending…',
-      action: {
-        label: 'Undo',
-        run: () => {
-          hideToast(toast);
-          void api.cancelSend(q.id).then(reopen, (e) => showToast({ kind: 'error', text: errorMessage(e) }));
-        },
-      },
-      ms: Math.max(1000, q.sendAt - Date.now()),
-    });
+    const q = await api.sendMessage(request(c, composeDraftId));
+    broadcast('compose-sent', { id: q.id, sendAt: q.sendAt });
+    await closeThisWindow();
   } catch (e) {
     showToast({ kind: 'error', text: errorMessage(e) });
   }
 }
 
-void events.onMessageSent(() => showToast({ kind: 'ok', text: 'Message sent', ms: 2500 }));
-void events.onSendFailed(({ id, message }) =>
-  showToast({
-    kind: 'error',
-    text: `Couldn't send: ${message ?? 'unknown error'}`,
-    action: {
-      label: 'Edit',
-      run: () => void api.cancelSend(id).then(reopen, (e) => showToast({ kind: 'error', text: errorMessage(e) })),
-    },
-  }),
-);
+/** Throw the draft away and close. */
+export async function discardAndClose(): Promise<void> {
+  clearTimeout(saveTimer);
+  if (composeDraftId != null) await api.deleteDraft(composeDraftId).catch(() => {});
+  await closeThisWindow();
+}
+
+/** Keep the draft (in Drafts) and close. */
+export async function saveAndClose(): Promise<void> {
+  await saveNow();
+  await closeThisWindow();
+}
 
 // ------------------------------------------------------------- addresses
 

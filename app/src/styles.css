@@ -4012,3 +4012,39 @@ html.macos .app.rail-mode .search-bar {
   background: #e3e6eb;
   color: #3b3f48;
 }
+
+/* compose window: the composer fills it */
+.compose-window {
+  position: relative;
+  height: 100vh;
+  background: var(--bg-reader);
+}
+.compose-window .composer {
+  height: 100%;
+}
+.compose-error {
+  padding: 24px 28px;
+  color: var(--text-3);
+}
+.cmp-close p {
+  margin: 0 0 18px;
+  font-size: 14px;
+}
+.cmp-close-btns {
+  display: flex;
+  gap: 8px;
+}
+.cmp-close-gap {
+  flex: 1;
+}
+.cmp-close .btn.primary {
+  min-width: 112px;
+}
+.band-edit-draft,
+.cm-edit-draft {
+  font-size: 12px;
+  font-weight: 600;
+}
+.cm-edit-draft {
+  margin-right: 6px;
+}

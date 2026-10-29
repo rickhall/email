@@ -530,6 +530,55 @@ async fn send_message(core: State<'_, Arc<Core>>, request: SendRequest) -> Res<S
 }
 
 #[tauri::command]
+async fn save_draft(core: State<'_, Arc<Core>>, id: Option<i64>, request: SendRequest) -> Res<i64> {
+    core.save_draft(id, request).map_err(err)
+}
+
+#[tauri::command]
+async fn open_draft(core: State<'_, Arc<Core>>, id: i64) -> Res<serde_json::Value> {
+    core.open_draft(id).map_err(err)
+}
+
+#[tauri::command]
+async fn delete_draft(core: State<'_, Arc<Core>>, id: i64) -> Res<()> {
+    core.delete_draft(id).map_err(err)
+}
+
+/// Open draft `draft_id` in its own compose window (or bring that window forward). The page
+/// finds its draft from the window label, `compose-<id>`.
+#[tauri::command]
+async fn open_compose(app: tauri::AppHandle, draft_id: i64, width: Option<f64>, height: Option<f64>) -> Res<()> {
+    let label = format!("compose-{draft_id}");
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let opener = app.clone();
+    let nav_opener = app.clone();
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
+        .title("New Message")
+        .inner_size(width.unwrap_or(760.0).max(520.0), height.unwrap_or(720.0).max(420.0))
+        .min_inner_size(520.0, 420.0)
+        // Links in a quoted message open in the browser, as in the main window.
+        .on_new_window(move |url, _features| {
+            let _ = opener.opener().open_url(url.as_str(), None::<&str>);
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .on_navigation(move |url| {
+            if is_app_url(url) {
+                return true;
+            }
+            let _ = nav_opener.opener().open_url(url.as_str(), None::<&str>);
+            false
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn reply_context(core: State<'_, Arc<Core>>, id: i64, mode: ReplyMode) -> Res<ReplyContext> {
     core.reply_context(id, mode).await.map_err(err)
 }
@@ -621,6 +670,10 @@ pub fn run() {
             show_log,
             send_message,
             reply_context,
+            save_draft,
+            open_draft,
+            delete_draft,
+            open_compose,
             cancel_send,
             list_tags,
             set_tag,

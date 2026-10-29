@@ -122,6 +122,13 @@ interface SyncStatus {
 | `undo_action` | `{ opId }` | `void` — within the undo window; rejects "Too late to undo…" otherwise |
 | `index_of` | `{ folderId, id, threaded }` | `number \| null` — the row index of a message (`threaded: false`) or conversation (`threaded: true`, `id` = thread id) in the folder's list (same ordering as `list_messages` / `list_threads`); `null` when it isn't in the folder |
 | `next_unread` | `{ folderId, after: number \| null, threaded }` | `{ id, index } \| null` — the next unread message (or conversation with an unread message in this folder) below `after` in the folder's list order, wrapping to the top; `null` when nothing in the folder is unread |
+| `send_message` | `{ request: SendRequest }` | `{ id, sendAt }` — builds the message and queues it; it's sent after the undo window (10 s) unless `cancel_send` takes it back. A local copy shows in Sent at once (`sending: true`). `request.draftId`: that draft is discarded |
+| `cancel_send` | `{ id }` | the composer state it was sent with (to reopen it) — undo within the window, or after a failure (`send-failed`); rejects when already sent |
+| `reply_context` | `{ id, mode: 'reply' \| 'replyAll' \| 'forward' }` | `ReplyContext` — recipients, Re:/Fwd: subject, `quoteHtml` (Gmail-style quote / forward block) and, for forwards, the original's attachments; downloads the original first if needed |
+| `save_draft` | `{ id: number \| null, request: SendRequest }` | draft id — keeps the composer state (`request.draft`); listed in Drafts once `request.listed` and not empty, updated in place |
+| `open_draft` | `{ id }` | the draft's composer state |
+| `delete_draft` | `{ id }` | — discards the draft and its copy in Drafts |
+| `open_compose` | `{ draftId, width, height }` | — opens (or focuses) the compose window `compose-<draftId>` |
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |

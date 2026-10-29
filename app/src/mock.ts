@@ -27,9 +27,26 @@ import type {
   ThreadSummary,
   SyncPhase,
   SyncStatus,
+  SendRequest,
 } from './types';
 
 import { fieldMatches, norm, parseQuery, tokenize, type Term } from './lib/query';
+
+const MOCK_DRAFTS = 'mock.drafts';
+function loadMockDrafts(): Record<number, SendRequest> {
+  try {
+    return JSON.parse(localStorage.getItem(MOCK_DRAFTS) ?? '{}') as Record<number, SendRequest>;
+  } catch {
+    return {};
+  }
+}
+function storeMockDrafts(d: Record<number, SendRequest>) {
+  try {
+    localStorage.setItem(MOCK_DRAFTS, JSON.stringify(d));
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 /** Mock send queue: id -> pending timer and the draft to hand back on undo. */
 let sendSeq = 0;
@@ -632,6 +649,7 @@ export function createMockBackend(): Backend {
       forwarded: !unread && rnd() < 0.05,
       sending: false,
       sendFailed: false,
+      draftId: null,
     };
     const attachments: Attachment[] = [];
     if (hasAttachments) {
@@ -835,6 +853,67 @@ export function createMockBackend(): Backend {
       sendFailed: newestInFolder.sendFailed,
     };
   }
+
+  // Drafts live in localStorage in the preview, so a compose popup and the main page share them;
+  // each page shows them as copies in its Drafts folders.
+  const draftCopies = new Map<number, { folder: Folder; m: MessageSummary }>();
+  function syncDraftCopies() {
+    const all = loadMockDrafts();
+    const changed = new Set<number>();
+    for (const [did, c] of draftCopies) {
+      if (all[did]) continue;
+      const list = folderMsgs.get(c.folder.id) ?? [];
+      const i = list.indexOf(c.m);
+      if (i >= 0) list.splice(i, 1);
+      byId.delete(c.m.id);
+      draftCopies.delete(did);
+      recount(c.folder);
+      changed.add(c.folder.id);
+    }
+    for (const [key, req] of Object.entries(all)) {
+      const did = Number(key);
+      const folder = [...folders.values()].find((f) => f.accountId === req.accountId && f.role === 'drafts');
+      const acc = accounts.find((a) => a.id === req.accountId);
+      if (!folder || !acc) continue;
+      const snippet = req.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) || null;
+      const cur = draftCopies.get(did);
+      if (cur) {
+        Object.assign(cur.m, { subject: req.subject || '(no subject)', snippet, date: Math.floor(Date.now() / 1000) });
+      } else {
+        const m: MessageSummary = {
+          id: nextMsgId++,
+          folderId: folder.id,
+          subject: req.subject || '(no subject)',
+          fromName: acc.displayName,
+          fromAddr: acc.email,
+          date: Math.floor(Date.now() / 1000),
+          snippet,
+          unread: false,
+          flagged: false,
+          hasAttachments: false,
+          hasBody: true,
+          tags: [],
+          answered: false,
+          forwarded: false,
+          sending: false,
+          sendFailed: false,
+          draftId: did,
+        };
+        meta.set(m.id, { kind: 'person', seed: m.id, accountId: acc.id, attachments: [], cc: false, threadId: m.id });
+        downloaded.add(m.id);
+        byId.set(m.id, m);
+        folderMsgs.get(folder.id)?.unshift(m);
+        draftCopies.set(did, { folder, m });
+        recount(folder);
+      }
+      changed.add(folder.id);
+    }
+    if (changed.size) emit('messages-changed', { folderIds: [...changed] });
+  }
+  window.addEventListener('storage', (e) => {
+    if (e.key === MOCK_DRAFTS) syncDraftCopies();
+  });
+  setTimeout(syncDraftCopies, 0);
 
   function recount(f: Folder) {
     const list = folderMsgs.get(f.id) ?? [];
@@ -1499,8 +1578,22 @@ export function createMockBackend(): Backend {
     async send_message({ request }) {
       await sleep(20);
       if (request.to.length + request.cc.length + request.bcc.length === 0) throw 'Add at least one recipient.';
-      const id = ++sendSeq;
+      // Unique across preview pages (a compose popup sends, the main page may undo).
+      const id = Date.now() * 10 + (++sendSeq % 10);
       const sendAt = Date.now() + 10_000;
+      try {
+        const q = JSON.parse(localStorage.getItem('mock.outgoing') ?? '{}') as Record<number, { draft: unknown; sendAt: number }>;
+        q[id] = { draft: request.draft, sendAt };
+        localStorage.setItem('mock.outgoing', JSON.stringify(q));
+      } catch {
+        /* storage unavailable */
+      }
+      if (request.draftId != null) {
+        const all = loadMockDrafts();
+        delete all[request.draftId];
+        storeMockDrafts(all);
+        syncDraftCopies();
+      }
       // A local copy in Sent, marked sending (like the core's insert_local_copy).
       const acc = accounts.find((a) => a.id === request.accountId);
       const sent = [...folders.values()].find((f) => f.accountId === request.accountId && f.role === 'sent');
@@ -1524,6 +1617,7 @@ export function createMockBackend(): Backend {
           forwarded: false,
           sending: true,
           sendFailed: false,
+          draftId: null,
         };
         const c = copy;
         meta.set(c.id, { kind: 'person', seed: c.id, accountId: acc.id, attachments: [], cc: false, threadId: c.id });
@@ -1557,6 +1651,31 @@ export function createMockBackend(): Backend {
         }, 10_000),
       });
       return { id, sendAt };
+    },
+    async save_draft({ id, request }) {
+      await sleep(5);
+      const all = loadMockDrafts();
+      const did = id ?? Math.max(0, ...Object.keys(all).map(Number)) + 1;
+      all[did] = request;
+      storeMockDrafts(all);
+      syncDraftCopies();
+      return did;
+    },
+    async open_draft({ id }) {
+      await sleep(3);
+      const d = loadMockDrafts()[id];
+      if (!d) throw 'That draft no longer exists.';
+      return d.draft;
+    },
+    async delete_draft({ id }) {
+      await sleep(3);
+      const all = loadMockDrafts();
+      delete all[id];
+      storeMockDrafts(all);
+      syncDraftCopies();
+    },
+    async open_compose() {
+      // The preview opens compose popups itself (lib/windows.ts).
     },
     async reply_context({ id, mode }) {
       await sleep(30);
@@ -1599,11 +1718,24 @@ export function createMockBackend(): Backend {
     async cancel_send({ id }) {
       await sleep(10);
       const o = outgoing.get(id);
-      if (!o) throw 'Too late to undo: the message was already sent.';
-      clearTimeout(o.timer);
-      outgoing.delete(id);
-      o.copy?.();
-      return o.draft ?? null;
+      let stored: { draft: unknown; sendAt: number } | undefined;
+      try {
+        const q = JSON.parse(localStorage.getItem('mock.outgoing') ?? '{}') as Record<number, { draft: unknown; sendAt: number }>;
+        stored = q[id];
+        delete q[id];
+        localStorage.setItem('mock.outgoing', JSON.stringify(q));
+      } catch {
+        /* storage unavailable */
+      }
+      if (o) {
+        clearTimeout(o.timer);
+        outgoing.delete(id);
+        o.copy?.();
+        return o.draft ?? null;
+      }
+      // Sent from a compose popup (another page): its queue entry is in localStorage.
+      if (stored && Date.now() < stored.sendAt) return stored.draft ?? null;
+      throw 'Too late to undo: the message was already sent.';
     },
     async next_unread({ folderId, after, threaded }) {
       await sleep(3);

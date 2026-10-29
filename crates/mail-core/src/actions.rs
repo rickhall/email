@@ -642,6 +642,40 @@ mod tests {
     }
 
     #[test]
+    fn drafts_show_in_drafts_and_update_in_place() {
+        let env = Env::new("drafts", Provider::Gmail, &[lf("INBOX", Some(FolderRole::Inbox)), lf("[Gmail]/Drafts", Some(FolderRole::Drafts))]);
+        let s = &env.store;
+        let drafts = env.id("[Gmail]/Drafts");
+        let raw = |subject: &str| {
+            let msg = crate::compose::Outgoing {
+                from: Some(crate::model::Addr { name: None, addr: "x@example.com".into() }),
+                to: vec![crate::model::Addr { name: None, addr: "jane.doe@example.net".into() }],
+                subject: subject.into(),
+                html: "<p>draft</p>".into(),
+                ..Default::default()
+            };
+            crate::compose::build(&msg, "d1@example.com", 3_000).unwrap()
+        };
+        let id = s.create_draft(env.acct, r#"{"subject":"Plans"}"#, "d1@example.com").unwrap();
+        assert_eq!(s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans")).unwrap(), vec![drafts]);
+        let first = s.list_messages(drafts, 0, 10).unwrap().messages;
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].subject.as_str(), first[0].draft_id), ("Plans", Some(id)));
+
+        // Saving again updates the same row (no flicker in the list).
+        s.update_draft(id, env.acct, r#"{"subject":"Plans for Monday"}"#).unwrap();
+        s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans for Monday")).unwrap();
+        let again = s.list_messages(drafts, 0, 10).unwrap().messages;
+        assert_eq!((again.len(), again[0].id, again[0].subject.as_str()), (1, first[0].id, "Plans for Monday"));
+        assert_eq!(s.draft(id).unwrap().unwrap().1, r#"{"subject":"Plans for Monday"}"#);
+
+        // Discarded (or sent): draft and copy gone.
+        assert_eq!(s.delete_draft(id).unwrap(), vec![drafts]);
+        assert!(s.list_messages(drafts, 0, 10).unwrap().messages.is_empty());
+        assert!(s.draft(id).unwrap().is_none());
+    }
+
+    #[test]
     fn markers_after_sending() {
         let (env, msg) = gmail_env();
         let inbox = env.id("INBOX");

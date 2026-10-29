@@ -55,6 +55,8 @@ export interface MessageSummary {
   sending: boolean;
   /** our message, refused by the server: not sent */
   sendFailed: boolean;
+  /** a draft being written here (open it in a compose window) */
+  draftId: number | null;
 }
 
 export interface Addr {
@@ -221,6 +223,10 @@ export interface SendRequest {
   forwardAttachments: number[];
   /** the composer's own state, handed back by cancel_send to reopen it */
   draft: unknown;
+  /** the draft this comes from: discarded once the message is queued */
+  draftId: number | null;
+  /** save_draft: show it in Drafts (false until the user has changed something) */
+  listed?: boolean;
 }
 
 export type ReplyMode = 'reply' | 'replyAll' | 'forward';
@@ -329,6 +335,10 @@ export interface CommandMap {
   send_message: { args: { request: SendRequest }; ret: SendQueued };
   cancel_send: { args: { id: number }; ret: unknown | null };
   reply_context: { args: { id: number; mode: ReplyMode }; ret: ReplyContext };
+  save_draft: { args: { id: number | null; request: SendRequest }; ret: number };
+  open_draft: { args: { id: number }; ret: unknown };
+  delete_draft: { args: { id: number }; ret: void };
+  open_compose: { args: { draftId: number; width: number | null; height: number | null }; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

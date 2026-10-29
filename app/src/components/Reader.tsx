@@ -12,6 +12,7 @@ import { runAction } from '../lib/actions';
 import { ForwardIcon, ImageIcon, MailIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { DRAG } from '../lib/platform';
 import { forwardFrameKeys } from '../lib/frameKeys';
+import { editDraft } from '../lib/compose';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -360,6 +361,16 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                   <span class="band-mark" title="Forwarded" aria-label="Forwarded">
                     <ForwardIcon size={13} />
                   </span>
+                </Show>
+                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.draftId}>
+                  {(d) => (
+                    <>
+                      <span class="dot-sep">·</span>
+                      <button class="link-btn band-edit-draft" onClick={() => editDraft(d())}>
+                        Edit draft
+                      </button>
+                    </>
+                  )}
                 </Show>
                 <Show when={h().attachments.length > 0}>
                   <span class="dot-sep">·</span>

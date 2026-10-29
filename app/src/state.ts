@@ -176,6 +176,11 @@ function ensureFolderSelected(): void {
   if (f) selectFolder(f.id);
 }
 
+/** A compose window: just the accounts (for From), no folders or sync. */
+export async function loadAccountsOnly(): Promise<void> {
+  setAccounts(await api.listAccounts());
+}
+
 export async function reloadAccounts(): Promise<Account[]> {
   const list = await api.listAccounts();
   setAccounts(list);

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, lazy, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
+import { createEffect, createMemo, createSignal, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import type { Account } from './api';
 import {
   accounts,
@@ -27,9 +27,7 @@ import { ConfirmHost } from './components/Actions';
 import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
 import { openSettings, SettingsHost } from './components/Settings';
 import { commandFor } from './lib/shortcuts';
-import { compose, newMessage } from './lib/compose';
-// The editor (TipTap) is the app's biggest dependency: loaded the first time it's needed.
-const Composer = lazy(() => import('./components/Composer').then((m) => ({ default: m.Composer })));
+import { newMessage } from './lib/compose';
 import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -260,17 +258,8 @@ export function App() {
             />
           </div>
           <div class="pane pane-reader">
-            {/* The composer takes the reader's place while a message is being written. */}
-            <Show
-              when={compose()?.key}
-              keyed
-              fallback={
-                <Show when={conversationReader()} fallback={<Reader ref={(el) => (readerEl = el)} />}>
-                  <ConversationReader ref={(el) => (readerEl = el)} />
-                </Show>
-              }
-            >
-              {(_key) => <Composer />}
+            <Show when={conversationReader()} fallback={<Reader ref={(el) => (readerEl = el)} />}>
+              <ConversationReader ref={(el) => (readerEl = el)} />
             </Show>
             <AttachmentToast />
           </div>

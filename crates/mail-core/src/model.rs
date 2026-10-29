@@ -157,6 +157,8 @@ pub struct MessageSummary {
     pub sending: bool,
     /// Our message, refused by the server: not sent.
     pub send_failed: bool,
+    /// A draft being written here (open it with `open_draft`).
+    pub draft_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -316,6 +318,17 @@ pub struct SendRequest {
     pub forward_attachments: Vec<usize>,
     /// The composer's own state, handed back by `cancel_send` (undo) to reopen it.
     pub draft: Option<serde_json::Value>,
+    /// The draft this comes from: discarded once the message is queued.
+    #[serde(default)]
+    pub draft_id: Option<i64>,
+    /// `save_draft`: list it in Drafts (false until the user has changed something: a reply
+    /// opened and closed again isn't a draft).
+    #[serde(default = "yes")]
+    pub listed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// What a reply or forward starts from (see `Core::reply_context`).
