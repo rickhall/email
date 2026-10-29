@@ -3680,3 +3680,253 @@ html.macos .app.rail-mode .search-bar {
   align-items: center;
   gap: 3px;
 }
+
+/* ==========================================================================
+   Composer (in the reader pane)
+   ========================================================================== */
+
+.composer {
+  background: var(--bg-reader);
+}
+.cmp-band .cmp-actions {
+  height: 30px;
+  gap: 8px;
+  overflow: visible;
+}
+.cmp-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-4);
+}
+.btn.primary.cmp-send {
+  min-width: 84px;
+  height: 30px;
+}
+.cmp-fields {
+  flex: none;
+  padding: 0 28px;
+}
+.cmp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  border-bottom: 1px solid var(--sep);
+}
+.cmp-label {
+  flex: none;
+  width: 56px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.cmp-from {
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+.cmp-select {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0;
+  outline: none;
+}
+.cmp-to {
+  position: relative;
+}
+.cmp-to .cmp-row {
+  padding-right: 64px;
+}
+.cmp-cc-toggle {
+  position: absolute;
+  right: 0;
+  top: 12px;
+  font-size: 12.5px;
+}
+.addr-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 0;
+  cursor: text;
+}
+.addr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+  max-width: 100%;
+  padding: 0 4px 0 9px;
+  border-radius: 12px;
+  background: var(--bg-hover);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.addr-chip.bad {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.addr-x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  color: var(--text-3);
+}
+.addr-x:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+.addr-input,
+.cmp-subject {
+  flex: 1;
+  min-width: 120px;
+  height: 24px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  padding: 0;
+}
+.cmp-subject {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* formatting bar: fixed height, so the link input swaps in without moving the editor */
+.cmp-toolbar {
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--sep);
+}
+.fmt-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  color: var(--text-2);
+}
+.fmt-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.fmt-btn.on {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+.fmt-btn[aria-label='Bold'] {
+  font-weight: 800;
+}
+.fmt-btn[aria-label='Italic'] {
+  font-style: italic;
+  font-family: Georgia, serif;
+}
+.fmt-btn[aria-label='Underline'] {
+  text-decoration: underline;
+}
+.fmt-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  background: var(--sep);
+}
+.link-edit {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.link-input {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--sep-strong);
+  border-radius: 6px;
+  background: var(--bg-reader);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.link-input:focus {
+  border-color: var(--accent);
+}
+
+/* editor */
+.cmp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 28px 40px;
+  cursor: text;
+}
+.cmp-editor .ProseMirror {
+  outline: none;
+  min-height: 160px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.cmp-editor .ProseMirror p {
+  margin: 0 0 0.7em;
+}
+.cmp-editor .ProseMirror ul,
+.cmp-editor .ProseMirror ol {
+  margin: 0 0 0.7em;
+  padding-left: 1.5em;
+}
+.cmp-editor .ProseMirror blockquote {
+  margin: 0 0 0.7em;
+  padding-left: 12px;
+  border-left: 2px solid var(--sep-strong);
+  color: var(--text-2);
+}
+.cmp-editor .ProseMirror a {
+  color: var(--accent);
+}
+.cmp-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--text-4);
+  pointer-events: none;
+}
+
+.search-bar .search-compose {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin-left: 6px;
+}
+/* the editor is its own focus indication (the caret); no ring around the whole body */
+.cmp-editor .ProseMirror:focus,
+.cmp-editor .ProseMirror:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.cmp-editor .ProseMirror li > p {
+  margin: 0;
+}
+.cmp-editor .ProseMirror li + li {
+  margin-top: 2px;
+}

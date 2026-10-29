@@ -195,6 +195,38 @@ export interface TagDef {
   defined: boolean;
 }
 
+/** A message to send, as the composer has it (see compose in lib/compose.ts). */
+export interface SendRequest {
+  accountId: number;
+  to: Addr[];
+  cc: Addr[];
+  bcc: Addr[];
+  subject: string;
+  /** body HTML (editor output, plus any quoted original) */
+  html: string;
+  /** file paths */
+  attachments: string[];
+  /** message being replied to (threading; marked replied once sent) */
+  replyingTo: number | null;
+  /** message being forwarded (marked forwarded once sent) */
+  forwarding: number | null;
+  /** the composer's own state, handed back by cancel_send to reopen it */
+  draft: unknown;
+}
+
+/** queued: sent at `sendAt` (ms) unless taken back with cancel_send(id) */
+export interface SendQueued {
+  id: number;
+  sendAt: number;
+}
+
+export interface SendEventPayload {
+  accountId: number;
+  id: number;
+  /** why it failed (send-failed only) */
+  message: string | null;
+}
+
 /** Where `next_unread` found the next unread item: its id and row index in the folder list. */
 export interface NextUnread {
   id: number;
@@ -212,7 +244,7 @@ export interface ActionFailedPayload {
 }
 
 /** Native macOS menu bar commands. */
-export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings' | 'show-log';
+export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings' | 'show-log' | 'new-message';
 export interface MenuActionPayload {
   id: MenuActionId;
 }
@@ -223,6 +255,8 @@ export interface EventMap {
   'message-ready': MessageReadyPayload;
   'sync-status': SyncStatus;
   'menu-action': MenuActionPayload;
+  'message-sent': SendEventPayload;
+  'send-failed': SendEventPayload;
   'action-failed': ActionFailedPayload;
 }
 
@@ -267,6 +301,8 @@ export interface CommandMap {
   index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };
   next_unread: { args: { folderId: number; after: number | null; threaded: boolean }; ret: NextUnread | null };
   show_log: { args: undefined; ret: void };
+  send_message: { args: { request: SendRequest }; ret: SendQueued };
+  cancel_send: { args: { id: number }; ret: unknown | null };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

@@ -31,6 +31,10 @@ import type {
 
 import { fieldMatches, norm, parseQuery, tokenize, type Term } from './lib/query';
 
+/** Mock send queue: id -> pending timer and the draft to hand back on undo. */
+let sendSeq = 0;
+const outgoing = new Map<number, { draft: unknown; timer: ReturnType<typeof setTimeout> }>();
+
 // ---------------------------------------------------------------- utilities
 
 function mulberry32(seed: number) {
@@ -1487,6 +1491,29 @@ export function createMockBackend(): Backend {
     },
     async show_log() {
       await sleep(3);
+    },
+    async send_message({ request }) {
+      await sleep(20);
+      if (request.to.length + request.cc.length + request.bcc.length === 0) throw 'Add at least one recipient.';
+      const id = ++sendSeq;
+      const sendAt = Date.now() + 10_000;
+      // The real queue sends after the undo window; here it just reports success.
+      outgoing.set(id, {
+        draft: request.draft,
+        timer: setTimeout(() => {
+          outgoing.delete(id);
+          emit('message-sent', { accountId: request.accountId, id, message: null });
+        }, 10_000),
+      });
+      return { id, sendAt };
+    },
+    async cancel_send({ id }) {
+      await sleep(10);
+      const o = outgoing.get(id);
+      if (!o) throw 'Too late to undo: the message was already sent.';
+      clearTimeout(o.timer);
+      outgoing.delete(id);
+      return o.draft ?? null;
     },
     async next_unread({ folderId, after, threaded }) {
       await sleep(3);

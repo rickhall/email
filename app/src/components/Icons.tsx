@@ -253,6 +253,13 @@ export const ThreadIcon = (p: P) => (
   </Svg>
 );
 
+export const ComposeIcon = (p: P) => (
+  <Svg {...p}>
+    <path d="M7.5 2.75H4A1.75 1.75 0 0 0 2.25 4.5v7.5A1.75 1.75 0 0 0 4 13.75h7.5A1.75 1.75 0 0 0 13.25 12V8.5" />
+    <path d="m12.1 2.15 1.75 1.75L8.2 9.55 5.9 10.1l.55-2.3z" />
+  </Svg>
+);
+
 export const SlidersIcon = (p: P) => (
   <Svg {...p}>
     <path d="M2.5 5h5.75M11.75 5h1.75M2.5 11h1.75M7.75 11h5.75" />

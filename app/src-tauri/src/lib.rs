@@ -432,6 +432,12 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
             &PredefinedMenuItem::quit(app, None)?,
         ],
     )?;
+    let file = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[&MenuItem::with_id(app, "new-message", "New Message", true, Some("CmdOrCtrl+N"))?],
+    )?;
     let edit = Submenu::with_items(
         app,
         "Edit",
@@ -480,7 +486,7 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
             &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &edit, &view, &window, &help])
+    Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window, &help])
 }
 
 #[cfg(target_os = "macos")]
@@ -516,6 +522,16 @@ fn init_logging(dir: Option<std::path::PathBuf>) {
         .with(tracing_subscriber::fmt::layer())
         .with(file_layer)
         .init();
+}
+
+#[tauri::command]
+async fn send_message(core: State<'_, Arc<Core>>, request: SendRequest) -> Res<SendQueued> {
+    core.send_message(request).map_err(err)
+}
+
+#[tauri::command]
+async fn cancel_send(core: State<'_, Arc<Core>>, id: i64) -> Res<Option<serde_json::Value>> {
+    core.cancel_send(id).map_err(err)
 }
 
 #[tauri::command]
@@ -598,6 +614,8 @@ pub fn run() {
             index_of,
             next_unread,
             show_log,
+            send_message,
+            cancel_send,
             list_tags,
             set_tag,
             delete_tag,

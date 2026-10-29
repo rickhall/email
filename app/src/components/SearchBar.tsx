@@ -3,8 +3,9 @@ import { Portal } from 'solid-js/web';
 import { placeNear, useDismiss } from './Actions';
 import { openShortcuts } from './ShortcutsSheet';
 import { commandFor, hint } from '../lib/shortcuts';
+import { newMessage } from '../lib/compose';
 import { searchActive, searchQuery, setSearchQuery } from '../state';
-import { CloseIcon, HelpIcon, SearchIcon } from './Icons';
+import { CloseIcon, ComposeIcon, HelpIcon, SearchIcon } from './Icons';
 import { DRAG } from '../lib/platform';
 
 function isTypingTarget(t: EventTarget | null): boolean {
@@ -207,6 +208,9 @@ export function SearchBar() {
           </Show>
         </span>
       </label>
+      <button class="icon-btn search-compose" title={`New message (${hint('compose')})`} aria-label="New message" onClick={() => newMessage()}>
+        <ComposeIcon />
+      </button>
       <Show when={help()}>
         <SearchHelp
           anchor={field}

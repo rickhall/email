@@ -54,6 +54,7 @@ export const COMMANDS: CommandSection[] = [
   {
     title: 'Messages',
     items: [
+      c('compose', 'New message', ['c'], ['Mod+N']),
       c('archive', 'Archive', ['e']),
       c('delete', 'Delete', ['#'], ['Delete']),
       c('move', 'Move to…', ['v']),

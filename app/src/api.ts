@@ -3,6 +3,8 @@ import type {
   Action,
   ActionResult,
   NextUnread,
+  SendQueued,
+  SendRequest,
   AddAccountArgs,
   Backend,
   CommandMap,
@@ -112,6 +114,10 @@ export const api = {
   /** The next unread item below `after` in the folder's list, wrapping to the top (null = none). */
   nextUnread: (folderId: number, after: number | null, threaded: boolean): Promise<NextUnread | null> =>
     call('next_unread', { folderId, after, threaded }),
+  /** Queue a message; it goes out after the undo window unless cancelSend(id) takes it back. */
+  sendMessage: (request: SendRequest): Promise<SendQueued> => call('send_message', { request }),
+  /** Take back a queued (or failed) message: its draft, to reopen the composer. */
+  cancelSend: (id: number): Promise<unknown | null> => call('cancel_send', { id }),
   /** Reveal the app's log file in the file manager. */
   showLog: (): Promise<void> => call('show_log', undefined),
   messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
@@ -149,6 +155,8 @@ export const events = {
   onMessagesChanged: (cb: (p: EventMap['messages-changed']) => void) => on('messages-changed', cb),
   onMessageReady: (cb: (p: EventMap['message-ready']) => void) => on('message-ready', cb),
   onSyncStatus: (cb: (p: EventMap['sync-status']) => void) => on('sync-status', cb),
+  onMessageSent: (cb: (p: EventMap['message-sent']) => void) => on('message-sent', cb),
+  onSendFailed: (cb: (p: EventMap['send-failed']) => void) => on('send-failed', cb),
   onActionFailed: (cb: (p: EventMap['action-failed']) => void) => on('action-failed', cb),
   onMenuAction: (cb: (p: EventMap['menu-action']) => void) => on('menu-action', cb),
 };

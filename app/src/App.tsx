@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
+import { createEffect, createMemo, createSignal, lazy, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import type { Account } from './api';
 import {
   accounts,
@@ -27,6 +27,9 @@ import { ConfirmHost } from './components/Actions';
 import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
 import { openSettings, SettingsHost } from './components/Settings';
 import { commandFor } from './lib/shortcuts';
+import { compose, newMessage } from './lib/compose';
+// The editor (TipTap) is the app's biggest dependency: loaded the first time it's needed.
+const Composer = lazy(() => import('./components/Composer').then((m) => ({ default: m.Composer })));
 import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -65,6 +68,7 @@ export function App() {
           shortcuts: openShortcuts,
           settings: openSettings,
           rail: ready ? toggleSidebar : undefined,
+          compose: ready ? newMessage : undefined,
           flyout: ready ? flyoutKey : undefined,
           goto: ready ? openFolderSwitcher : undefined,
         };
@@ -82,6 +86,11 @@ export function App() {
         return;
       }
       if (!ready) return;
+      if (e.key.toLowerCase() === 'n' && !e.shiftKey) {
+        e.preventDefault();
+        newMessage();
+        return;
+      }
       if (e.code === 'Digit1') {
         e.preventDefault();
         if (e.shiftKey) flyoutKey();
@@ -117,6 +126,9 @@ export function App() {
           break;
         case 'settings':
           openSettings();
+          break;
+        case 'new-message':
+          newMessage();
           break;
         case 'show-log':
           void api.showLog().catch((e) => showToast({ kind: 'error', text: errorMessage(e) }));
@@ -248,8 +260,17 @@ export function App() {
             />
           </div>
           <div class="pane pane-reader">
-            <Show when={conversationReader()} fallback={<Reader ref={(el) => (readerEl = el)} />}>
-              <ConversationReader ref={(el) => (readerEl = el)} />
+            {/* The composer takes the reader's place while a message is being written. */}
+            <Show
+              when={compose()?.key}
+              keyed
+              fallback={
+                <Show when={conversationReader()} fallback={<Reader ref={(el) => (readerEl = el)} />}>
+                  <ConversationReader ref={(el) => (readerEl = el)} />
+                </Show>
+              }
+            >
+              {(_key) => <Composer />}
             </Show>
             <AttachmentToast />
           </div>
