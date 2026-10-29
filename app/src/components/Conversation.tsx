@@ -27,9 +27,10 @@ const CARD_FRAME_CSS = 'html{overflow-y:hidden}body{padding:4px 20px 20px}';
 
 /**
  * Sandboxed HTML body that grows to its content height.
- * `allow-same-origin` (but still NO `allow-scripts`, so nothing inside can execute) lets the
- * parent read the inner document to measure it. Built imperatively so sandbox + srcdoc are
- * set before attachment.
+ * `allow-same-origin` lets the parent read the inner document to measure it; with
+ * `allow-scripts` the app's own listeners run in it under WebKit (keys, quote toggles). The
+ * email can't run code: it's sanitised and the document's CSP has script-src 'none' (see
+ * `buildSrcdoc`). Built imperatively so sandbox + srcdoc are set before attachment.
  */
 function AutoHeightFrame(props: { doc: string }) {
   let host!: HTMLDivElement;
@@ -37,7 +38,7 @@ function AutoHeightFrame(props: { doc: string }) {
     const f = document.createElement('iframe');
     f.className = 'card-frame';
     f.title = 'Message body';
-    f.setAttribute('sandbox', 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+    f.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox');
     f.setAttribute('referrerpolicy', 'no-referrer');
     f.setAttribute('scrolling', 'no');
     f.style.height = '160px';

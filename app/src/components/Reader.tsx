@@ -19,7 +19,9 @@ export function buildSrcdoc(rawHtml: string, allowRemote: boolean, extraCss = ''
   // Collapse a trailing reply history behind a pill — only when it is unambiguous.
   const html = collapseHtmlQuotes(rawHtml);
   const csp =
-    `default-src 'none'; img-src data: cid:${allowRemote ? ' https: http:' : ''}; ` +
+    // script-src 'none' is the guard against code in an email (with the sanitiser): the frame
+    // itself has allow-scripts, which WebKit needs for the app's key listener (lib/frameKeys.ts).
+    `default-src 'none'; script-src 'none'; img-src data: cid:${allowRemote ? ' https: http:' : ''}; ` +
     `style-src 'unsafe-inline'${allowRemote ? ' https:' : ''}; font-src data:${allowRemote ? ' https:' : ''}`;
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
@@ -45,8 +47,10 @@ ${extraCss}
  * Sandboxed body frame. Built imperatively so `sandbox` + `srcdoc` are set before the
  * element is attached (setting srcdoc on an already-attached sandboxed frame can leave it
  * unpainted in Blink), and each document gets a fresh browsing context.
- * No allow-scripts, so the email can't run code; allow-same-origin only lets the app see keys
- * pressed inside it (shortcuts keep working while the message has focus).
+ * allow-same-origin + allow-scripts let the app listen for keys inside it (shortcuts keep
+ * working while the message has focus; WebKit runs no listener at all in a frame without
+ * allow-scripts). The email itself still can't run code: the sanitiser removes scripts, event
+ * handlers and javascript: links, and the document's CSP has script-src 'none'.
  */
 function HtmlFrame(props: { doc: string }) {
   let host!: HTMLDivElement;
@@ -54,7 +58,7 @@ function HtmlFrame(props: { doc: string }) {
     const f = document.createElement('iframe');
     f.className = 'html-frame';
     f.title = 'Message body';
-    f.setAttribute('sandbox', 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+    f.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox');
     f.setAttribute('referrerpolicy', 'no-referrer');
     f.srcdoc = props.doc;
     f.addEventListener('load', () => forwardFrameKeys(f));

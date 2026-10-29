@@ -1,8 +1,10 @@
 /**
  * Keyboard shortcuts while a message body (sandboxed iframe) has focus: keydowns inside an
  * iframe never reach the app's window listeners, so they're re-dispatched from the frame
- * element. Needs `allow-same-origin` on the frame (never with `allow-scripts`: the email
- * still can't run code). Keys that act on the message itself stay with it.
+ * element. Needs `allow-same-origin` on the frame, and `allow-scripts` for WebKit, which
+ * otherwise blocks every listener in the frame, ours included ("Blocked script execution in
+ * 'about:srcdoc'"). The email still can't run code: it's sanitised, and the document's CSP has
+ * script-src 'none' (see `buildSrcdoc`). Keys that act on the message itself stay with it.
  */
 
 /** Scrolling keys: inside the message they scroll it rather than move between messages. */

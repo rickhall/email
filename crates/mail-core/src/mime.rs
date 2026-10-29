@@ -470,6 +470,20 @@ mod tests {
         assert!(has_remote(&out));
     }
 
+    /// The message frame allows scripts (WebKit needs it for the app's key listener), so the
+    /// sanitiser and the frame's CSP are what keep an email from running code.
+    #[test]
+    fn no_way_to_run_code_survives() {
+        let out = sanitize_html(
+            r#"<a href="javascript:alert(1)">a</a><a href=" JaVaScRiPt:alert(2)">b</a><svg onload="alert(3)"></svg><meta http-equiv="refresh" content="0;url=javascript:alert(4)"><iframe src="https://x"></iframe><img src=x onerror="alert(5)"><body onload="alert(6)"><base href="https://evil/"><object data="x"></object>"#,
+            &HashMap::new(),
+        );
+        let lower = out.to_ascii_lowercase();
+        for bad in ["javascript", "onload", "onerror", "<svg", "<meta", "<iframe", "<base", "<object", "alert"] {
+            assert!(!lower.contains(bad), "{bad} survived: {out}");
+        }
+    }
+
     /// FLOWED_IDS=1,2,3 BODIES_DB=/path/bodies.db cargo test -p mail-core real_flowed -- --ignored --nocapture
     #[test]
     #[ignore]
