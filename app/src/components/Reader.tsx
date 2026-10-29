@@ -11,6 +11,7 @@ import { searchTag, TagChips } from './Tags';
 import { runAction } from '../lib/actions';
 import { ImageIcon, MailIcon, PaperclipIcon } from './Icons';
 import { DRAG } from '../lib/platform';
+import { forwardFrameKeys } from '../lib/frameKeys';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -44,7 +45,8 @@ ${extraCss}
  * Sandboxed body frame. Built imperatively so `sandbox` + `srcdoc` are set before the
  * element is attached (setting srcdoc on an already-attached sandboxed frame can leave it
  * unpainted in Blink), and each document gets a fresh browsing context.
- * No allow-scripts, no allow-same-origin: the email can't run code or touch the app.
+ * No allow-scripts, so the email can't run code; allow-same-origin only lets the app see keys
+ * pressed inside it (shortcuts keep working while the message has focus).
  */
 function HtmlFrame(props: { doc: string }) {
   let host!: HTMLDivElement;
@@ -52,9 +54,10 @@ function HtmlFrame(props: { doc: string }) {
     const f = document.createElement('iframe');
     f.className = 'html-frame';
     f.title = 'Message body';
-    f.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+    f.setAttribute('sandbox', 'allow-same-origin allow-popups allow-popups-to-escape-sandbox');
     f.setAttribute('referrerpolicy', 'no-referrer');
     f.srcdoc = props.doc;
+    f.addEventListener('load', () => forwardFrameKeys(f));
     host.replaceChildren(f);
   });
   return <div class="html-wrap" ref={host} />;

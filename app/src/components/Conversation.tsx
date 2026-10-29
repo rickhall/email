@@ -18,6 +18,7 @@ import { DRAG } from '../lib/platform';
 import { CardActions, HeaderActions, type ActionTarget } from './Actions';
 import { searchTag, TagChips, TagDots } from './Tags';
 import { runAction } from '../lib/actions';
+import { forwardFrameKeys } from '../lib/frameKeys';
 
 // ------------------------------------------------------------- auto-height frame
 
@@ -62,6 +63,7 @@ function AutoHeightFrame(props: { doc: string }) {
     f.addEventListener('load', () => {
       const doc = f.contentDocument;
       if (!doc) return;
+      forwardFrameKeys(f);
       // First pass: the frame is still small, so scrollHeight is exact here.
       last = -1;
       f.style.height = `${Math.max(24, doc.documentElement.scrollHeight)}px`;
