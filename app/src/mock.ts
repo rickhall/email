@@ -1674,6 +1674,10 @@ export function createMockBackend(): Backend {
       storeMockDrafts(all);
       syncDraftCopies();
     },
+    async file_info({ paths }) {
+      await sleep(3);
+      return paths.map((p) => ({ path: p, name: p.split('/').pop() ?? p, size: 1000 + p.length * 37_000 }));
+    },
     async open_compose() {
       // The preview opens compose popups itself (lib/windows.ts).
     },

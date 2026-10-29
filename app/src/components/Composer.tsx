@@ -5,6 +5,8 @@ import Placeholder from '@tiptap/extension-placeholder';
 import type { Addr } from '../api';
 import { accounts } from '../state';
 import {
+  addFiles,
+  attachedBytes,
   compose,
   discardAndClose,
   hasContent,
@@ -17,7 +19,8 @@ import {
   type ComposeState,
 } from '../lib/compose';
 import { api } from '../api';
-import { composeDraftId, onCloseRequested, setWindowTitle } from '../lib/windows';
+import { composeDraftId, onCloseRequested, onFileDrop, pickFiles, setWindowTitle } from '../lib/windows';
+import { GMAIL_LIMIT } from '../lib/compose';
 import { MOD } from '../lib/shortcuts';
 import { DRAG } from '../lib/platform';
 import { confirmDialog } from './Actions';
@@ -98,7 +101,13 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
 
 // ------------------------------------------------------------- formatting bar
 
-function Toolbar(props: { editor: () => Editor | undefined; tick: () => number; linking: boolean; setLinking: (v: boolean) => void }) {
+function Toolbar(props: {
+  editor: () => Editor | undefined;
+  tick: () => number;
+  linking: boolean;
+  setLinking: (v: boolean) => void;
+  onAttach: () => void;
+}) {
   const linking = () => props.linking;
   const setLinking = props.setLinking;
   let linkInput: HTMLInputElement | undefined;
@@ -195,6 +204,10 @@ function Toolbar(props: { editor: () => Editor | undefined; tick: () => number; 
         <B label="Quote" key="" name="blockquote" onClick={run((e) => e.chain().focus().toggleBlockquote().run())}>
           ❝
         </B>
+        <span class="fmt-fill" />
+        <button class="fmt-btn fmt-attach" title="Attach files" aria-label="Attach files" onClick={() => props.onAttach()}>
+          <PaperclipIcon size={15} />
+        </button>
       </Show>
     </div>
   );
@@ -211,6 +224,8 @@ export function Composer() {
   const [tick, setTick] = createSignal(0);
   const [linking, setLinking] = createSignal(false);
   const [showQuote, setShowQuote] = createSignal(false);
+  const [dropping, setDropping] = createSignal(false);
+  onMount(() => onFileDrop(setDropping, addFiles));
   const c = () => compose() as ComposeState;
 
   onMount(() => {
@@ -383,11 +398,33 @@ export function Composer() {
           />
         </div>
       </div>
-      <Toolbar editor={editor} tick={tick} linking={linking()} setLinking={setLinking} />
+      <Toolbar editor={editor} tick={tick} linking={linking()} setLinking={setLinking} onAttach={() => void pickFiles().then(addFiles)} />
+      <Show when={dropping()}>
+        <div class="cmp-drop" aria-hidden="true">
+          <span>Drop files to attach</span>
+        </div>
+      </Show>
       <div class="cmp-scroll" onMouseDown={(e) => e.target === e.currentTarget && (e.preventDefault(), editor()?.commands.focus('end'))}>
         <div class="cmp-editor" classList={{ 'has-quote': !!c().quoteHtml || c().fwdAttachments.length > 0 }} ref={editorEl} />
-        <Show when={c().fwdAttachments.length > 0}>
+        <Show when={c().fwdAttachments.length + (c().files?.length ?? 0) > 0}>
           <div class="cmp-atts" aria-label="Attachments">
+            <For each={c().files ?? []}>
+              {(f) => (
+                <span class="cmp-att" title={f.path}>
+                  <PaperclipIcon size={12} />
+                  <span class="cmp-att-name">{f.name}</span>
+                  <span class="cmp-att-size">{fmtSize(f.size)}</span>
+                  <button
+                    class="addr-x"
+                    aria-label={`Remove ${f.name}`}
+                    title="Remove"
+                    onClick={() => updateCompose({ files: (c().files ?? []).filter((x) => x.path !== f.path) })}
+                  >
+                    <CloseIcon size={9} />
+                  </button>
+                </span>
+              )}
+            </For>
             <For each={c().fwdAttachments}>
               {(a) => (
                 <span class="cmp-att" title={a.name}>
@@ -406,6 +443,11 @@ export function Composer() {
               )}
             </For>
           </div>
+          <Show when={attachedBytes(c()) > GMAIL_LIMIT}>
+            <p class="cmp-att-warn">
+              Attachments total {fmtSize(attachedBytes(c()))}: over the 25 MB most servers (Gmail included) accept.
+            </p>
+          </Show>
         </Show>
         <Show when={c().quoteHtml}>
           {(q) => (

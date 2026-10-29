@@ -1,6 +1,8 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { emit as tauriEmit, listen as tauriListen } from '@tauri-apps/api/event';
-import { api, isTauri } from '../api';
+import { api, isTauri, type FileInfo } from '../api';
 
 // Windows: the main window, and one compose window per draft ("compose-<draft id>"). In the
 // browser preview a compose window is a popup page (?compose=<id>), and windows talk over a
@@ -66,5 +68,49 @@ export function onBroadcast<K extends keyof WindowEvents>(event: K, cb: (p: Wind
   }
   channel?.addEventListener('message', (m: MessageEvent<{ event: string; payload: WindowEvents[K] }>) => {
     if (m.data?.event === event) cb(m.data.payload);
+  });
+}
+
+// ------------------------------------------------------------- files to attach
+
+/** The system file picker (several files). */
+export async function pickFiles(): Promise<FileInfo[]> {
+  if (!isTauri) return [];
+  const chosen = await openDialog({ multiple: true, directory: false, title: 'Attach files' });
+  const paths = chosen == null ? [] : Array.isArray(chosen) ? chosen : [chosen];
+  return paths.length ? api.fileInfo(paths) : [];
+}
+
+/** Files dragged over / dropped on this window. `over`: show the drop target. */
+export function onFileDrop(over: (on: boolean) => void, drop: (files: FileInfo[]) => void): void {
+  if (isTauri) {
+    void getCurrentWebview().onDragDropEvent((e) => {
+      if (e.payload.type === 'enter' || e.payload.type === 'over') over(true);
+      else if (e.payload.type === 'leave') over(false);
+      else if (e.payload.type === 'drop') {
+        over(false);
+        if (e.payload.paths.length) void api.fileInfo(e.payload.paths).then(drop);
+      }
+    });
+    return;
+  }
+  // Preview: browsers don't expose paths; stand-ins with the files' names and sizes.
+  let depth = 0;
+  document.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    depth++;
+    over(true);
+  });
+  document.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) over(false);
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    depth = 0;
+    over(false);
+    const files = [...(e.dataTransfer?.files ?? [])].map((f) => ({ path: f.name, name: f.name, size: f.size }));
+    if (files.length) drop(files);
   });
 }

@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 import { accounts, folderById, selectedFolderId } from '../state';
-import { api, errorMessage, events, type Addr, type Attachment, type ReplyMode, type SendRequest } from '../api';
+import { api, errorMessage, events, type Addr, type Attachment, type FileInfo, type ReplyMode, type SendRequest } from '../api';
 import { hideToast, showToast } from '../components/Toast';
 import { broadcast, closeThisWindow, composeDraftId, isComposeWindow, onBroadcast, openComposeWindow } from './windows';
 
@@ -29,6 +29,8 @@ export interface ComposeState {
   quoteHtml: string | null;
   /** forward: the original's attachments still to send along */
   fwdAttachments: Attachment[];
+  /** files attached from disk */
+  files?: FileInfo[];
   /** the user has changed something (only then is it a draft worth keeping or listing) */
   edited?: boolean;
 }
@@ -45,7 +47,7 @@ function request(c: ComposeState, draftId: number | null): SendRequest {
     subject: c.subject,
     // Top-posting: the new text, then the original.
     html: c.html + (c.quoteHtml ?? ''),
-    attachments: [],
+    attachments: (c.files ?? []).map((f) => f.path),
     replyingTo: c.replyingTo,
     forwarding: c.forwarding,
     forwardAttachments: c.fwdAttachments.map((a) => a.index),
@@ -191,6 +193,21 @@ export async function saveNow(): Promise<void> {
   }
 }
 
+/** Attach files (each once). */
+export function addFiles(files: FileInfo[]): void {
+  const cur = compose()?.files ?? [];
+  const fresh = files.filter((f) => !cur.some((x) => x.path === f.path));
+  if (fresh.length) updateCompose({ files: [...cur, ...fresh] });
+}
+
+/** Gmail's (and most servers') limit on a message's attachments. */
+export const GMAIL_LIMIT = 25 * 1024 * 1024;
+
+/** Total size of everything attached (files and a forward's originals), bytes. */
+export function attachedBytes(c: ComposeState): number {
+  return (c.files ?? []).reduce((n, f) => n + f.size, 0) + c.fwdAttachments.reduce((n, a) => n + a.size, 0);
+}
+
 export function updateCompose(patch: Partial<ComposeState>): void {
   const c = compose();
   if (!c) return;
@@ -207,6 +224,11 @@ export async function send(c: ComposeState): Promise<void> {
   }
   if (c.to.length + c.cc.length + c.bcc.length === 0) {
     showToast({ kind: 'error', text: 'Add at least one recipient.' });
+    return;
+  }
+  const gmail = accounts()?.find((a) => a.id === c.accountId)?.provider === 'gmail';
+  if (gmail && attachedBytes(c) > GMAIL_LIMIT) {
+    showToast({ kind: 'error', text: 'Gmail won’t accept more than 25 MB of attachments. Remove some, or share them as a link.' });
     return;
   }
   clearTimeout(saveTimer);

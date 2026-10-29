@@ -2,6 +2,7 @@ import type {
   Account,
   Action,
   ActionResult,
+  FileInfo,
   NextUnread,
   ReplyContext,
   ReplyMode,
@@ -122,6 +123,8 @@ export const api = {
   saveDraft: (id: number | null, request: SendRequest): Promise<number> => call('save_draft', { id, request }),
   openDraft: (id: number): Promise<unknown> => call('open_draft', { id }),
   deleteDraft: (id: number): Promise<void> => call('delete_draft', { id }),
+  /** Name and size of files to attach (missing files and folders are left out). */
+  fileInfo: (paths: string[]): Promise<FileInfo[]> => call('file_info', { paths }),
   /** Open (or focus) the compose window of draft `draftId` (at the last compose window's size). */
   openCompose: (draftId: number): Promise<void> => call('open_compose', { draftId }),
   /** Prefill a reply / reply-all / forward of a message (downloads it first if needed). */

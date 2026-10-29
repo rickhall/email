@@ -231,6 +231,13 @@ export interface SendRequest {
 
 export type ReplyMode = 'reply' | 'replyAll' | 'forward';
 
+/** A file chosen to attach (picker or drop). */
+export interface FileInfo {
+  path: string;
+  name: string;
+  size: number;
+}
+
 /** A reply / forward, prefilled by the core (recipients, subject, quoted original). */
 export interface ReplyContext {
   accountId: number;
@@ -339,6 +346,7 @@ export interface CommandMap {
   open_draft: { args: { id: number }; ret: unknown };
   delete_draft: { args: { id: number }; ret: void };
   open_compose: { args: { draftId: number }; ret: void };
+  file_info: { args: { paths: string[] }; ret: FileInfo[] };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

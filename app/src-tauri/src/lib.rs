@@ -586,6 +586,27 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct FileInfo {
+    path: String,
+    name: String,
+    size: u64,
+}
+
+/// Name and size of files chosen to attach (picker or drop). Folders and missing files are left
+/// out.
+#[tauri::command]
+async fn file_info(paths: Vec<String>) -> Res<Vec<FileInfo>> {
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+            let name = std::path::Path::new(&path).file_name()?.to_string_lossy().into_owned();
+            Some(FileInfo { path, name, size: meta.len() })
+        })
+        .collect())
+}
+
 #[tauri::command]
 async fn reply_context(core: State<'_, Arc<Core>>, id: i64, mode: ReplyMode) -> Res<ReplyContext> {
     core.reply_context(id, mode).await.map_err(err)
@@ -630,6 +651,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             init_logging(app.path().app_log_dir().ok());
             tracing::info!(version = app.package_info().version.to_string(), "starting");
@@ -682,6 +704,7 @@ pub fn run() {
             open_draft,
             delete_draft,
             open_compose,
+            file_info,
             cancel_send,
             list_tags,
             set_tag,
