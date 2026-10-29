@@ -2876,8 +2876,8 @@ body.resizing .app {
   height: auto;
 }
 html.macos .rail-top {
-  /* traffic lights at y≈14–28 span past the rail: first item below them */
-  padding-top: 40px;
+  /* first item below the shared title band (see "macOS rail" below) */
+  padding-top: calc(var(--search-bar-h) + 6px);
 }
 .rail-scroll {
   flex: 1;
@@ -3004,9 +3004,29 @@ html.macos .rail-top {
   }
 }
 
-/* macOS rail: keep the list column's top-band content right of the traffic lights */
+/* macOS rail: the traffic lights (x 18→70) don't fit the 48px rail, so, like Mail and Finder
+   with a collapsed sidebar, they sit in one title band across rail and list: the rail's top is
+   list-coloured with no divider, and the list's search field starts right of the lights. */
+html.macos {
+  --traffic-lights-end: 70px;
+}
+html.macos .app.rail-mode .pane-sidebar {
+  background: linear-gradient(var(--bg-list) 0 var(--search-bar-h), var(--bg-sidebar) 0);
+  /* the border keeps its width (no 1px content shift); ::after draws it below the band */
+  border-right-color: transparent;
+}
+html.macos .app.rail-mode .pane-sidebar::after {
+  content: '';
+  position: absolute;
+  top: var(--search-bar-h);
+  bottom: 0;
+  right: -1px;
+  width: 1px;
+  background: var(--sep);
+  pointer-events: none;
+}
 html.macos .app.rail-mode .search-bar {
-  padding-left: 40px;
+  padding-left: calc(var(--traffic-lights-end) + 14px - var(--sidebar-w));
 }
 
 /* breadcrumb title */
