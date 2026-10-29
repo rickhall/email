@@ -112,6 +112,8 @@ export const api = {
   /** The next unread item below `after` in the folder's list, wrapping to the top (null = none). */
   nextUnread: (folderId: number, after: number | null, threaded: boolean): Promise<NextUnread | null> =>
     call('next_unread', { folderId, after, threaded }),
+  /** Reveal the app's log file in the file manager. */
+  showLog: (): Promise<void> => call('show_log', undefined),
   messageInFolder: (id: number, folderId: number | null): Promise<boolean> =>
     call('message_in_folder', { id, folderId }),
   openAttachment: (messageId: number, index: number): Promise<void> =>

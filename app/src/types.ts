@@ -205,7 +205,7 @@ export interface ActionFailedPayload {
 }
 
 /** Native macOS menu bar commands. */
-export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings';
+export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings' | 'show-log';
 export interface MenuActionPayload {
   id: MenuActionId;
 }
@@ -259,6 +259,7 @@ export interface CommandMap {
   reveal_path: { args: { path: string }; ret: void };
   index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };
   next_unread: { args: { folderId: number; after: number | null; threaded: boolean }; ret: NextUnread | null };
+  show_log: { args: undefined; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

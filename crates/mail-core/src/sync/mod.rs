@@ -376,6 +376,16 @@ async fn status_task(shared: Arc<Shared>) {
     }
 }
 
+/// `$cmd` (one IMAP command on `$conn`) under the stall timeout: fails if the server goes quiet
+/// or the computer sleeps, as well as with the command's own error. A dead connection (after
+/// sleep, a network change) would otherwise leave the command waiting indefinitely.
+macro_rules! guarded {
+    ($conn:expr, $what:expr, $cmd:expr) => {{
+        let activity = $conn.activity.clone();
+        imap::stall_timeout(&activity, STALL_TIMEOUT, $what, $cmd).await.and_then(|r| r.map_err(anyhow::Error::from))
+    }};
+}
+
 /// A connection that moves no data for this long during a sync step is considered stalled:
 /// it's dropped and reconnected. Measured as inactivity, not total time, so a big chunk on a
 /// slow link is never cut off while it's still arriving.
@@ -433,7 +443,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
         if first_pass {
             shared.set_status(SyncPhase::Folders, None, 0, 0, None);
         }
-        let listed = conn.list_folders().await?;
+        let listed = guarded!(conn, "listing folders", conn.list_folders())?;
         shared.store.sync_folder_list(account.id, &listed)?;
         shared.emit(CoreEvent::FoldersChanged { account_id: account.id });
 
@@ -563,7 +573,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                     // errors will surface again on the next folder and trigger a reconnect.
                     tracing::warn!(folder = folder.raw_name, "folder sync failed: {e:#}");
                     done.insert(next);
-                    if conn.session.noop().await.is_err() {
+                    if guarded!(conn, "checking the connection", conn.session.noop()).is_err() {
                         return Err(e);
                     }
                 }
@@ -585,7 +595,9 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
     let folders = shared.store.folders(shared.account.id)?;
     let wanted = folders.iter().filter(|f| f.selectable && only.is_none_or(|o| o.contains(&f.id)));
     for (i, f) in wanted.enumerate() {
-        match conn.status(&f.raw_name).await {
+        // A stall ends the sweep (the connection is gone); a folder's own error doesn't.
+        let activity = conn.activity.clone();
+        match imap::stall_timeout(&activity, STALL_TIMEOUT, "counting messages", conn.status(&f.raw_name)).await? {
             Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,
             Err(e) => tracing::debug!(folder = f.raw_name, "STATUS failed: {e:#}"),
         }
@@ -638,17 +650,20 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             std::future::pending::<()>().await;
             unreachable!();
         }
-        c.select(&raw).await?;
+        guarded!(c, "selecting the watched folder", c.select(&raw))?;
         let imap::Connection { session, caps, activity, .. } = c;
         let mut handle = session.idle();
-        handle.init().await?;
+        imap::stall_timeout(&activity, STALL_TIMEOUT, "starting IDLE", handle.init()).await??;
+        let mut woke = imap::wake_watch();
         let (wait, stop) = handle.wait_with_timeout(Duration::from_secs(25 * 60));
         let pushed = tokio::select! {
             r = wait => matches!(r?, async_imap::extensions::idle::IdleResponse::NewData(_)),
             r = focus.changed(), if follow_focus => { r?; false }
+            // IDLE is silent by design, so it has no stall timeout: after sleep, start over.
+            _ = woke.changed() => anyhow::bail!("woke from sleep while watching {raw}; reconnecting"),
         };
         drop(stop);
-        let session = handle.done().await?;
+        let session = imap::stall_timeout(&activity, STALL_TIMEOUT, "ending IDLE", handle.done()).await??;
         let mut c = imap::Connection { session, caps, selected: Some(raw.clone()), activity };
 
         if pushed {
@@ -725,8 +740,8 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
     }
     // This folder's counts, now, on this connection (re-SELECT for EXISTS, then count UNSEEN);
     // the other folders catch up in the headers task's next sweep.
-    let mb = conn.select(&folder.raw_name).await?;
-    let unread = conn.session.search("UNSEEN").await?.len() as u32;
+    let mb = guarded!(conn, "counting messages", conn.select(&folder.raw_name))?;
+    let unread = guarded!(conn, "counting unread messages", conn.session.search("UNSEEN"))?.len() as u32;
     shared.store.set_folder_counts(folder_id, mb.exists, unread)?;
     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
     if !shared.counts_dirty.lock().unwrap().is_empty() {
@@ -847,7 +862,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
         let focus = *shared.focus.borrow();
         if let (Some(c), Some(focus)) = (conn.as_mut(), focus) {
             if let Ok(Some((_, raw))) = shared.store.folder(focus) {
-                if c.ensure_selected(&raw).await.is_err() {
+                if guarded!(c, "selecting the folder on screen", c.ensure_selected(&raw)).is_err() {
                     conn = None;
                 }
             }
@@ -874,7 +889,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             _ = tokio::time::sleep(until_due.min(KEEPALIVE)), if next_due.is_some() => continue,
             _ = tokio::time::sleep(KEEPALIVE) => {
                 if let Some(c) = conn.as_mut() {
-                    if c.session.noop().await.is_err() {
+                    if guarded!(c, "keeping the connection alive", c.session.noop()).is_err() {
                         conn = None;
                     }
                 }

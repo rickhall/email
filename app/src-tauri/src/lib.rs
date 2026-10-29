@@ -448,7 +448,12 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         app,
         "Help",
         true,
-        &[&MenuItem::with_id(app, "shortcuts", "Keyboard Shortcuts", true, Some("CmdOrCtrl+/"))?],
+        &[
+            &MenuItem::with_id(app, "shortcuts", "Keyboard Shortcuts", true, Some("CmdOrCtrl+/"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "show-log", "Show Log File", true, None::<&str>)?,
+            &MenuItem::with_id(app, "devtools", "Developer Tools", true, Some("Alt+CmdOrCtrl+I"))?,
+        ],
     )?;
     let window = Submenu::with_items(
         app,
@@ -470,13 +475,43 @@ struct MenuAction {
     id: String,
 }
 
+const LOG_FILE: &str = "email.log";
+/// Above this, the log is renamed to email.1.log (replacing the previous one) at startup.
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Log to stderr and to `email.log` in the app's log folder (~/Library/Logs/<id> on macOS,
+/// ~/.local/share/<id>/logs on Linux), so a release build launched from Finder still leaves
+/// a record to look at. Falls back to stderr alone if the file can't be opened.
+fn init_logging(dir: Option<std::path::PathBuf>) {
+    use tracing_subscriber::prelude::*;
+    // html5ever (HTML sanitising) warns about every malformed table in an email: not news.
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,html5ever=error".into());
+    let file = dir.and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(LOG_FILE);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+            let _ = std::fs::rename(&path, dir.join("email.1.log"));
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+    });
+    let file_layer =
+        file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f)));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(file_layer)
+        .init();
+}
+
+#[tauri::command]
+async fn show_log(app: tauri::AppHandle) -> Res<()> {
+    let path = app.path().app_log_dir().map_err(|e| e.to_string())?.join(LOG_FILE);
+    app.opener().reveal_item_in_dir(&path).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -485,6 +520,10 @@ pub fn run() {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
             let _ = w.set_focus();
+            if id == "devtools" {
+                w.open_devtools();
+                return;
+            }
         }
         let _ = app.emit("menu-action", MenuAction { id });
     });
@@ -500,6 +539,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            init_logging(app.path().app_log_dir().ok());
+            tracing::info!(version = app.package_info().version.to_string(), "starting");
             create_main_window(app)?;
             if let Ok(dir) = opened_attachments_dir(app.handle()) {
                 let _ = std::fs::remove_dir_all(dir);
@@ -542,6 +583,7 @@ pub fn run() {
             undo_action,
             index_of,
             next_unread,
+            show_log,
             list_tags,
             set_tag,
             delete_tag,

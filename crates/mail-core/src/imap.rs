@@ -79,8 +79,45 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
     }
 }
 
-/// Run `fut`, failing if the connection goes `limit` without moving any data. The outer
-/// `Result` is the stall; the inner value is whatever `fut` produced.
+/// Bumped when the computer wakes from sleep. Connections made before are dead even if the OS
+/// hasn't noticed yet, and the stall timer can't tell (its clock stops during sleep, so the
+/// sleep doesn't count as silence): `stall_timeout` gives up on them at once instead.
+fn wake_signal() -> &'static tokio::sync::watch::Sender<u64> {
+    static WAKE: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> = std::sync::OnceLock::new();
+    WAKE.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+/// Changes when the computer wakes from sleep (for waits outside `stall_timeout`, like IDLE).
+pub fn wake_watch() -> tokio::sync::watch::Receiver<u64> {
+    wake_signal().subscribe()
+}
+
+/// Watch for sleep: the wall clock keeps running while the computer sleeps, the monotonic
+/// clock doesn't (macOS and Linux alike), so a sleep shows up as the wall clock jumping ahead.
+/// Call from inside the runtime; only the first call starts the watcher.
+pub fn spawn_wake_detector() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tokio::spawn(async {
+            let mut wall = std::time::SystemTime::now();
+            let mut mono = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let (w, m) = (std::time::SystemTime::now(), std::time::Instant::now());
+                let (dw, dm) = (w.duration_since(wall).unwrap_or_default(), m - mono);
+                if dw > dm + Duration::from_secs(20) {
+                    tracing::info!(slept_s = (dw - dm).as_secs(), "woke from sleep; reconnecting");
+                    wake_signal().send_modify(|g| *g += 1);
+                }
+                (wall, mono) = (w, m);
+            }
+        });
+    });
+}
+
+/// Run `fut`, failing if the connection goes `limit` without moving any data, or as soon as
+/// the computer wakes from sleep. The outer `Result` is the stall; the inner value is whatever
+/// `fut` produced.
 pub async fn stall_timeout<T>(
     activity: &Activity,
     limit: Duration,
@@ -88,11 +125,13 @@ pub async fn stall_timeout<T>(
     fut: impl std::future::Future<Output = T>,
 ) -> Result<T> {
     activity.touch();
+    let mut woke = wake_signal().subscribe();
     tokio::pin!(fut);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             r = &mut fut => return Ok(r),
+            _ = woke.changed() => return Err(anyhow!("the computer slept while {what}; reconnecting")),
             _ = tick.tick() => {
                 if activity.idle_for() > limit {
                     return Err(anyhow!("no data from the server for {}s while {what}; connection stalled", limit.as_secs()));
@@ -246,11 +285,24 @@ impl async_imap::Authenticator for XOAuth2 {
     }
 }
 
+/// Giving up on a connection attempt (DNS, TCP, TLS, greeting, login) after this long.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub async fn connect(cfg: &ServerConfig) -> Result<Connection> {
+    tokio::time::timeout(CONNECT_TIMEOUT, connect_inner(cfg))
+        .await
+        .map_err(|_| anyhow!("connecting to {} timed out after {}s", cfg.host, CONNECT_TIMEOUT.as_secs()))?
+}
+
+async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
     let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
         .with_context(|| format!("connecting to {}:{}", cfg.host, cfg.port))?;
     tcp.set_nodelay(true)?;
+    // Let the OS probe idle connections (IDLE can sit silent for minutes): a peer that's gone
+    // (network change, sleep) then errors within about a minute instead of hanging.
+    let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(60)).with_interval(Duration::from_secs(15));
+    socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive)?;
     let server_name = ServerName::try_from(cfg.host.clone())?;
     let tls = TlsConnector::from(tls_config()).connect(server_name, tcp).await?;
 
@@ -605,8 +657,9 @@ impl Connection {
             .collect())
     }
 
+    /// Polite goodbye, best effort: a dead connection (e.g. after sleep) is just dropped.
     pub async fn logout(mut self) {
-        let _ = self.session.logout().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.session.logout()).await;
     }
 }
 
@@ -888,3 +941,23 @@ impl std::fmt::Display for OpRejected {
 }
 
 impl std::error::Error for OpRejected {}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_wake_ends_a_waiting_command_at_once() {
+        let activity = Activity::default();
+        let wait = stall_timeout(&activity, Duration::from_secs(60), "waiting", std::future::pending::<()>());
+        let wake = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            wake_signal().send_modify(|g| *g += 1);
+        };
+        let started = std::time::Instant::now();
+        let (r, ()) = tokio::join!(wait, wake);
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("slept"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+}

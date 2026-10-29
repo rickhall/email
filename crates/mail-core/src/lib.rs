@@ -137,6 +137,7 @@ impl Core {
 
     /// Start syncing every stored account. Accounts whose secret is missing are skipped.
     pub fn start(&self) -> Result<()> {
+        imap::spawn_wake_detector();
         for account in self.store.accounts()? {
             if let Err(e) = self.start_account(account.clone()) {
                 tracing::warn!(account = account.email, "not starting sync: {e:#}");

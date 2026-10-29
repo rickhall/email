@@ -1480,6 +1480,9 @@ export function createMockBackend(): Backend {
       }
       return null;
     },
+    async show_log() {
+      await sleep(3);
+    },
     async next_unread({ folderId, after, threaded }) {
       await sleep(3);
       // Rows in list order, as (id, unread): messages, or conversations by their newest message.

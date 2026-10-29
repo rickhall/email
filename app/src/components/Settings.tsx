@@ -11,6 +11,7 @@ import {
   type Command,
 } from '../lib/shortcuts';
 import { CloseIcon } from './Icons';
+import { api, errorMessage } from '../api';
 
 const [open, setOpen] = createSignal(false);
 let returnFocus: HTMLElement | null = null;
@@ -176,6 +177,21 @@ function Panel() {
               </section>
             )}
           </For>
+          <section class="st-section">
+            <h4>Troubleshooting</h4>
+            <div class="st-row">
+              <span class="st-desc">App log, for looking into sync problems</span>
+              <span />
+              <span class="st-reset-slot">
+                <button
+                  class="link-btn"
+                  onClick={() => void api.showLog().catch((e) => setStatus({ text: errorMessage(e), error: true }))}
+                >
+                  Show file
+                </button>
+              </span>
+            </div>
+          </section>
         </div>
         <div class="st-foot">
           <span class="st-status" classList={{ error: !!status()?.error }} aria-live="polite">

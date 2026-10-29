@@ -20,7 +20,8 @@ import { Rail } from './components/Rail';
 import { Flyout } from './components/Flyout';
 import { FolderSwitcherHost, openFolderSwitcher } from './components/FolderSwitcher';
 import { flyout, RAIL_W, setFlyout, sidebarMode, toggleSidebar } from './lib/layout';
-import { events } from './api';
+import { api, errorMessage, events } from './api';
+import { showToast } from './components/Toast';
 import { ViewMenuPopover } from './components/ViewMenu';
 import { ConfirmHost } from './components/Actions';
 import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
@@ -116,6 +117,9 @@ export function App() {
           break;
         case 'settings':
           openSettings();
+          break;
+        case 'show-log':
+          void api.showLog().catch((e) => showToast({ kind: 'error', text: errorMessage(e) }));
           break;
       }
     });
