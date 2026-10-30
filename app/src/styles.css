@@ -3688,11 +3688,6 @@ html.macos .app.rail-mode .search-bar {
 .composer {
   background: var(--bg-reader);
 }
-.cmp-band .cmp-actions {
-  height: 30px;
-  gap: 8px;
-  overflow: visible;
-}
 .cmp-hint {
   flex: 1;
   min-width: 0;
@@ -4012,6 +4007,16 @@ html.macos .app.rail-mode .search-bar {
   background: #e3e6eb;
   color: #3b3f48;
 }
+@media (prefers-color-scheme: dark) {
+  .cmp-quote-pill {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-3);
+  }
+  .cmp-quote-pill:hover {
+    background: rgba(255, 255, 255, 0.13);
+    color: var(--text-2);
+  }
+}
 
 /* compose window: the composer fills it */
 .compose-window {
@@ -4183,4 +4188,53 @@ html.inactive .sf-track,
 html.inactive .sf-track *,
 html.inactive .sk-line {
   animation-play-state: paused;
+}
+
+/* address text left that isn't an address yet: red, still editable */
+.addr-input.invalid {
+  color: var(--danger);
+  text-decoration: underline wavy color-mix(in srgb, var(--danger) 55%, transparent);
+  text-underline-offset: 3px;
+}
+.addr-chip {
+  cursor: pointer;
+}
+/* the input standing in for a chip being edited: only as wide as its text */
+.addr-input.in-place {
+  flex: 0 1 auto;
+  min-width: 60px;
+  field-sizing: content;
+}
+.addr-sugg {
+  order: 9999;
+}
+
+/* compose window: a compact top bar (what it is · hint · discard · send) */
+.cmp-bar {
+  flex: none;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px 0 28px;
+  border-bottom: 1px solid var(--sep);
+}
+.cmp-kind {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.cmp-bar .cmp-actions {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 12px;
+}
+.cmp-bar .cmp-hint {
+  flex: 0 1 auto;
+  text-align: right;
 }

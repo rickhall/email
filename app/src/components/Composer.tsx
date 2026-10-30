@@ -28,19 +28,42 @@ import { CloseIcon, PaperclipIcon, TrashIcon } from './Icons';
 import { AutoHeightFrame } from './Conversation';
 import { buildSrcdoc } from './Reader';
 import { fmtSize } from '../lib/format';
+import { showToast } from './Toast';
 
 /** The quoted original under the text: read-only, at the composer's margins. */
 const QUOTE_FRAME_CSS = 'html{overflow-y:hidden}body{padding:0 0 12px}';
 
 // ------------------------------------------------------------- address field
 
+/** A chip as text for editing: "Name <addr>" or the address. */
+const chipText = (a: Addr) => (a.name ? `${a.name} <${a.addr}>` : a.addr);
+
 /** To/Cc/Bcc: typed addresses become chips on Enter, comma, semicolon, Tab or leaving the field;
  *  people from your mail are suggested as you type (↑/↓, Enter or Tab to pick, Esc to close). */
-function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]) => void; autofocus?: boolean }) {
+function AddressField(props: {
+  label: string;
+  list: Addr[];
+  onChange: (l: Addr[]) => void;
+  autofocus?: boolean;
+  /** what's typed but not (yet) a chip, for Send to check */
+  onTyping?: (text: string, focus: () => void) => void;
+}) {
   let input!: HTMLInputElement;
-  const [text, setText] = createSignal('');
+  const [text, setTextRaw] = createSignal('');
+  const setText = (t: string) => {
+    setTextRaw(t);
+    props.onTyping?.(t, () => input.focus());
+  };
+  /** Left with text that isn't an address: shown in red, still editable. */
+  const [invalid, setInvalid] = createSignal(false);
+  /** Where the text goes back in: the chip being edited keeps its place (null = at the end).
+   *  The input moves there with CSS `order`, so it's the same element and keeps focus. */
+  const [at, setAt] = createSignal<number | null>(null);
+  const insertAt = () => Math.min(at() ?? props.list.length, props.list.length);
   const [sugg, setSugg] = createSignal<Addr[]>([]);
   const [hi, setHi] = createSignal(0);
+  /** ↑/↓ used since the last keystroke: Enter then means "this suggestion". */
+  let navigated = false;
   // Only the row losing and the one gaining the highlight update (not every row).
   const isHi = createSelector(hi);
   const listId = `sugg-${props.label.toLowerCase()}`;
@@ -62,11 +85,38 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
       () => {},
     );
   };
+  /** Complete addresses become chips; anything else stays as text to fix (never a chip that
+   *  can only be deleted). */
   const commit = () => {
     closeSugg();
     const parsed = parseAddresses(text());
-    if (parsed.length) props.onChange([...props.list, ...parsed]);
-    setText('');
+    const good = parsed.filter((a) => isAddress(a.addr));
+    const bad = parsed.filter((a) => !isAddress(a.addr));
+    if (good.length) {
+      const i = insertAt();
+      props.onChange([...props.list.slice(0, i), ...good, ...props.list.slice(i)]);
+    }
+    setText(bad.map(chipText).join(', '));
+    setInvalid(bad.length > 0);
+    // done editing in place: further typing goes at the end again
+    if (!bad.length) setAt(null);
+  };
+  /** A chip back to text, in its place, to edit it (click on it). */
+  const edit = (i: number) => {
+    const a = props.list[i];
+    if (!a) return;
+    if (text().trim()) commit(); // text already being typed goes in first
+    const list = props.list;
+    const k = list.indexOf(a);
+    if (k < 0) return;
+    props.onChange(list.filter((_, j) => j !== k));
+    setAt(k);
+    setText(chipText(a));
+    setInvalid(false);
+    queueMicrotask(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
   };
   const pick = (a: Addr) => {
     closeSugg();
@@ -83,13 +133,23 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
       <div class="addr-field" onMouseDown={(e) => e.target === e.currentTarget && (e.preventDefault(), input.focus())}>
         <For each={props.list}>
           {(a, i) => (
-            <span class="addr-chip" classList={{ bad: !isAddress(a.addr) }} title={a.addr}>
+            <span
+              class="addr-chip"
+              style={{ order: i() < insertAt() ? i() * 2 : i() * 2 + 2 }}
+              classList={{ bad: !isAddress(a.addr) }}
+              title={`${a.addr} · click to edit`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => edit(i())}
+            >
               {a.name || a.addr}
               <button
                 class="addr-x"
                 aria-label={`Remove ${a.addr}`}
                 tabIndex={-1}
-                onClick={() => props.onChange(props.list.filter((_, j) => j !== i()))}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onChange(props.list.filter((_, j) => j !== i()));
+                }}
               >
                 <CloseIcon size={9} />
               </button>
@@ -99,6 +159,9 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
         <input
           ref={input}
           class="addr-input"
+          style={{ order: insertAt() * 2 + 1 }}
+          classList={{ invalid: invalid(), 'in-place': at() != null }}
+          size={at() != null ? Math.max(6, text().length + 1) : undefined}
           type="text"
           autocomplete="off"
           spellcheck={false}
@@ -110,7 +173,9 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
           aria-activedescendant={sugg().length > 0 ? `${listId}-${hi()}` : undefined}
           value={text()}
           onInput={(e) => {
+            navigated = false;
             setText(e.currentTarget.value);
+            setInvalid(false);
             lookup(e.currentTarget.value);
           }}
           onKeyDown={(e) => {
@@ -118,28 +183,35 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
             if (n > 0) {
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
+                navigated = true;
                 setHi((hi() + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
                 return;
               }
-              if (e.key === 'Enter' || e.key === 'Tab') {
+              // A complete address typed out is taken as typed, unless a suggestion was chosen
+              // with ↑/↓.
+              if ((e.key === 'Enter' || e.key === 'Tab') && (navigated || !isAddress(text()))) {
                 e.preventDefault();
                 pick(sugg()[hi()]!);
                 return;
               }
-              if (e.key === 'Escape') {
-                // closes the list only (the composer leaves this Esc alone)
-                e.preventDefault();
-                closeSugg();
-                return;
-              }
+            }
+            // With text typed, Esc is about the suggestions (shown, or still on their way):
+            // it closes them, never the window (the composer leaves this Esc alone).
+            if (e.key === 'Escape' && (n > 0 || text().trim())) {
+              e.preventDefault();
+              closeSugg();
+              return;
             }
             if ((e.key === 'Enter' || e.key === ',' || e.key === ';') && text().trim()) {
               e.preventDefault();
               commit();
             } else if (e.key === 'Tab' && text().trim()) {
               commit();
-            } else if (e.key === 'Backspace' && !text() && props.list.length) {
-              props.onChange(props.list.slice(0, -1));
+            } else if (e.key === 'Backspace' && !text() && insertAt() > 0) {
+              // quick removal of the address before the cursor; clicking a chip edits it
+              const i = insertAt() - 1;
+              props.onChange(props.list.filter((_, j) => j !== i));
+              if (at() != null) setAt(i);
             }
           }}
           onBlur={commit}
@@ -311,6 +383,29 @@ export function Composer() {
   onMount(() => onFileDrop(setDropping, addFiles));
   const c = () => compose() as ComposeState;
 
+  // Text still in an address field (not a chip): checked on Send. A complete address is
+  // added and sent; anything else stops the send there, with the cursor in that field.
+  const typing: Partial<Record<'to' | 'cc' | 'bcc', { text: string; focus: () => void }>> = {};
+  const track = (field: 'to' | 'cc' | 'bcc') => (text: string, focus: () => void) => {
+    typing[field] = { text, focus };
+  };
+  const trySend = () => {
+    let cur = c();
+    for (const field of ['to', 'cc', 'bcc'] as const) {
+      const t = typing[field];
+      if (!t?.text.trim()) continue;
+      const parsed = parseAddresses(t.text);
+      const bad = parsed.find((a) => !isAddress(a.addr));
+      if (bad) {
+        showToast({ kind: 'error', text: `“${bad.addr}” isn't a complete email address.` });
+        t.focus();
+        return;
+      }
+      cur = { ...cur, [field]: [...cur[field], ...parsed] };
+    }
+    void send(cur);
+  };
+
   onMount(() => {
     const ed = new Editor({
       element: editorEl,
@@ -373,7 +468,7 @@ export function Composer() {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 'Enter') {
       e.preventDefault();
-      void send(c());
+      trySend();
     } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'k' && editorEl.contains(document.activeElement)) {
       e.preventDefault();
       setLinking(true);
@@ -403,11 +498,10 @@ export function Composer() {
 
   return (
     <section class="reader composer" aria-label="New message" ref={root}>
-      <header class="reader-band cmp-band" data-tauri-drag-region={DRAG}>
-        <h1 class="reader-subject" title={c().subject || 'New message'}>
-          {c().subject.trim() || { new: 'New message', reply: 'Reply', replyAll: 'Reply all', forward: 'Forward' }[c().mode]}
-        </h1>
-        <div class="band-meta cmp-actions" data-tauri-drag-region={DRAG}>
+      {/* Compact: the subject is in the window title and the field below, not repeated here. */}
+      <header class="cmp-bar" data-tauri-drag-region={DRAG}>
+        <span class="cmp-kind">{{ new: 'New message', reply: 'Reply', replyAll: 'Reply all', forward: 'Forward' }[c().mode]}</span>
+        <div class="cmp-actions" data-tauri-drag-region={DRAG}>
           <span class="cmp-hint">{MOD === '⌘' ? '⌘↵' : 'Ctrl+Enter'} to send · Esc to close</span>
           <Show when={asking()}>
             <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && answer('cancel')}>
@@ -431,7 +525,7 @@ export function Composer() {
           <button class="icon-btn" title="Discard" aria-label="Discard" onClick={() => void discard()}>
             <TrashIcon />
           </button>
-          <button class="btn primary cmp-send" onClick={() => void send(c())}>
+          <button class="btn primary cmp-send" onClick={trySend}>
             Send
           </button>
         </div>
@@ -454,7 +548,7 @@ export function Composer() {
           </Show>
         </div>
         <div class="cmp-to">
-          <AddressField label="To" list={c().to} onChange={(to) => updateCompose({ to })} autofocus={c0.to.length === 0} />
+          <AddressField label="To" list={c().to} onChange={(to) => updateCompose({ to })} onTyping={track('to')} autofocus={c0.to.length === 0} />
           <Show when={!c().showCc}>
             <button class="link-btn cmp-cc-toggle" onClick={() => updateCompose({ showCc: true })}>
               Cc Bcc
@@ -462,8 +556,8 @@ export function Composer() {
           </Show>
         </div>
         <Show when={c().showCc}>
-          <AddressField label="Cc" list={c().cc} onChange={(cc) => updateCompose({ cc })} />
-          <AddressField label="Bcc" list={c().bcc} onChange={(bcc) => updateCompose({ bcc })} />
+          <AddressField label="Cc" list={c().cc} onChange={(cc) => updateCompose({ cc })} onTyping={track('cc')} />
+          <AddressField label="Bcc" list={c().bcc} onChange={(bcc) => updateCompose({ bcc })} onTyping={track('bcc')} />
         </Show>
         <div class="cmp-row">
           <label class="cmp-label" for="cmp-subject">
