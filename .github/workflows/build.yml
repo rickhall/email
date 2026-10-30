@@ -40,6 +40,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The whole history: the version counts the commits.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
@@ -60,15 +63,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # Version = major.minor from tauri.conf.json + CI run number as the patch, so every CI
-      # build has a higher version (dnf/rpm and macOS see it as an update). Bump major.minor
-      # in tauri.conf.json by hand; local builds keep the .0 patch.
+      # Version = major.minor from tauri.conf.json + the number of commits as the patch: the
+      # same for a commit on every platform and in local builds (see app/src-tauri/build.rs),
+      # and higher with every commit (dnf/rpm and macOS see it as an update). Bump major.minor
+      # in tauri.conf.json by hand. Written into the config here for the bundles' metadata.
       - name: Set version
         shell: bash
         run: |
           f=app/src-tauri/tauri.conf.json
           base=$(node -p "require('./$f').version")
-          v="${base%.*}.${{ github.run_number }}"
+          v="${base%.*}.$(git rev-list --count HEAD)"
           node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$f'));c.version='$v';fs.writeFileSync('$f',JSON.stringify(c,null,2)+'\n')"
           echo "APP_VERSION=$v" >> "$GITHUB_ENV"
           echo "Building version $v"

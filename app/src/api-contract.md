@@ -133,7 +133,7 @@ interface SyncStatus {
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |
-| `app_version` | – | `string` — e.g. "0.1.28" |
+| `app_version` | – | `string` — e.g. "0.1.44 (8ec2f26)": major.minor, commit count, commit |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |

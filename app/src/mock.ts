@@ -1508,7 +1508,7 @@ export function createMockBackend(): Backend {
     },
     async app_version() {
       await sleep(3);
-      return '0.1.0-dev';
+      return '0.1.0 (preview)';
     },
     async reveal_path() {
       await sleep(5);

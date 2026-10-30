@@ -271,9 +271,17 @@ async fn delete_tag(core: State<'_, Arc<Core>>, keyword: String) -> Res<()> {
     core.delete_tag(&keyword).map_err(err)
 }
 
+/// "0.1.44 (8ff8ea1)": the same for a commit on every machine (see build.rs).
+fn version_label() -> String {
+    match env!("APP_COMMIT") {
+        "" => env!("APP_VERSION").to_string(),
+        c => format!("{} ({c})", env!("APP_VERSION")),
+    }
+}
+
 #[tauri::command]
-fn app_version(app: tauri::AppHandle) -> String {
-    app.package_info().version.to_string()
+fn app_version() -> String {
+    version_label()
 }
 
 #[tauri::command]
@@ -679,7 +687,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             init_logging(app.path().app_log_dir().ok());
-            tracing::info!(version = app.package_info().version.to_string(), "starting");
+            tracing::info!(version = version_label(), "starting");
             create_main_window(app)?;
             if let Ok(dir) = opened_attachments_dir(app.handle()) {
                 let _ = std::fs::remove_dir_all(dir);
