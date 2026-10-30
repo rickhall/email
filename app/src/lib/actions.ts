@@ -22,7 +22,7 @@ export interface ListNav {
   /** Drop the selected row (an own action is removing it) and select the next older row in its
    *  place (else the newer one, else nothing), scrolling only if needed. */
   advance(): Removed | null;
-  /** Undo of `advance`: the row back in its place, selected. */
+  /** Undo of `advance`: the row back in its place, selected (whatever is selected now). */
   putBack(r: Removed): void;
   /** Refetch the rows on screen (puts back a row `advance` dropped when the action didn't go). */
   refresh(): void;
@@ -175,10 +175,10 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
 async function undo(entry: UndoEntry) {
   if (lastUndo === entry) lastUndo = null;
   hideToast(entry.toastId);
-  // Back to what was open at once, unless the user has since picked something else.
-  const back = entry.prev != null && currentId() === entry.next;
-  if (back && entry.removed && entry.nav) entry.nav.putBack(entry.removed);
-  else if (back) restore(entry.prev);
+  // The message back in its place and selected again at once, even if the user has moved on
+  // since; not if they've left that list (another folder, a search).
+  if (entry.removed && entry.nav && entry.nav === activeNav()) entry.nav.putBack(entry.removed);
+  else if (entry.prev != null && currentId() === entry.next) restore(entry.prev);
   try {
     await api.undoAction(entry.opId);
   } catch (e) {

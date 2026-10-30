@@ -420,7 +420,9 @@ fn backfill_threads(db: &mut Connection) -> Result<()> {
 
 /// Make a message's membership in label-backed folders match its Gmail labels exactly.
 /// `current` (the folder being synced) is left alone; folders not in `label_folders`
-/// (All Mail, Trash, Spam) are never touched.
+/// (All Mail, Trash, Spam) are never touched. A message in Trash or Spam keeps its labels
+/// (restoring it brings them back) but Gmail shows it under none of them: it's in no label
+/// folder while it's there.
 fn apply_gmail_labels(
     tx: &rusqlite::Transaction,
     message_id: i64,
@@ -431,8 +433,14 @@ fn apply_gmail_labels(
     changed: &mut std::collections::BTreeSet<i64>,
 ) -> Result<()> {
     let managed: std::collections::HashSet<i64> = label_folders.values().copied().collect();
-    let wanted: std::collections::HashSet<i64> =
-        labels.iter().filter_map(|l| label_folders.get(l).copied()).filter(|&f| f != current).collect();
+    let binned: bool = tx
+        .prepare_cached("SELECT 1 FROM folders WHERE id=?1 AND role IN ('trash','junk')")?
+        .exists([current])?;
+    let wanted: std::collections::HashSet<i64> = if binned {
+        Default::default()
+    } else {
+        labels.iter().filter_map(|l| label_folders.get(l).copied()).filter(|&f| f != current).collect()
+    };
     let existing: Vec<i64> = {
         let mut stmt = tx.prepare_cached("SELECT folder_id FROM entries WHERE message_id=?1")?;
         stmt.query_map([message_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
@@ -521,7 +529,8 @@ impl std::fmt::Display for SyncSuperseded {
 impl std::error::Error for SyncSuperseded {}
 
 // Schema/data versions (PRAGMA user_version): 1 = Gmail label resync, 2 = conversations
-// rebuilt from cleaned references, 3 = keywords (tags) kept: flags re-fetched once.
+// rebuilt from cleaned references, 3 = keywords (tags) kept: flags re-fetched once, 4 = no
+// label folders for messages in Trash/Spam.
 //
 // PLANNED CLEANUP: this is a greenfield app with one user. Once all three of the user's
 // machines have run a build at the current version, fold these steps
@@ -644,6 +653,17 @@ impl Store {
             // v3: keywords (Thunderbird tags) are now kept. Forget the CONDSTORE position so the
             // next pass fetches every message's flags once, keywords included.
             db.execute_batch("UPDATE folders SET highest_modseq=0; PRAGMA user_version=3;")?;
+        }
+        if version < 4 {
+            // v4: Gmail messages in Trash/Spam were put back under their labels (Sent…) from the
+            // labels they keep there. Drop those label-derived entries.
+            db.execute_batch(
+                "DELETE FROM entries WHERE uid IS NULL
+                   AND folder_id IN (SELECT id FROM folders WHERE coalesce(role, '') NOT IN ('all', 'trash', 'junk'))
+                   AND message_id IN (SELECT e.message_id FROM entries e JOIN folders f ON f.id = e.folder_id
+                                      WHERE f.role IN ('trash', 'junk') AND e.uid IS NOT NULL);
+                 PRAGMA user_version=4;",
+            )?;
         }
         let have_tags: bool = db.prepare("SELECT 1 FROM tags LIMIT 1")?.exists([])?;
         if !have_tags {
@@ -2830,6 +2850,46 @@ mod tests {
         // Body is fetched from All Mail when preferred.
         let loc = store.body_location(all_page.messages[0].id, Some(all)).unwrap().unwrap();
         assert_eq!((loc.folder_id, loc.uid), (all, 900));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gmail_trash_and_spam_hide_labels() {
+        let dir = std::env::temp_dir().join(format!("mail-core-test-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@gmail.com", "x", Provider::Gmail, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store
+            .sync_folder_list(
+                acct.id,
+                &[
+                    lf("[Gmail]/All Mail", Some(FolderRole::All)),
+                    lf("[Gmail]/Sent Mail", Some(FolderRole::Sent)),
+                    lf("[Gmail]/Trash", Some(FolderRole::Trash)),
+                    lf("Work", None),
+                ],
+            )
+            .unwrap();
+        let folders = store.folders(acct.id).unwrap();
+        let id = |n: &str| folders.iter().find(|f| f.raw_name == n).unwrap().id;
+        let (all, sent, trash, work) = (id("[Gmail]/All Mail"), id("[Gmail]/Sent Mail"), id("[Gmail]/Trash"), id("Work"));
+        let labels: HashMap<String, i64> = crate::sync::gmail_label_map(&folders);
+
+        // A sent, labelled message…
+        store.upsert_headers(acct.id, all, &[rec(900, 100, &["\\Sent", "Work"])], &labels).unwrap();
+        assert_eq!(store.list_messages(sent, 0, 10).unwrap().total, 1);
+        assert_eq!(store.list_messages(work, 0, 10).unwrap().total, 1);
+        // …deleted: in Trash it keeps its labels, but shows under none of them.
+        store.upsert_headers(acct.id, trash, &[rec(44, 100, &["\\Sent", "Work"])], &labels).unwrap();
+        assert_eq!(store.list_messages(trash, 0, 10).unwrap().total, 1);
+        assert_eq!(store.list_messages(sent, 0, 10).unwrap().total, 0);
+        assert_eq!(store.list_messages(work, 0, 10).unwrap().total, 0);
+        // A flag change seen in Trash doesn't bring them back either.
+        store
+            .update_flags(trash, &[FlagChange { uid: 44, flags: flags::SEEN, keywords: vec![], labels: Some(vec!["\\Sent".into()]) }], &labels)
+            .unwrap();
+        assert_eq!(store.list_messages(sent, 0, 10).unwrap().total, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
