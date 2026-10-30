@@ -231,6 +231,21 @@ export interface SendRequest {
 
 export type ReplyMode = 'reply' | 'replyAll' | 'forward';
 
+/** An account with its servers, as Settings › Accounts shows it. */
+export interface AccountDetails {
+  id: number;
+  email: string;
+  displayName: string;
+  provider: Provider;
+  imapHost: string;
+  imapPort: number;
+  /** where mail is sent from (the account's own server, or the default for its IMAP server) */
+  smtpHost: string | null;
+  smtpPort: number | null;
+  /** the SMTP server is derived from the IMAP server, not set for the account */
+  smtpDefault: boolean;
+}
+
 /** A file chosen to attach (picker or drop). */
 export interface FileInfo {
   path: string;
@@ -348,6 +363,9 @@ export interface CommandMap {
   open_compose: { args: { draftId: number }; ret: void };
   file_info: { args: { paths: string[] }; ret: FileInfo[] };
   suggest_addresses: { args: { query: string; limit: number | null }; ret: Addr[] };
+  account_details: { args: undefined; ret: AccountDetails[] };
+  show_data_dir: { args: undefined; ret: void };
+  open_devtools: { args: undefined; ret: void };
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };

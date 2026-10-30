@@ -3508,31 +3508,76 @@ html.macos .app.rail-mode .search-bar {
 }
 
 .modal.settings {
-  width: min(640px, calc(100vw - 48px));
+  width: min(860px, calc(100vw - 48px));
   max-width: none;
-  max-height: calc(100vh - 48px);
+  /* fixed: switching sections never resizes or moves the dialog */
+  height: min(600px, calc(100vh - 48px));
+  max-height: none;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+  outline: none;
+}
+.st-nav {
   display: flex;
   flex-direction: column;
-  outline: none;
-  overflow: hidden;
-  padding-bottom: 18px;
+  gap: 2px;
+  padding: 20px 12px;
+  border-right: 1px solid var(--sep);
+  background: var(--bg-sidebar);
 }
-.st-title {
-  margin: 0;
+.st-nav h2 {
+  margin: 0 10px 14px;
+  font-size: 15px;
+  font-weight: 700;
+}
+.st-nav-item {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  text-align: left;
   font-size: 13px;
+  color: var(--text);
+}
+.st-nav-item:hover {
+  background: var(--bg-hover);
+}
+.st-nav-item.on {
+  background: var(--sel-folder-bg);
+  color: var(--sel-folder-fg);
+  font-weight: 600;
+}
+.st-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.st-pane-head {
+  flex: none;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px 0 28px;
+  border-bottom: 1px solid var(--sep);
+}
+.st-pane-head h3 {
+  margin: 0;
+  font-size: 15px;
   font-weight: 650;
 }
-.st-note {
-  margin: 2px 0 10px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-.st-list {
+.st-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  margin: 0 -8px;
-  padding: 0 8px;
+  padding: 16px 28px 24px;
+}
+.st-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-3);
 }
 .st-section {
   margin-bottom: 14px;
@@ -3547,7 +3592,7 @@ html.macos .app.rail-mode .search-bar {
 }
 .st-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 64px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   /* fixed height: recording, adding or removing a key never moves the rows */
@@ -3635,15 +3680,12 @@ html.macos .app.rail-mode .search-bar {
     opacity: 0.55;
   }
 }
-.st-reset-slot {
-  text-align: right;
-}
 .st-foot {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 10px;
-  padding-top: 12px;
+  padding: 12px 28px 14px;
   border-top: 1px solid var(--sep);
 }
 .st-status {
@@ -4259,4 +4301,87 @@ body.dragging-account * {
   cursor: grabbing !important;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Settings › Accounts / Troubleshooting */
+.st-acct {
+  margin-bottom: 12px;
+  padding: 12px 16px 10px;
+  border: 1px solid var(--sep);
+  border-radius: 10px;
+}
+.st-acct-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.st-acct-head .acct-dot {
+  margin-right: 0;
+}
+.st-acct-email {
+  font-size: 14px;
+  font-weight: 650;
+}
+.st-acct-name,
+.st-muted {
+  color: var(--text-3);
+}
+.st-acct-name {
+  font-size: 13px;
+}
+.st-field {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  align-items: center;
+  min-height: 32px;
+  font-size: 13px;
+}
+.st-field-label {
+  color: var(--text-3);
+}
+.st-field-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.st-field-action {
+  margin-left: auto;
+  flex: none;
+}
+.st-pw {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.st-input {
+  width: 210px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--sep-strong);
+  border-radius: 6px;
+  background: var(--bg-reader);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.st-pw .btn {
+  height: 30px;
+  min-width: 0;
+  padding: 0 12px;
+}
+.st-acct-msg {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.st-acct-msg.error {
+  color: var(--danger);
+}
+
+.st-default {
+  margin-left: 8px;
+  font-size: 12px;
 }

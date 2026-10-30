@@ -1,6 +1,7 @@
 import type {
   Account,
   Action,
+  AccountDetails,
   ActionResult,
   Addr,
   FileInfo,
@@ -124,6 +125,11 @@ export const api = {
   saveDraft: (id: number | null, request: SendRequest): Promise<number> => call('save_draft', { id, request }),
   openDraft: (id: number): Promise<unknown> => call('open_draft', { id }),
   deleteDraft: (id: number): Promise<void> => call('delete_draft', { id }),
+  accountDetails: (): Promise<AccountDetails[]> => call('account_details', undefined),
+  /** Reveal the app's data folder (mail.db, bodies.db). */
+  showDataDir: (): Promise<void> => call('show_data_dir', undefined),
+  /** The web inspector for this window. */
+  openDevtools: (): Promise<void> => call('open_devtools', undefined),
   /** People matching what's typed in To/Cc/Bcc, best first (from the mail you've exchanged). */
   suggestAddresses: (query: string, limit: number | null = null): Promise<Addr[]> => call('suggest_addresses', { query, limit }),
   /** Name and size of files to attach (missing files and folders are left out). */

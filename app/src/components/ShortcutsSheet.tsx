@@ -91,7 +91,7 @@ function Sheet() {
             onClick={() => {
               close();
               // after close() has handed focus back, so Settings returns it there too
-              queueMicrotask(openSettings);
+              queueMicrotask(() => openSettings('keyboard'));
             }}
           >
             Customize…

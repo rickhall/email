@@ -615,6 +615,29 @@ impl Core {
         Ok(serde_json::from_str(&draft).ok())
     }
 
+    /// Every account with its servers (Settings › Accounts).
+    pub fn account_details(&self) -> Result<Vec<AccountDetails>> {
+        Ok(self
+            .store
+            .accounts()?
+            .into_iter()
+            .map(|a| {
+                let smtp = a.smtp();
+                AccountDetails {
+                    id: a.id,
+                    smtp_default: a.smtp_host.as_deref().is_none_or(|h| h.trim().is_empty()),
+                    smtp_host: smtp.as_ref().map(|s| s.0.clone()),
+                    smtp_port: smtp.map(|s| s.1),
+                    email: a.email,
+                    display_name: a.display_name,
+                    provider: a.provider,
+                    imap_host: a.imap_host,
+                    imap_port: a.imap_port,
+                }
+            })
+            .collect())
+    }
+
     /// Addresses for the composer's To/Cc/Bcc matching what's typed, best first.
     pub fn suggest_addresses(&self, query: &str, limit: usize) -> Result<Vec<Addr>> {
         let stale = {

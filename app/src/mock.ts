@@ -1674,6 +1674,30 @@ export function createMockBackend(): Backend {
       storeMockDrafts(all);
       syncDraftCopies();
     },
+    async account_details() {
+      await sleep(5);
+      return accounts.map((a) => {
+        const gmail = a.provider === 'gmail';
+        const host = gmail ? 'imap.gmail.com' : `mail.${a.email.split('@')[1]}`;
+        return {
+          id: a.id,
+          email: a.email,
+          displayName: a.displayName,
+          provider: a.provider,
+          imapHost: host,
+          imapPort: 993,
+          smtpHost: gmail ? 'smtp.gmail.com' : null,
+          smtpPort: gmail ? 465 : null,
+          smtpDefault: true,
+        };
+      });
+    },
+    async show_data_dir() {
+      await sleep(3);
+    },
+    async open_devtools() {
+      await sleep(3);
+    },
     async suggest_addresses({ query, limit }) {
       await sleep(4);
       const q = query.trim().toLowerCase();

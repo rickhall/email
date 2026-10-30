@@ -591,6 +591,25 @@ async fn suggest_addresses(core: State<'_, Arc<Core>>, query: String, limit: Opt
     core.suggest_addresses(&query, limit.unwrap_or(8)).map_err(err)
 }
 
+#[tauri::command]
+async fn account_details(core: State<'_, Arc<Core>>) -> Res<Vec<AccountDetails>> {
+    core.account_details().map_err(err)
+}
+
+/// Reveal the app's data folder (mail.db, bodies.db) in the file manager.
+#[tauri::command]
+async fn show_data_dir(app: tauri::AppHandle) -> Res<()> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    app.opener().reveal_item_in_dir(dir.join("mail.db")).map_err(|e| e.to_string())
+}
+
+/// The web inspector for the calling window.
+#[tauri::command]
+async fn open_devtools(window: tauri::WebviewWindow) -> Res<()> {
+    window.open_devtools();
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct FileInfo {
     path: String,
@@ -710,6 +729,9 @@ pub fn run() {
             delete_draft,
             open_compose,
             file_info,
+            account_details,
+            show_data_dir,
+            open_devtools,
             suggest_addresses,
             cancel_send,
             list_tags,

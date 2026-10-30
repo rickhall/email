@@ -292,6 +292,23 @@ pub struct SyncStatus {
     pub message: Option<String>,
 }
 
+/// An account's settings as Settings › Accounts shows them (servers included, unlike `Account`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDetails {
+    pub id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub provider: Provider,
+    pub imap_host: String,
+    pub imap_port: u16,
+    /// Where mail is sent from (the account's own server, or the default for its IMAP server).
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    /// The SMTP server is the default derived from the IMAP server, not one set for the account.
+    pub smtp_default: bool,
+}
+
 /// A message to send, as the composer has it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
