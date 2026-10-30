@@ -4119,3 +4119,68 @@ html.macos .app.rail-mode .search-bar {
 .account:not(.current) .account-head {
   font-weight: 500;
 }
+
+/* address suggestions under To/Cc/Bcc */
+.addr-field {
+  position: relative;
+}
+.addr-sugg {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 30;
+  width: min(420px, 100%);
+  padding: 4px;
+  border: 1px solid var(--sep-strong);
+  border-radius: 10px;
+  background: var(--bg-reader);
+  /* Small shadow, own layer: moving the highlight (↑/↓) repaints only this list, cheaply,
+     in WebKitGTK too (a large blurred shadow made each move visibly slow). */
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  will-change: transform;
+  contain: layout paint;
+}
+.addr-sugg-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.addr-sugg-row.on {
+  background: rgba(10, 108, 255, 0.13);
+}
+.sugg-name {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.sugg-addr {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+@media (prefers-color-scheme: dark) {
+  .addr-sugg {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  }
+  .addr-sugg-row.on {
+    background: rgba(45, 106, 224, 0.28);
+  }
+}
+
+/* see lib/platform.ts: background windows pause their continuous animations */
+html.inactive .spinner,
+html.inactive .sf-track,
+html.inactive .sf-track *,
+html.inactive .sk-line {
+  animation-play-state: paused;
+}

@@ -3,6 +3,7 @@
 pub mod imap;
 pub mod actions;
 pub mod compose;
+pub mod contacts;
 pub mod mime;
 pub mod model;
 pub mod partial;
@@ -99,7 +100,19 @@ pub struct Core {
     running: Mutex<HashMap<i64, AccountSync>>,
     /// Accounts with no usable stored password (e.g. missing from the keychain).
     needs_password: Mutex<std::collections::HashSet<i64>>,
+    /// Address suggestions (see `contacts`): built from the stored mail, kept current.
+    contacts: Arc<Mutex<Contacts>>,
 }
+
+#[derive(Default)]
+struct Contacts {
+    list: Option<Vec<contacts::Contact>>,
+    built: Option<std::time::Instant>,
+    building: bool,
+}
+
+/// Rebuilt this often (in the background) to take in new correspondents.
+const CONTACTS_REFRESH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 impl Core {
     pub fn open(data_dir: &Path, secrets: Secrets) -> Result<Core> {
@@ -124,6 +137,7 @@ impl Core {
             options,
             running: Mutex::new(HashMap::new()),
             needs_password: Mutex::new(Default::default()),
+            contacts: Default::default(),
         })
     }
 
@@ -143,6 +157,7 @@ impl Core {
     /// Start syncing every stored account. Accounts whose secret is missing are skipped.
     pub fn start(&self) -> Result<()> {
         imap::spawn_wake_detector();
+        self.refresh_contacts();
         for account in self.store.accounts()? {
             if let Err(e) = self.start_account(account.clone()) {
                 tracing::warn!(account = account.email, "not starting sync: {e:#}");
@@ -465,6 +480,7 @@ impl Core {
         if recipients.is_empty() {
             bail!("Add at least one recipient.");
         }
+        self.note_sent_to(&msg.to.iter().chain(&msg.cc).chain(&msg.bcc).cloned().collect::<Vec<_>>());
         if let Some(fwd) = req.forwarding {
             for &index in &req.forward_attachments {
                 let (name, content_type, data) = self.attachment(fwd, index).await?;
@@ -597,6 +613,79 @@ impl Core {
             }
         }
         Ok(serde_json::from_str(&draft).ok())
+    }
+
+    /// Addresses for the composer's To/Cc/Bcc matching what's typed, best first.
+    pub fn suggest_addresses(&self, query: &str, limit: usize) -> Result<Vec<Addr>> {
+        let stale = {
+            let c = self.contacts.lock().unwrap();
+            c.list.is_none() || c.built.is_some_and(|t| t.elapsed() > CONTACTS_REFRESH)
+        };
+        if stale {
+            self.refresh_contacts();
+        }
+        if self.contacts.lock().unwrap().list.is_none() {
+            // First use before the background build finished: build it now.
+            let list = self.build_contacts()?;
+            let mut c = self.contacts.lock().unwrap();
+            c.list.get_or_insert(list);
+            c.built.get_or_insert_with(std::time::Instant::now);
+        }
+        let c = self.contacts.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        Ok(contacts::suggest(c.list.as_deref().unwrap_or_default(), query, limit, now))
+    }
+
+    fn build_contacts(&self) -> Result<Vec<contacts::Contact>> {
+        let me: Vec<String> = self.store.accounts()?.into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
+        Ok(contacts::build(self.store.contact_rows()?, &me))
+    }
+
+    /// Rebuild the suggestions in the background (once at a time).
+    fn refresh_contacts(&self) {
+        {
+            let mut c = self.contacts.lock().unwrap();
+            if c.building {
+                return;
+            }
+            c.building = true;
+        }
+        let (store, contacts) = (self.store.clone(), self.contacts.clone());
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let me: Vec<String> = store.accounts().unwrap_or_default().into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
+            let list = store.contact_rows().map(|rows| contacts::build(rows, &me));
+            let mut c = contacts.lock().unwrap();
+            c.building = false;
+            match list {
+                Ok(list) => {
+                    tracing::info!(n = list.len(), ms = t.elapsed().as_millis() as u64, "address suggestions built");
+                    c.list = Some(list);
+                    c.built = Some(std::time::Instant::now());
+                }
+                Err(e) => tracing::warn!("address suggestions: {e:#}"),
+            }
+        });
+    }
+
+    /// Mail just sent: its recipients go to the top of the suggestions now.
+    fn note_sent_to(&self, recipients: &[Addr]) {
+        let now = chrono::Utc::now().timestamp();
+        let mut c = self.contacts.lock().unwrap();
+        let Some(list) = c.list.as_mut() else { return };
+        for r in recipients {
+            let addr = r.addr.trim().to_ascii_lowercase();
+            match list.iter_mut().find(|x| x.addr == addr) {
+                Some(x) => {
+                    x.sent += 1;
+                    x.last = now;
+                    if r.name.is_some() {
+                        x.name = r.name.clone();
+                    }
+                }
+                None => list.push(contacts::Contact { name: r.name.clone(), addr, sent: 1, received: 0, last: now }),
+            }
+        }
     }
 
     /// The next unread item below `after` in a folder list (wrapping to the top).

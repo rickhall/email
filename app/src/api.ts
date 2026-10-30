@@ -2,6 +2,7 @@ import type {
   Account,
   Action,
   ActionResult,
+  Addr,
   FileInfo,
   NextUnread,
   ReplyContext,
@@ -123,6 +124,8 @@ export const api = {
   saveDraft: (id: number | null, request: SendRequest): Promise<number> => call('save_draft', { id, request }),
   openDraft: (id: number): Promise<unknown> => call('open_draft', { id }),
   deleteDraft: (id: number): Promise<void> => call('delete_draft', { id }),
+  /** People matching what's typed in To/Cc/Bcc, best first (from the mail you've exchanged). */
+  suggestAddresses: (query: string, limit: number | null = null): Promise<Addr[]> => call('suggest_addresses', { query, limit }),
   /** Name and size of files to attach (missing files and folders are left out). */
   fileInfo: (paths: string[]): Promise<FileInfo[]> => call('file_info', { paths }),
   /** Open (or focus) the compose window of draft `draftId` (at the last compose window's size). */

@@ -586,6 +586,11 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
     Ok(())
 }
 
+#[tauri::command]
+async fn suggest_addresses(core: State<'_, Arc<Core>>, query: String, limit: Option<usize>) -> Res<Vec<Addr>> {
+    core.suggest_addresses(&query, limit.unwrap_or(8)).map_err(err)
+}
+
 #[derive(Serialize)]
 struct FileInfo {
     path: String,
@@ -705,6 +710,7 @@ pub fn run() {
             delete_draft,
             open_compose,
             file_info,
+            suggest_addresses,
             cancel_send,
             list_tags,
             set_tag,

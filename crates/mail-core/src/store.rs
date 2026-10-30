@@ -2284,6 +2284,15 @@ impl Store {
         Ok(folders)
     }
 
+    /// (from name, from address, To+Cc, date) of every message: the input for address
+    /// suggestions (`contacts::build`).
+    pub fn contact_rows(&self) -> Result<Vec<(String, String, String, i64)>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare("SELECT from_name, from_addr, to_addrs, date FROM messages")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The conversation a message belongs to.
     pub fn message_thread_id(&self, id: i64) -> Result<Option<i64>> {
         Ok(self.rdb().query_row("SELECT thread_id FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?.flatten())

@@ -106,6 +106,16 @@ enum Cmd {
         #[arg(long, default_value = "imap.gmail.com")]
         imap_host: String,
     },
+    /// Time the address-suggestion index on a data directory; prints counts only (add --show
+    /// to see the matches).
+    Suggest {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        query: String,
+        #[arg(long)]
+        show: bool,
+    },
     /// Uses the password the app stored in the system keychain.
     Probe {
         email: String,
@@ -200,6 +210,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::ActionTest { email, host } => action_test::run(&email, &host).await,
+        Cmd::Suggest { data_dir, query, show } => {
+            let store = mail_core::store::Store::open(&data_dir)?;
+            let t = Instant::now();
+            let rows = store.contact_rows()?;
+            let read = t.elapsed();
+            let me: Vec<String> = store.accounts()?.into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
+            let list = mail_core::contacts::build(rows, &me);
+            let built = t.elapsed();
+            let now = chrono::Utc::now().timestamp();
+            let t2 = Instant::now();
+            let hits = mail_core::contacts::suggest(&list, &query, 8, now);
+            println!("{} contacts: read {read:?}, built {built:?}; '{query}': {} matches in {:?}", list.len(), hits.len(), t2.elapsed());
+            if show {
+                for h in hits {
+                    println!("  {} <{}>", h.name.unwrap_or_default(), h.addr);
+                }
+            }
+            Ok(())
+        }
         Cmd::SendTest { email, to, imap_host } => {
             use mail_core::compose;
             use mail_core::model::Addr;

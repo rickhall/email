@@ -24,3 +24,12 @@ document.documentElement.classList.add(platform);
  * script from swallowing mouse presses (and with them text selection) in those areas.
  */
 export const DRAG: 'true' | 'false' = platform === 'macos' ? 'true' : 'false';
+
+// A window in the background doesn't animate: its continuous animations (sync spinner and
+// progress bar, loading shimmer) pause while another window, like a compose window, has
+// focus. In WebKitGTK every window draws on one thread, so they'd steal the frames the focused
+// window needs; it also saves battery.
+const setActive = (active: boolean) => document.documentElement.classList.toggle('inactive', !active);
+window.addEventListener('focus', () => setActive(true));
+window.addEventListener('blur', () => setActive(false));
+setActive(document.hasFocus());

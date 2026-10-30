@@ -306,7 +306,8 @@ mod tests {
         assert!(s.contains("In-Reply-To: <orig@example.net>"));
         assert!(s.contains("References: <first@example.net>"));
         assert!(s.contains("<orig@example.net>"));
-        assert!(!s.to_ascii_lowercase().contains("bcc") && !s.contains("secret@"), "Bcc must not be in the message");
+        // (Not "no 'bcc' anywhere": MIME boundaries are random letters and can contain it.)
+        assert!(!s.lines().any(|l| l.to_ascii_lowercase().starts_with("bcc:")) && !s.contains("secret@"), "Bcc must not be in the message");
         assert_eq!(msg.recipients(), vec!["jane.doe@example.net", "team@example.org", "secret@example.org"]);
 
         // Our own parser reads it back the way other clients will.

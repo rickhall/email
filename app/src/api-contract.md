@@ -129,6 +129,7 @@ interface SyncStatus {
 | `open_draft` | `{ id }` | the draft's composer state |
 | `delete_draft` | `{ id }` | — discards the draft and its copy in Drafts |
 | `open_compose` | `{ draftId }` | — opens (or focuses) the compose window `compose-<draftId>`, at the size the last compose window was left at |
+| `suggest_addresses` | `{ query, limit: number \| null }` | `Addr[]` — people from the stored mail (senders, and everyone the user wrote to) matching the start of an address, an address part or a name word; people written to rank first, then by how much and how recently. No-reply senders and the user's own addresses are left out |
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |

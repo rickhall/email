@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSelector, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -34,14 +34,45 @@ const QUOTE_FRAME_CSS = 'html{overflow-y:hidden}body{padding:0 0 12px}';
 
 // ------------------------------------------------------------- address field
 
-/** To/Cc/Bcc: typed addresses become chips on Enter, comma, semicolon, Tab or leaving the field. */
+/** To/Cc/Bcc: typed addresses become chips on Enter, comma, semicolon, Tab or leaving the field;
+ *  people from your mail are suggested as you type (↑/↓, Enter or Tab to pick, Esc to close). */
 function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]) => void; autofocus?: boolean }) {
   let input!: HTMLInputElement;
   const [text, setText] = createSignal('');
+  const [sugg, setSugg] = createSignal<Addr[]>([]);
+  const [hi, setHi] = createSignal(0);
+  // Only the row losing and the one gaining the highlight update (not every row).
+  const isHi = createSelector(hi);
+  const listId = `sugg-${props.label.toLowerCase()}`;
+  let seq = 0;
+  const closeSugg = () => {
+    seq++;
+    setSugg([]);
+  };
+  const lookup = (q: string) => {
+    const my = ++seq;
+    if (!q.trim() || /[,;<]/.test(q)) return setSugg([]);
+    void api.suggestAddresses(q.trim(), 8).then(
+      (found) => {
+        if (my !== seq) return; // a newer keystroke's answer wins
+        const taken = new Set(props.list.map((a) => a.addr.toLowerCase()));
+        setSugg(found.filter((a) => !taken.has(a.addr.toLowerCase())));
+        setHi(0);
+      },
+      () => {},
+    );
+  };
   const commit = () => {
+    closeSugg();
     const parsed = parseAddresses(text());
     if (parsed.length) props.onChange([...props.list, ...parsed]);
     setText('');
+  };
+  const pick = (a: Addr) => {
+    closeSugg();
+    props.onChange([...props.list, a]);
+    setText('');
+    input.focus();
   };
   onMount(() => {
     if (props.autofocus) input.focus();
@@ -72,9 +103,36 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
           autocomplete="off"
           spellcheck={false}
           aria-label={props.label}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={sugg().length > 0}
+          aria-controls={listId}
+          aria-activedescendant={sugg().length > 0 ? `${listId}-${hi()}` : undefined}
           value={text()}
-          onInput={(e) => setText(e.currentTarget.value)}
+          onInput={(e) => {
+            setText(e.currentTarget.value);
+            lookup(e.currentTarget.value);
+          }}
           onKeyDown={(e) => {
+            const n = sugg().length;
+            if (n > 0) {
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHi((hi() + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+                return;
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                pick(sugg()[hi()]!);
+                return;
+              }
+              if (e.key === 'Escape') {
+                // closes the list only (the composer leaves this Esc alone)
+                e.preventDefault();
+                closeSugg();
+                return;
+              }
+            }
             if ((e.key === 'Enter' || e.key === ',' || e.key === ';') && text().trim()) {
               e.preventDefault();
               commit();
@@ -94,6 +152,31 @@ function AddressField(props: { label: string; list: Addr[]; onChange: (l: Addr[]
             }
           }}
         />
+        {/* Over the rows below (no layout shift); mousedown keeps focus in the input. */}
+        <Show when={sugg().length > 0}>
+          <div class="addr-sugg" id={listId} role="listbox" aria-label="Suggestions">
+            <For each={sugg()}>
+              {(a, i) => (
+                <div
+                  id={`${listId}-${i()}`}
+                  role="option"
+                  class="addr-sugg-row"
+                  classList={{ on: isHi(i()) }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pick(a);
+                  }}
+                  onMouseEnter={() => setHi(i())}
+                >
+                  <span class="sugg-name">{a.name || a.addr}</span>
+                  <Show when={a.name}>
+                    <span class="sugg-addr">{a.addr}</span>
+                  </Show>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
       </div>
     </div>
   );
@@ -297,7 +380,13 @@ export function Composer() {
     } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'w') {
       e.preventDefault();
       void close();
-    } else if (e.key === 'Escape' && !(e.target as Element).closest?.('.link-edit') && !document.querySelector('.modal-backdrop')) {
+    } else if (
+      e.key === 'Escape' &&
+      !(e.target as Element).closest?.('.link-edit') &&
+      // an address field's Esc that closed its suggestions
+      !(e.defaultPrevented && (e.target as Element).closest?.('.addr-field')) &&
+      !document.querySelector('.modal-backdrop')
+    ) {
       e.preventDefault();
       void close();
     }

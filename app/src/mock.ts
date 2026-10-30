@@ -1674,6 +1674,24 @@ export function createMockBackend(): Backend {
       storeMockDrafts(all);
       syncDraftCopies();
     },
+    async suggest_addresses({ query, limit }) {
+      await sleep(4);
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      const seen = new Map<string, { name: string | null; addr: string; n: number }>();
+      for (const m of byId.values()) {
+        const k = m.fromAddr.toLowerCase();
+        const e = seen.get(k) ?? { name: m.fromName || null, addr: k, n: 0 };
+        e.n++;
+        seen.set(k, e);
+      }
+      const words = (s: string) => s.toLowerCase().split(/[\s.@_-]+/);
+      return [...seen.values()]
+        .filter((e) => !/no-?reply|notifications/.test(e.addr) && (e.addr.startsWith(q) || words(e.name ?? '').some((w) => w.startsWith(q)) || words(e.addr.split('@')[0]!).some((w) => w.startsWith(q))))
+        .sort((a, b) => b.n - a.n)
+        .slice(0, limit ?? 8)
+        .map(({ name, addr }) => ({ name, addr }));
+    },
     async file_info({ paths }) {
       await sleep(3);
       return paths.map((p) => ({ path: p, name: p.split('/').pop() ?? p, size: 1000 + p.length * 37_000 }));
