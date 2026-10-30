@@ -1,14 +1,14 @@
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { hint } from '../lib/shortcuts';
 import { createStore } from 'solid-js/store';
 import { api, type Account, type Folder, type FolderRole, type SyncStatus } from '../api';
-import { folderById, foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
+import { folderById, foldersByAccount, moveAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
 import { AccountDot } from './FolderSwitcher';
 import { fmtNum, loadPref, savePref } from '../lib/format';
 import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon, SidebarIcon } from './Icons';
 import { PasswordDialog } from './PasswordPrompt';
 import { toggleSidebar } from '../lib/layout';
-import { DRAG } from '../lib/platform';
+import { DRAG, platform } from '../lib/platform';
 
 export const ROLE_ORDER: Exclude<FolderRole, null>[] = [
   'inbox',
@@ -431,7 +431,84 @@ function TreeItem(props: { node: TreeNode }) {
   );
 }
 
-function AccountSection(props: { account: Account }) {
+// ------------------------------------------------------------- reordering accounts
+
+/** An account header being dragged: where it started, where it would drop, how far it moved. */
+interface AccountDrag {
+  id: number;
+  from: number;
+  to: number;
+  dy: number;
+  /** the dragged section's height (what the others shift by) */
+  h: number;
+}
+const [accountDrag, setAccountDrag] = createSignal<AccountDrag | null>(null);
+/** Just dropped: the reorder lands without the shift animation (no jump). */
+const [settling, setSettling] = createSignal(false);
+let suppressClick = false;
+
+/** Press on an account header: a click toggles it; moving 5px drags it to a new place. */
+function startAccountDrag(e: PointerEvent, id: number, index: number) {
+  if (e.button !== 0) return;
+  const container = (e.currentTarget as HTMLElement).closest('.sidebar-scroll');
+  if (!container) return;
+  const sections = [...container.querySelectorAll<HTMLElement>(':scope > .account')];
+  const rects = sections.map((el) => el.getBoundingClientRect());
+  /** Middle of each account's header row: what the dragged header has to pass to swap
+   *  (not the middle of an expanded account's whole folder list). */
+  const headMids = sections.map((el) => {
+    const r = (el.querySelector('.account-head') ?? el).getBoundingClientRect();
+    return r.top + r.height / 2;
+  });
+  const me = rects[index];
+  if (!me) return;
+  const startY = e.clientY;
+  let started = false;
+  const onMove = (ev: PointerEvent) => {
+    const dy = ev.clientY - startY;
+    if (!started) {
+      if (Math.abs(dy) < 5) return;
+      started = true;
+      document.body.classList.add('dragging-account');
+    }
+    // Drop target: once the dragged header passes a neighbour's header, they swap places.
+    const head = headMids[index]! + dy;
+    let to = index;
+    headMids.forEach((mid, j) => {
+      if (j < index && head < mid) to = Math.min(to, j);
+      if (j > index && head > mid) to = Math.max(to, j);
+    });
+    setAccountDrag({ id, from: index, to, dy, h: me.height });
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    if (!started) return;
+    document.body.classList.remove('dragging-account');
+    suppressClick = true; // the header's click after a drag isn't a toggle
+    const d = accountDrag();
+    batch(() => {
+      setSettling(true);
+      setAccountDrag(null);
+      if (d && d.to !== d.from) moveAccount(d.id, d.to);
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => setSettling(false)));
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+
+/** Where an account section is drawn during a drag (the dragged one follows the pointer). */
+function dragStyle(id: number, index: number): Record<string, string> | undefined {
+  const d = accountDrag();
+  if (!d) return undefined;
+  if (d.id === id) return { transform: `translateY(${d.dy}px)` };
+  if (d.from < d.to && index > d.from && index <= d.to) return { transform: `translateY(${-d.h}px)` };
+  if (d.to < d.from && index >= d.to && index < d.from) return { transform: `translateY(${d.h}px)` };
+  return { transform: 'translateY(0)' };
+}
+
+function AccountSection(props: { account: Account; index: number }) {
   const folders = () => foldersByAccount[props.account.id] ?? [];
   // Rebuild structure only when the folder *shape* changes; counts update in place
   // because nodes hold the (reconciled, stable) store proxies.
@@ -454,12 +531,36 @@ function AccountSection(props: { account: Account }) {
   // The account holding the selected folder stands out; the others step back.
   const current = () => folderById(selectedFolderId())?.accountId === props.account.id;
   return (
-    <section class="account" classList={{ current: current() }} data-account-id={props.account.id}>
+    <section
+      class="account"
+      classList={{ current: current(), dragging: accountDrag()?.id === props.account.id, settling: settling() }}
+      style={dragStyle(props.account.id, props.index)}
+      data-account-id={props.account.id}
+    >
       <button
         class="account-head"
-        onClick={() => toggleAccount(props.account.id)}
+        onPointerDown={(e) => startAccountDrag(e, props.account.id, props.index)}
+        onKeyDown={(e) => {
+          // Alt+↑/↓: move this account up/down (the keyboard way to reorder)
+          if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+            e.preventDefault();
+            const id = props.account.id;
+            const nav = (e.currentTarget as HTMLElement).closest('.sidebar-scroll');
+            moveAccount(id, props.index + (e.key === 'ArrowUp' ? -1 : 1));
+            // Reordering moves sections in the DOM, and a moved element loses focus: put it
+            // back on this account's header so Alt+↑/↓ can be pressed again.
+            queueMicrotask(() => nav?.querySelector<HTMLElement>(`.account[data-account-id="${id}"] > .account-head`)?.focus({ preventScroll: false }));
+          }
+        }}
+        onClick={() => {
+          if (suppressClick) {
+            suppressClick = false;
+            return;
+          }
+          toggleAccount(props.account.id);
+        }}
         aria-expanded={!collapsed()}
-        title={props.account.displayName && props.account.displayName !== props.account.email ? `${props.account.displayName} <${props.account.email}>` : props.account.email}
+        title={`${props.account.displayName && props.account.displayName !== props.account.email ? `${props.account.displayName} <${props.account.email}>` : props.account.email}\nDrag (or ${platform === 'macos' ? '⌥' : 'Alt'}+↑/↓) to reorder`}
       >
         <span class="disclosure" classList={{ open: !collapsed() }}>
           <ChevronIcon size={12} />
@@ -518,7 +619,7 @@ export function Sidebar(props: { onAddAccount: () => void; flyout?: boolean }) {
         </span>
       </div>
       <div class="sidebar-scroll">
-        <For each={accounts() ?? []}>{(a) => <AccountSection account={a} />}</For>
+        <For each={accounts() ?? []}>{(a, i) => <AccountSection account={a} index={i()} />}</For>
       </div>
       <SyncFooter />
     </nav>

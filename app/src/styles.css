@@ -4238,3 +4238,25 @@ html.inactive .sk-line {
   flex: 0 1 auto;
   text-align: right;
 }
+
+/* reordering accounts: the others slide aside; the dragged one floats over them */
+.sidebar-scroll > .account {
+  position: relative;
+  transition: transform 150ms var(--ease);
+}
+.sidebar-scroll > .account.dragging {
+  z-index: 5;
+  transition: none;
+  background: var(--bg-sidebar);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+.sidebar-scroll > .account.settling {
+  transition: none;
+}
+body.dragging-account,
+body.dragging-account * {
+  cursor: grabbing !important;
+  user-select: none;
+  -webkit-user-select: none;
+}

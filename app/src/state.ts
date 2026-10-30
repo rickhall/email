@@ -1,12 +1,39 @@
-import { batch, createEffect, createRoot, createSignal } from 'solid-js';
+import { batch, createEffect, createMemo, createRoot, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, events, type Account, type Folder, type MessageSummary, type SyncStatus, type ThreadSummary, type ConversationScope, type SearchField } from './api';
 import { loadPref, savePref } from './lib/format';
 
 // ------------------------------------------------------------- accounts & folders
 
-/** null while the initial load is in flight. */
-const [accounts, setAccounts] = createSignal<Account[] | null>(null);
+/** null while the initial load is in flight. In the order the core lists them; see `accounts`. */
+const [accountList, setAccounts] = createSignal<Account[] | null>(null);
+
+/** The user's order of accounts (ids; dragged in the sidebar). Persisted on this machine. */
+const ORDER_KEY = 'ui.accountOrder';
+const [accountOrder, setAccountOrder] = createSignal<number[]>(loadPref<number[]>(ORDER_KEY, []));
+
+/** Accounts in the user's order (new ones after the ordered ones, oldest first): everywhere
+ *  accounts are listed (sidebar, rail, flyout, switcher, default account). */
+const accounts = createRoot(() =>
+  createMemo(() => {
+    const list = accountList();
+    if (!list) return list;
+    const order = accountOrder();
+    const rank = (a: Account) => {
+      const i = order.indexOf(a.id);
+      return i < 0 ? order.length + a.id : i;
+    };
+    return [...list].sort((a, b) => rank(a) - rank(b));
+  }),
+);
+
+/** Move account `id` to position `to` (0 = first). */
+export function moveAccount(id: number, to: number): void {
+  const ids = (accounts() ?? []).map((a) => a.id).filter((x) => x !== id);
+  ids.splice(Math.max(0, Math.min(to, ids.length)), 0, id);
+  setAccountOrder(ids);
+  savePref(ORDER_KEY, ids);
+}
 const [foldersByAccount, setFoldersByAccount] = createStore<Record<number, Folder[]>>({});
 const [syncByAccount, setSyncByAccount] = createStore<Record<number, SyncStatus | undefined>>({});
 const [selectedFolderId, setSelectedFolderId] = createSignal<number | null>(null);
