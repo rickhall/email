@@ -4075,3 +4075,47 @@ html.macos .app.rail-mode .search-bar {
   font-size: 12.5px;
   color: var(--danger);
 }
+
+/* ==========================================================================
+   Which mailbox is selected (experiment): accent selection, current account
+   ========================================================================== */
+
+:root {
+  --sel-folder-bg: color-mix(in srgb, var(--accent) 15%, transparent);
+  --sel-folder-fg: color-mix(in srgb, var(--accent) 82%, var(--text));
+}
+/* A selected message while the list doesn't have focus: the same light blue as the selected
+   folder (one look for "selected"); with focus it's solid blue as before. */
+:root {
+  --sel-bg-inactive: var(--sel-folder-bg);
+}
+.folder.selected,
+.rail-btn.selected {
+  background: var(--sel-folder-bg);
+}
+.folder.selected .folder-name {
+  font-weight: 650;
+  color: var(--sel-folder-fg);
+}
+.folder.selected .folder-icon,
+.rail-btn.selected {
+  color: var(--sel-folder-fg);
+}
+.folder.selected .badge {
+  color: var(--sel-folder-fg);
+}
+/* the account holding the selection: its name bold (the others regular) */
+.account-head .acct-dot {
+  flex: none;
+}
+/* Icon → name gap that looks like the folder rows' (~8.5px as painted: a folder icon's strokes
+   sit inside its box, the account icon is a solid disc to its edge): header gap 4 + 4. */
+.account-head .acct-dot {
+  margin-right: 0;
+}
+.account-head .acct-dot + .account-name {
+  margin-left: 4px;
+}
+.account:not(.current) .account-head {
+  font-weight: 500;
+}

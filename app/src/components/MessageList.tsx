@@ -41,6 +41,8 @@ import { DRAG } from '../lib/platform';
 type Item = MessageSummary | ThreadSummary;
 
 export const ROW_HEIGHT = 72;
+/** Space above the first row and below the last, so they don't touch the list's edges. */
+const LIST_PAD = 3;
 
 function isTypingTarget(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
@@ -240,7 +242,7 @@ export function MessageList(props: {
     onInvalidate() {
       anchor = null;
       if (scrollEl.scrollTop <= 0) return; // at the top: let new mail appear
-      const index = Math.ceil(scrollEl.scrollTop / ROW_HEIGHT);
+      const index = Math.ceil(Math.max(0, scrollEl.scrollTop - LIST_PAD) / ROW_HEIGHT);
       const m = model.row(index);
       if (m) anchor = { id: m.id, index };
     },
@@ -295,6 +297,11 @@ export function MessageList(props: {
     },
     getScrollElement: () => scrollEl,
     estimateSize: () => ROW_HEIGHT,
+    paddingStart: LIST_PAD,
+    paddingEnd: LIST_PAD,
+    // …and keyboard moves / scrollToIndex keep that space visible at either end
+    scrollPaddingStart: LIST_PAD,
+    scrollPaddingEnd: LIST_PAD,
     overscan: 10,
   });
 
@@ -339,7 +346,7 @@ export function MessageList(props: {
   /** Select row `idx`, expected to hold `id` (from the core): scrolls only if it's off screen. */
   async function goTo(idx: number, id: number) {
     const reveal = (i: number) => {
-      const top = i * ROW_HEIGHT;
+      const top = LIST_PAD + i * ROW_HEIGHT;
       if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
         virt.scrollToIndex(i, { align: 'center' });
       }
@@ -472,7 +479,7 @@ export function MessageList(props: {
           // Scroll only if the row isn't on screen, then centred. (Before the first page lands the
           // list may not be that long yet, so this is repeated once the row is here.)
           const reveal = (i: number) => {
-            const top = i * ROW_HEIGHT;
+            const top = LIST_PAD + i * ROW_HEIGHT;
             if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
               virt.scrollToIndex(i, { align: 'center' });
             }

@@ -2,7 +2,8 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Sw
 import { hint } from '../lib/shortcuts';
 import { createStore } from 'solid-js/store';
 import { api, type Account, type Folder, type FolderRole, type SyncStatus } from '../api';
-import { foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
+import { folderById, foldersByAccount, selectedFolderId, selectFolder, syncByAccount, accounts } from '../state';
+import { AccountDot } from './FolderSwitcher';
 import { fmtNum, loadPref, savePref } from '../lib/format';
 import { AlertIcon, CheckIcon, ChevronIcon, FolderIcon, LockIcon, PlusIcon, RoleIcon, SidebarIcon } from './Icons';
 import { PasswordDialog } from './PasswordPrompt';
@@ -450,8 +451,10 @@ function AccountSection(props: { account: Account }) {
   const collapsed = () => !!ui.collapsedAccounts[props.account.id];
   const status = () => syncByAccount[props.account.id];
   const totalUnread = createMemo(() => roles().find((f) => f.role === 'inbox' || isInboxPath(f))?.unread ?? 0);
+  // The account holding the selected folder stands out; the others step back.
+  const current = () => folderById(selectedFolderId())?.accountId === props.account.id;
   return (
-    <section class="account" data-account-id={props.account.id}>
+    <section class="account" classList={{ current: current() }} data-account-id={props.account.id}>
       <button
         class="account-head"
         onClick={() => toggleAccount(props.account.id)}
@@ -461,6 +464,7 @@ function AccountSection(props: { account: Account }) {
         <span class="disclosure" classList={{ open: !collapsed() }}>
           <ChevronIcon size={12} />
         </span>
+        <AccountDot account={props.account} size={16} />
         <span class="account-name">{props.account.email}</span>
         {/* Always-reserved slot so the header never shifts when a problem appears. */}
         <span class="acct-flag" aria-hidden={!isAttention(status()?.phase)}>

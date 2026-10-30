@@ -8,10 +8,6 @@
 - [ ] Later: signatures, identities/aliases, send later.
 
 ## Accounts
-- [ ] Make the current account easier to see: a name per account ("Personal", "Work"), shown
-      in the breadcrumb above the list, plus the account's color as a subtle accent (a line
-      along the top of the list, the selected folder's highlight). Names set in a new
-      Settings › Accounts section, which will also hold SMTP server settings.
 - [ ] Settings › Accounts: SMTP server per account (today: derived from the IMAP server).
 
 ## Later
