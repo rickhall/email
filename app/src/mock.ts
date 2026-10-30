@@ -1048,6 +1048,9 @@ export function createMockBackend(): Backend {
   }
 
   const startEmpty = typeof location !== 'undefined' && new URLSearchParams(location.search).has('empty');
+  // `?demo`: for screenshots (scripts/screenshots.js): no test samples, sync already done,
+  // nothing arriving or changing on its own.
+  const demo = typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo');
   if (!startEmpty) {
     const g = createAccount('john.doe@example.com', 'John Doe', 'gmail', GMAIL_FOLDERS);
     const w = createAccount('john@example.org', 'Doe Works', 'imap', IMAP_FOLDERS);
@@ -1056,7 +1059,7 @@ export function createMockBackend(): Backend {
       const inbox = [...folders.values()].find((f) => f.accountId === g.id && f.role === 'inbox');
       const list = inbox ? folderMsgs.get(inbox.id) ?? [] : [];
       const free = list.filter((m, i) => i >= 6 && !threads.has(threadOf(m)) && meta.get(m.id)?.kind === 'person');
-      QUOTE_SAMPLES.forEach((qs, i) => {
+      (demo ? [] : QUOTE_SAMPLES).forEach((qs, i) => {
         const m = free[i];
         if (!m) return;
         quoteSampleFor.set(m.id, qs);
@@ -1078,20 +1081,25 @@ export function createMockBackend(): Backend {
         if (m) m.tags = tagSamples[k]!;
       });
     }
-    setTimeout(() => void simulateSync(g, 48_000, 'imap.gmail.com'), 300);
     const params = new URLSearchParams(location.search);
-    if (params.has('error')) {
-      // `?error`: the second account fails to connect (demonstrates the error footer row).
-      setTimeout(() => setStatus(w.id, 'error', null, 0, 0, 'Connection to mail.example.org:993 timed out'), 900);
-    } else if (params.has('limited')) {
-      // `?limited`: the second account is refused for too many connections (amber, retrying).
-      setTimeout(() => setStatus(w.id, 'limited', null, 0, 0, 'Too many simultaneous connections to this account. Other mail apps or devices are using the server\'s connection limit (Gmail allows 15 per account); retrying. Server said: [ALERT] Too many simultaneous connections. (Failure)'), 900);
-    } else if (params.has('auth')) {
-      setTimeout(() => setStatus(w.id, 'auth', null, 0, 0, 'The server rejected the password: [AUTHENTICATIONFAILED] Invalid credentials'), 900);
+    if (demo) {
+      setStatus(g.id, 'idle', null, 0, 0, null);
+      setStatus(w.id, 'idle', null, 0, 0, null);
     } else {
-      setTimeout(() => void simulateSync(w, 6_000, 'mail.example.org'), 900);
+      setTimeout(() => void simulateSync(g, 48_000, 'imap.gmail.com'), 300);
+      if (params.has('error')) {
+        // `?error`: the second account fails to connect (demonstrates the error footer row).
+        setTimeout(() => setStatus(w.id, 'error', null, 0, 0, 'Connection to mail.example.org:993 timed out'), 900);
+      } else if (params.has('limited')) {
+        // `?limited`: the second account is refused for too many connections (amber, retrying).
+        setTimeout(() => setStatus(w.id, 'limited', null, 0, 0, 'Too many simultaneous connections to this account. Other mail apps or devices are using the server\'s connection limit (Gmail allows 15 per account); retrying. Server said: [ALERT] Too many simultaneous connections. (Failure)'), 900);
+      } else if (params.has('auth')) {
+        setTimeout(() => setStatus(w.id, 'auth', null, 0, 0, 'The server rejected the password: [AUTHENTICATIONFAILED] Invalid credentials'), 900);
+      } else {
+        setTimeout(() => void simulateSync(w, 6_000, 'mail.example.org'), 900);
+      }
     }
-    setInterval(() => deliverNewMail(g), 25_000);
+    if (!demo) setInterval(() => deliverNewMail(g), 25_000);
     if (params.has('many')) {
       // `?many`: four more accounts (six total) to exercise the status popover.
       const extra = ['ops@example.org', 'john@side-project.example', 'family@doe.example', 'jdoe@university.example'];
@@ -1101,9 +1109,10 @@ export function createMockBackend(): Backend {
       });
     }
     // Periodic incremental syncs so the status footer keeps cycling through phases.
-    setInterval(() => {
-      if (statuses.get(g.id)?.phase === 'idle') void simulateSync(g, 1_500, 'imap.gmail.com');
-    }, 20_000);
+    if (!demo)
+      setInterval(() => {
+        if (statuses.get(g.id)?.phase === 'idle') void simulateSync(g, 1_500, 'imap.gmail.com');
+      }, 20_000);
   }
 
   // ---- quick search over sender / recipients / subject

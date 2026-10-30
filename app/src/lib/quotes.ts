@@ -2,7 +2,7 @@
 //
 // The one hard rule: NEVER collapse when the author wrote inline (interleaved with the quote)
 // or below it. When in doubt, leave the message alone. Pure functions; the HTML part needs a
-// DOMParser (browser), the plain-text part runs anywhere (see quotes.selfcheck.mjs).
+// DOMParser (browser), the plain-text part runs anywhere (see scripts/quotes-selfcheck.js).
 
 /** Minimum size of a quote worth collapsing. */
 const MIN_QUOTE_CHARS = 200;

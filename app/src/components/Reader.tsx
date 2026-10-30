@@ -13,6 +13,7 @@ import { ForwardIcon, ImageIcon, MailIcon, PaperclipIcon, ReplyIcon } from './Ic
 import { DRAG } from '../lib/platform';
 import { forwardFrameKeys } from '../lib/frameKeys';
 import { editDraft } from '../lib/compose';
+import { allKeys, label, MOD } from '../lib/shortcuts';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -191,13 +192,17 @@ export function BodySkeleton(props: { downloading: boolean }) {
 
 type Phase = 'idle' | 'loading' | 'downloading' | 'ready' | 'error';
 
+/** A command's first key as one keycap's text ("J", "⇧U", "Ctrl+R"). */
+const firstKey = (id: string) => label(allKeys(id)[0] ?? '').join(MOD === '⌘' ? '' : '+');
+
 export function ReaderEmpty() {
   return (
     <div class="reader-empty" classList={{ quiet: restorePending() }} data-tauri-drag-region={DRAG}>
       <MailIcon size={44} class="icon empty-icon" />
       <div class="reader-empty-title">No message selected</div>
       <div class="reader-empty-sub">
-        Use <kbd>J</kbd> / <kbd>K</kbd> to move, <kbd>O</kbd> to open, <kbd>T</kbd> conversations, <kbd>A</kbd> all mail
+        {/* from the keymap: the chosen preset's keys, or the user's own */}
+        Use <kbd>{firstKey('next')}</kbd> / <kbd>{firstKey('prev')}</kbd> to move, <kbd>?</kbd> for all shortcuts
       </div>
     </div>
   );

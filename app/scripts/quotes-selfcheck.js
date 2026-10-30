@@ -1,4 +1,4 @@
-// Self-check for the plain-text quote rules: `node scripts/quotes-selfcheck.mjs` (Node ≥ 23.6
+// Self-check for the plain-text quote rules: `node scripts/quotes-selfcheck.js` (Node ≥ 23.6
 // strips the TypeScript types natively). HTML rules need a DOMParser and are exercised in the
 // browser (see the headless checks in the dev notes).
 import { analyzePlain, parseLines } from '../src/lib/quotes.ts';
