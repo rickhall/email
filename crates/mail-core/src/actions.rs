@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn next_unread_goes_down_then_wraps() {
+    fn next_unread_goes_either_way_and_wraps() {
         let env = Env::new("unread", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
         let inbox = env.id("INBOX");
         // List order is newest first: uids 5,4,3,2,1; 4 and 1 unread.
@@ -781,16 +781,21 @@ mod tests {
         let threads = env.store.list_threads(inbox, crate::model::ThreadScope::default(), 0, 10).unwrap().threads;
         for threaded in [false, true] {
             let key = |u: u32| if threaded { threads[5 - u as usize].id } else { id(u) };
-            let next = |after: Option<u32>| env.store.next_unread(inbox, after.map(key), threaded).unwrap();
+            let next = |after: Option<u32>| env.store.next_unread(inbox, after.map(key), threaded, false).unwrap();
+            let prev = |after: Option<u32>| env.store.next_unread(inbox, after.map(key), threaded, true).unwrap();
             assert_eq!(next(None), Some((key(4), 1)));
             assert_eq!(next(Some(5)), Some((key(4), 1)));
             assert_eq!(next(Some(4)), Some((key(1), 4)));
             assert_eq!(next(Some(2)), Some((key(1), 4)));
             assert_eq!(next(Some(1)), Some((key(4), 1)), "wraps to the top");
+            assert_eq!(prev(None), Some((key(1), 4)), "from nothing: the bottom one");
+            assert_eq!(prev(Some(2)), Some((key(4), 1)));
+            assert_eq!(prev(Some(1)), Some((key(4), 1)));
+            assert_eq!(prev(Some(5)), Some((key(1), 4)), "wraps to the bottom");
         }
         let seen = Env::new("noneunread", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
         seen.store.upsert_headers(seen.acct, seen.id("INBOX"), &[rec(1, None, None, "a@x", flags::SEEN)], &HashMap::new()).unwrap();
-        assert_eq!(seen.store.next_unread(seen.id("INBOX"), None, false).unwrap(), None);
+        assert_eq!(seen.store.next_unread(seen.id("INBOX"), None, false, false).unwrap(), None);
     }
 
     #[test]

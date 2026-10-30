@@ -40,6 +40,9 @@ import { DRAG } from '../lib/platform';
 
 type Item = MessageSummary | ThreadSummary;
 
+/** Keys that scroll whatever has focus. */
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+
 export const ROW_HEIGHT = 72;
 /** Space above the first row and below the last, so they don't touch the list's edges. */
 const LIST_PAD = 3;
@@ -366,21 +369,22 @@ export function MessageList(props: {
     queueMicrotask(() => reveal(k));
   }
 
-  /** `n`: the next unread item below the selection, wrapping to the top (Thunderbird's N). */
-  async function nextUnread() {
+  /** N: the next unread item below the selection, wrapping to the top; with `back` (P) the
+   *  previous one above it, wrapping to the bottom (Thunderbird's N and P). */
+  async function nextUnread(back = false) {
     const cur = untrack(selectedId);
     if (search) {
       // Results: look through what's loaded.
       const n = count();
-      const from = selIndex();
+      const from = selIndex() < 0 && back ? n : selIndex();
       for (let step = 1; step <= n; step++) {
-        const i = (from + step + n) % n;
+        const i = (from + (back ? -step : step) + n) % n;
         const m = model.row(i);
         if (m?.unread && m.id !== cur) return selectIndex(i);
       }
       return;
     }
-    const hit = await api.nextUnread(folderId, cur, threaded);
+    const hit = await api.nextUnread(folderId, cur, threaded, back);
     if (!hit) {
       showToast({ kind: 'ok', text: 'No unread messages in this folder', ms: 2500 });
       return;
@@ -390,8 +394,11 @@ export function MessageList(props: {
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.defaultPrevented || e.altKey) return;
     if (isTypingTarget(e.target)) return;
+    // In the reader the scrolling keys scroll the message (letter keys still work there).
+    if (SCROLL_KEYS.has(e.key) && e.target instanceof Element && (e.target.matches('iframe, .reader') || e.target.closest('.plain, .conv-scroll')))
+      return;
     // Enter/Space on a focused button, link or menu item activates it (popup triggers, toolbar…).
     if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof Element && e.target.closest('button, a[href], summary, [role="button"], [role^="menuitem"], [role="option"]')) return;
     if (document.querySelector('.modal-backdrop')) return;
@@ -408,6 +415,9 @@ export function MessageList(props: {
         break;
       case 'next-unread':
         void nextUnread();
+        break;
+      case 'prev-unread':
+        void nextUnread(true);
         break;
       case 'first':
         selectIndex(0);
@@ -441,7 +451,7 @@ export function MessageList(props: {
         if (search || !climbToParent()) return;
         break;
       default:
-        // Message actions: e, #, Delete, v, !, Shift+U, s, z.
+        // Message actions: archive, delete, move, spam, read, star, undo, reply…, tags.
         if (runShortcut(e)) break;
         return;
     }

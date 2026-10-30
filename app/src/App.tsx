@@ -84,11 +84,6 @@ export function App() {
         return;
       }
       if (!ready) return;
-      if (e.key.toLowerCase() === 'n' && !e.shiftKey) {
-        e.preventDefault();
-        newMessage();
-        return;
-      }
       if (e.code === 'Digit1') {
         e.preventDefault();
         if (e.shiftKey) flyoutKey();
@@ -179,8 +174,15 @@ export function App() {
       return;
     }
     const frame = readerEl?.querySelector('iframe');
+    if (frame?.contentWindow) {
+      // Into the message's own document: focusing just the element can leave the keys
+      // (WebKitGTK) with the app, where the arrows would move through the list.
+      frame.focus();
+      frame.contentWindow.focus();
+      return;
+    }
     const plain = readerEl?.querySelector<HTMLElement>('.plain');
-    (frame ?? plain ?? readerEl)?.focus();
+    (plain ?? readerEl)?.focus();
   };
 
   return (

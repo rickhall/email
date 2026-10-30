@@ -1,16 +1,21 @@
-import { createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
+import { createEffect, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js';
 import {
   bindKey,
   COMMANDS,
   isDefault,
   keysOf,
   label,
+  MOD,
+  preset,
+  presetName,
+  PRESETS,
   recordKey,
   resetKeys,
+  setPreset,
   unbindKey,
   type Command,
 } from '../lib/shortcuts';
-import { CloseIcon } from './Icons';
+import { ChevronIcon, CloseIcon } from './Icons';
 import { api, errorMessage, type AccountDetails } from '../api';
 import { accounts } from '../state';
 import { loadPref, savePref } from '../lib/format';
@@ -42,6 +47,7 @@ export function openSettings(at?: SettingsSection): void {
   setOpen(true);
 }
 function close() {
+  setPresetMenu(false);
   setRecording(null);
   setStatus(null);
   setOpen(false);
@@ -105,7 +111,7 @@ function ShortcutRow(p: { cmd: Command }) {
             class="link-btn st-default"
             onClick={() => {
               resetKeys(p.cmd.id);
-              setStatus({ text: `“${p.cmd.desc}” back to its default` });
+              setStatus({ text: `“${p.cmd.desc}” back to ${presetName()}’s keys` });
             }}
           >
             Default
@@ -165,11 +171,26 @@ function ShortcutRow(p: { cmd: Command }) {
   );
 }
 
+/** The footer's "Restore defaults" menu: which client's keys to start over from. */
+const [presetMenu, setPresetMenu] = createSignal(false);
+
 function KeyboardSection() {
+  let menuEl: HTMLDivElement | undefined;
+  createEffect(() => {
+    if (!presetMenu()) return;
+    const onDown = (e: MouseEvent) => {
+      if (!menuEl?.contains(e.target as Node)) setPresetMenu(false);
+    };
+    document.addEventListener('mousedown', onDown, true);
+    onCleanup(() => document.removeEventListener('mousedown', onDown, true));
+  });
   return (
     <>
-      <div class="st-body">
-        <p class="st-note">Click + to add a key and × to remove one. Dimmed keys are fixed.</p>
+      <div class="st-body st-keys-body">
+        <p class="st-note">
+          Based on {presetName()}’s keys. Click + to add a key (on its own or with {MOD}) and × to remove one.
+          Dimmed keys are fixed.
+        </p>
         <For each={COMMANDS}>
           {(sec) => (
             <section class="st-section">
@@ -183,16 +204,45 @@ function KeyboardSection() {
         <span class="st-status" classList={{ error: !!status()?.error }} aria-live="polite">
           {status()?.text ?? ''}
         </span>
-        <button
-          class="btn secondary"
-          onClick={() => {
-            resetKeys();
-            setRecording(null);
-            setStatus({ text: 'All shortcuts back to their defaults' });
-          }}
-        >
-          Restore defaults
-        </button>
+        <div class="st-restore" ref={menuEl}>
+          <button
+            class="btn secondary"
+            aria-haspopup="menu"
+            aria-expanded={presetMenu()}
+            onClick={() => setPresetMenu((v) => !v)}
+          >
+            Restore defaults
+            <ChevronIcon size={11} />
+          </button>
+          <Show when={presetMenu()}>
+            <div class="view-menu st-restore-menu" role="menu" aria-label="Restore defaults">
+              <div class="vm-section">Start over with</div>
+              <For each={PRESETS}>
+                {(p) => (
+                  <button
+                    role="menuitemradio"
+                    aria-checked={preset() === p.id}
+                    class="vm-item"
+                    onClick={() => {
+                      setPreset(p.id);
+                      resetKeys();
+                      setRecording(null);
+                      setPresetMenu(false);
+                      setStatus({ text: `All shortcuts set to ${p.name}’s keys` });
+                    }}
+                  >
+                    <span class="vm-check" classList={{ on: preset() === p.id, radio: true }} aria-hidden="true">
+                      <Show when={preset() === p.id}>
+                        <span class="vm-dot" />
+                      </Show>
+                    </span>
+                    <span class="vm-label">{p.name}’s keys</span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+        </div>
       </div>
     </>
   );
@@ -364,7 +414,8 @@ function Panel() {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      close();
+      if (presetMenu()) setPresetMenu(false);
+      else close();
     }
   }
 

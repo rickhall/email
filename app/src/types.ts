@@ -352,7 +352,7 @@ export interface CommandMap {
   app_version: { args: undefined; ret: string };
   reveal_path: { args: { path: string }; ret: void };
   index_of: { args: { folderId: number; id: number; threaded: boolean }; ret: number | null };
-  next_unread: { args: { folderId: number; after: number | null; threaded: boolean }; ret: NextUnread | null };
+  next_unread: { args: { folderId: number; after: number | null; threaded: boolean; back: boolean }; ret: NextUnread | null };
   show_log: { args: undefined; ret: void };
   send_message: { args: { request: SendRequest }; ret: SendQueued };
   cancel_send: { args: { id: number }; ret: unknown | null };

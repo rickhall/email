@@ -118,12 +118,7 @@ export function SearchBar() {
 
   const onGlobalKey = (e: KeyboardEvent) => {
     if (document.querySelector('.modal-backdrop')) return;
-    const mod = e.metaKey || e.ctrlKey;
-    if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
-      e.preventDefault();
-      input.focus();
-      input.select();
-    } else if (commandFor(e) === 'search' && !isTypingTarget(e.target)) {
+    if (commandFor(e) === 'search' && !isTypingTarget(e.target)) {
       e.preventDefault();
       input.focus();
       input.select();

@@ -13,5 +13,5 @@
 - [ ] OAuth sign-in (needed for Outlook; nicer for Gmail).
 - [ ] Search message text (bodies), not just headers and tags.
 - [ ] macOS signing.
-- [ ] P: previous unread; N past the last unread: next folder with unread mail.
+- [ ] N past the last unread: next folder with unread mail.
 - [ ] A combined Inbox across accounts.

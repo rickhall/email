@@ -230,6 +230,7 @@ const BAR_COMMANDS: Record<string, BarCommand> = {
   reply: 'reply',
   'reply-all': 'replyAll',
   forward: 'forward',
+  'tag-menu': 'tag-menu',
 };
 
 /** Archive, delete, move, spam, read/unread, star, undo and the tag digits (keys from the

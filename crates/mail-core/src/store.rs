@@ -1540,7 +1540,7 @@ impl Store {
 
     /// The first unread item (message, or conversation with an unread message here) below `after`
     /// in the list's order, wrapping to the top; with its index. None if nothing is unread.
-    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool) -> Result<Option<(i64, u32)>> {
+    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool, back: bool) -> Result<Option<(i64, u32)>> {
         let found: Option<i64> = {
             let db = self.rdb();
             // The unread rows with their list sort key (date DESC, id DESC); `?2`/`?3` = position.
@@ -1566,11 +1566,17 @@ impl Store {
                     .optional()?,
                 None => None,
             };
-            let first = |below: bool| -> Result<Option<i64>> {
-                let cond = if below { "WHERE d < ?2 OR (d = ?2 AND id < ?3)" } else { "" };
-                let sql = format!("SELECT id FROM ({rows}) {cond} ORDER BY d DESC, id DESC LIMIT 1");
+            // `back`: the nearest one above instead (wrapping to the bottom).
+            let first = |past: bool| -> Result<Option<i64>> {
+                let cond = match (past, back) {
+                    (false, _) => "",
+                    (true, false) => "WHERE d < ?2 OR (d = ?2 AND id < ?3)",
+                    (true, true) => "WHERE d > ?2 OR (d = ?2 AND id > ?3)",
+                };
+                let order = if back { "ASC" } else { "DESC" };
+                let sql = format!("SELECT id FROM ({rows}) {cond} ORDER BY d {order}, id {order} LIMIT 1");
                 let mut stmt = db.prepare_cached(&sql)?;
-                Ok(if below {
+                Ok(if past {
                     stmt.query_row(params![folder_id, pos, after], |r| r.get(0)).optional()?
                 } else {
                     stmt.query_row(params![folder_id], |r| r.get(0)).optional()?

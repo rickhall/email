@@ -250,8 +250,9 @@ async fn next_unread(
     folder_id: i64,
     after: Option<i64>,
     threaded: bool,
+    back: Option<bool>,
 ) -> Res<Option<NextUnread>> {
-    core.next_unread(folder_id, after, threaded).map_err(err)
+    core.next_unread(folder_id, after, threaded, back.unwrap_or(false)).map_err(err)
 }
 
 #[tauri::command]
@@ -436,7 +437,7 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         app,
         "File",
         true,
-        &[&MenuItem::with_id(app, "new-message", "New Message", true, Some("CmdOrCtrl+N"))?],
+        &[&MenuItem::with_id(app, "new-message", "New Message", true, None::<&str>)?],
     )?;
     let edit = Submenu::with_items(
         app,
@@ -457,7 +458,7 @@ fn macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         "View",
         true,
         &[
-            &MenuItem::with_id(app, "search", "Search", true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(app, "search", "Search", true, None::<&str>)?,
             &MenuItem::with_id(app, "toggle-threaded", "Group by Conversation", true, Some("CmdOrCtrl+T"))?,
             &MenuItem::with_id(app, "toggle-scope", "Show All Mail in Conversations", true, Some("CmdOrCtrl+Shift+A"))?,
             &PredefinedMenuItem::separator(app)?,

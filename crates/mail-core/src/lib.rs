@@ -711,9 +711,10 @@ impl Core {
         }
     }
 
-    /// The next unread item below `after` in a folder list (wrapping to the top).
-    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool) -> Result<Option<NextUnread>> {
-        Ok(self.store.next_unread(folder_id, after, threaded)?.map(|(id, index)| NextUnread { id, index }))
+    /// The next unread item below `after` in a folder list (wrapping to the top), or with `back`
+    /// the previous one above it (wrapping to the bottom).
+    pub fn next_unread(&self, folder_id: i64, after: Option<i64>, threaded: bool, back: bool) -> Result<Option<NextUnread>> {
+        Ok(self.store.next_unread(folder_id, after, threaded, back)?.map(|(id, index)| NextUnread { id, index }))
     }
 
     pub fn tags(&self) -> Result<Vec<tags::TagDef>> {

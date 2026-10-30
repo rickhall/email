@@ -1783,7 +1783,7 @@ export function createMockBackend(): Backend {
       if (stored && Date.now() < stored.sendAt) return stored.draft ?? null;
       throw 'Too late to undo: the message was already sent.';
     },
-    async next_unread({ folderId, after, threaded }) {
+    async next_unread({ folderId, after, threaded, back }) {
       await sleep(3);
       // Rows in list order, as (id, unread): messages, or conversations by their newest message.
       const rows: { id: number; unread: boolean }[] = [];
@@ -1796,9 +1796,10 @@ export function createMockBackend(): Backend {
           rows.push({ id, unread: m.unread });
         } else if (m.unread) rows[k]!.unread = true;
       }
-      const from = after == null ? -1 : (at.get(after) ?? -1);
-      for (let step = 1; step <= rows.length; step++) {
-        const i = (from + step) % rows.length;
+      const n = rows.length;
+      const from = after == null ? (back ? n : -1) : (at.get(after) ?? -1);
+      for (let step = 1; step <= n; step++) {
+        const i = (from + (back ? -step : step) + n) % n;
         if (rows[i]!.unread) return { id: rows[i]!.id, index: i };
       }
       return null;

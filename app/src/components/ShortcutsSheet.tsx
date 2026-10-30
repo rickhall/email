@@ -60,7 +60,7 @@ function Sheet() {
             {(sec) => (
               <section class="sc-section">
                 <h3>{sec.title}</h3>
-                <For each={sec.items}>
+                <For each={sec.items.filter((it) => allKeys(it.id).length > 0)}>
                   {(it) => (
                     <div class="sc-row">
                       <span class="sc-keys">

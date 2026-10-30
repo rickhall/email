@@ -116,9 +116,10 @@ export const api = {
   /** Row index of a message / conversation in the folder's list (null = not in it). */
   indexOf: (folderId: number, id: number, threaded: boolean): Promise<number | null> =>
     call('index_of', { folderId, id, threaded }),
-  /** The next unread item below `after` in the folder's list, wrapping to the top (null = none). */
-  nextUnread: (folderId: number, after: number | null, threaded: boolean): Promise<NextUnread | null> =>
-    call('next_unread', { folderId, after, threaded }),
+  /** The next unread item below `after` in the folder's list, wrapping to the top; with `back`
+   *  the previous one above it, wrapping to the bottom (null = none). */
+  nextUnread: (folderId: number, after: number | null, threaded: boolean, back = false): Promise<NextUnread | null> =>
+    call('next_unread', { folderId, after, threaded, back }),
   /** Queue a message; it goes out after the undo window unless cancelSend(id) takes it back. */
   sendMessage: (request: SendRequest): Promise<SendQueued> => call('send_message', { request }),
   /** Save the composer's state as draft `id` (new when null); shown in Drafts. Returns its id. */
