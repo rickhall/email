@@ -175,16 +175,18 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
 async function undo(entry: UndoEntry) {
   if (lastUndo === entry) lastUndo = null;
   hideToast(entry.toastId);
-  // The message back in its place and selected again at once, even if the user has moved on
-  // since; not if they've left that list (another folder, a search).
-  if (entry.removed && entry.nav && entry.nav === activeNav()) entry.nav.putBack(entry.removed);
-  else if (entry.prev != null && currentId() === entry.next) restore(entry.prev);
   try {
     await api.undoAction(entry.opId);
   } catch (e) {
     entry.nav?.refresh();
     showToast({ kind: 'error', text: errorMessage(e) });
+    return;
   }
+  // Then the message back in its place and selected again, even if the user has moved on since;
+  // not if they've left that list (another folder, a search). Only once the core has it back:
+  // a conversation opened earlier would find nothing in this folder and close again.
+  if (entry.removed && entry.nav && entry.nav === activeNav()) entry.nav.putBack(entry.removed);
+  else if (entry.prev != null && currentId() === entry.next) restore(entry.prev);
 }
 
 /** `z`: undo the most recent undoable action. */

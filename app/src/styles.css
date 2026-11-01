@@ -2899,14 +2899,27 @@ html.macos .rail-top {
   margin: 0 8px;
 }
 .rail-marker {
+  position: relative;
   width: 36px;
   height: 24px;
   display: grid;
   place-items: center;
   margin-bottom: 2px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.rail-marker:hover {
+  background: var(--bg-hover);
+}
+.rail-marker.selected {
+  background: var(--sel-folder-bg);
+}
+/* Folded: a folder button's size, so its badge sits on it as on the Inbox icon */
+.rail-marker.folded {
+  height: 32px;
 }
 
-.rail-marker span {
+.rail-letter {
   width: 18px;
   height: 18px;
   border-radius: 50%;

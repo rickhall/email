@@ -4,9 +4,9 @@ import type { Account, Folder } from '../api';
 import { avatarColor, fmtNum } from '../lib/format';
 import { flyout, setFlyout, toggleSidebar } from '../lib/layout';
 import { DRAG } from '../lib/platform';
-import { accounts, foldersByAccount, selectedFolderId, selectFolder } from '../state';
+import { accounts, folderById, foldersByAccount, selectedFolderId, selectFolder } from '../state';
 import { FoldersIcon, RoleIcon, SidebarIcon } from './Icons';
-import { badgeFor, isInboxPath, roleFolders, SyncFooter } from './Sidebar';
+import { badgeFor, isAccountCollapsed, isInboxPath, roleFolders, SyncFooter, toggleAccount } from './Sidebar';
 
 const compact = (n: number) => (n > 99 ? '99+' : String(n));
 
@@ -36,15 +36,36 @@ function RailFolder(props: { f: Folder }) {
   );
 }
 
+/** An account: its marker (click to fold it away, as in the sidebar), then its main folders. */
 function RailAccount(props: { account: Account }) {
   const roles = createMemo(() => roleFolders(foldersByAccount[props.account.id] ?? []));
   const letter = () => (props.account.email[0] ?? '?').toUpperCase();
+  const collapsed = () => isAccountCollapsed(props.account.id);
+  // Folded: the Inbox's unread badge moves onto the marker (placed as on the Inbox icon), and
+  // the marker is selected if the open folder is in this account.
+  const inboxUnread = () => roles().find((f) => f.role === 'inbox' || isInboxPath(f))?.unread ?? 0;
+  const holdsSelection = () => folderById(selectedFolderId())?.accountId === props.account.id;
+  const tip = () => `${props.account.email}\n${collapsed() ? 'Show' : 'Hide'} its folders`;
   return (
     <div class="rail-acct">
-      <div class="rail-marker" title={props.account.email} aria-label={props.account.email}>
-        <span style={{ background: avatarColor(props.account.email) }}>{letter()}</span>
-      </div>
-      <For each={roles()}>{(f) => <RailFolder f={f} />}</For>
+      <button
+        class="rail-marker"
+        classList={{ folded: collapsed(), selected: collapsed() && holdsSelection() }}
+        title={tip()}
+        aria-label={`${props.account.email}: ${collapsed() ? 'show' : 'hide'} folders`}
+        aria-expanded={!collapsed()}
+        onClick={() => toggleAccount(props.account.id)}
+      >
+        <span class="rail-letter" style={{ background: avatarColor(props.account.email) }}>
+          {letter()}
+        </span>
+        <Show when={collapsed() && inboxUnread() > 0}>
+          <span class="rail-badge">{compact(inboxUnread())}</span>
+        </Show>
+      </button>
+      <Show when={!collapsed()}>
+        <For each={roles()}>{(f) => <RailFolder f={f} />}</For>
+      </Show>
     </div>
   );
 }

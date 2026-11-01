@@ -85,10 +85,12 @@ const [ui, setUi] = createStore<{ collapsedAccounts: Record<number, boolean>; ex
   expanded: loadPref('ui.expanded', {}),
 });
 
-function toggleAccount(id: number) {
+/** An account folded to its header (sidebar) or marker (rail): one setting for both, remembered. */
+export function toggleAccount(id: number) {
   setUi('collapsedAccounts', id, (v) => !v);
   savePref('ui.collapsedAccounts', ui.collapsedAccounts);
 }
+export const isAccountCollapsed = (id: number) => !!ui.collapsedAccounts[id];
 function isExpanded(n: TreeNode) {
   return ui.expanded[n.key] ?? n.depth === 0;
 }

@@ -1555,7 +1555,8 @@ export function createMockBackend(): Backend {
       return applyAction(action, messageIds, folderId);
     },
     async undo_action({ opId }) {
-      await sleep(4);
+      // As slow as the real core's (a transaction behind IPC): what the UI does meanwhile shows.
+      await sleep(60);
       const op = pendingOps.get(opId);
       if (!op) throw 'Too late to undo — the change was already sent to the server';
       clearTimeout(op.timer);
