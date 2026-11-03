@@ -66,6 +66,13 @@ impl ChunkedNewestFirst {
         }
         state.uidvalidity = uidvalidity;
         let exists = mb.exists;
+        // Complete but with nothing stored, while the server has mail: it was empty (or wrongly
+        // thought so) and has had mail since, which the incremental steps below never fetch
+        // (they start from `top_uid`). Sync it again from the top.
+        if state.complete && state.top_uid == 0 && exists > 0 {
+            tracing::info!(folder = folder.raw_name, exists, "empty folder has mail now; resyncing");
+            state = crate::store::FolderSyncState { uidvalidity, ..Default::default() };
+        }
 
         if exists == 0 {
             let stale = store.local_uids(folder.id)?;

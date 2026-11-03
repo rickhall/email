@@ -347,6 +347,11 @@ async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
 
 impl Connection {
     /// SELECT (or EXAMINE-like read-write select) a mailbox, with CONDSTORE when available.
+    ///
+    /// async-imap returns what it has so far, as success, when the connection ends before the
+    /// server's tagged reply: a SELECT cut short looks like an empty mailbox (no UIDVALIDITY,
+    /// EXISTS 0), which taken at face value wipes the folder. Every server sends UIDVALIDITY,
+    /// so its absence is an error; and "empty" is believed only on a connection still alive.
     pub async fn select(&mut self, raw_name: &str) -> Result<async_imap::types::Mailbox> {
         let mb = if self.caps.condstore {
             self.session.select_condstore(raw_name).await
@@ -354,6 +359,12 @@ impl Connection {
             self.session.select(raw_name).await
         }
         .with_context(|| format!("selecting {raw_name}"))?;
+        if mb.uid_validity.is_none() {
+            return Err(anyhow!("selecting {raw_name}: the connection closed before the server answered"));
+        }
+        if mb.exists == 0 {
+            self.session.noop().await.with_context(|| format!("selecting {raw_name}: confirming it's empty"))?;
+        }
         self.selected = Some(raw_name.to_string());
         Ok(mb)
     }
@@ -367,6 +378,9 @@ impl Connection {
 
     pub async fn list_folders(&mut self) -> Result<Vec<ListedFolder>> {
         let names: Vec<_> = self.session.list(Some(""), Some("*")).await?.try_collect().await?;
+        // A listing cut short by a closed connection ends like a complete one (see `select`):
+        // only a connection still alive afterwards proves it was complete.
+        self.session.noop().await.context("listing folders: the connection closed")?;
         let mut out = Vec::with_capacity(names.len());
         for n in &names {
             let raw = n.name().to_string();
@@ -423,9 +437,13 @@ impl Connection {
         Ok(out)
     }
 
-    /// STATUS for counts without selecting.
+    /// STATUS for counts without selecting. UIDVALIDITY is asked for too: the answer is one line,
+    /// so without it there was no answer (a closed connection, see `select`), not zero messages.
     pub async fn status(&mut self, raw_name: &str) -> Result<(u32, u32)> {
-        let mb = self.session.status(raw_name, "(MESSAGES UNSEEN)").await?;
+        let mb = self.session.status(raw_name, "(MESSAGES UNSEEN UIDVALIDITY)").await?;
+        if mb.uid_validity.is_none() {
+            return Err(anyhow!("status of {raw_name}: the connection closed before the server answered"));
+        }
         Ok((mb.exists, mb.unseen.unwrap_or(0)))
     }
 
