@@ -138,7 +138,7 @@ api
   .appVersion()
   .then(setAppVersion)
   .catch(() => {
-    /* older core: no version line */
+    /* no version line */
   });
 
 // ------------------------------------------------------------- status footer

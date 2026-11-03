@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     display_name TEXT NOT NULL,
     provider     TEXT NOT NULL,
     imap_host    TEXT NOT NULL,
-    imap_port    INTEGER NOT NULL
+    imap_port    INTEGER NOT NULL,
+    smtp_host    TEXT,
+    smtp_port    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -65,10 +67,18 @@ CREATE TABLE IF NOT EXISTS messages (
     snippet         TEXT,
     omitted         TEXT,    -- JSON [OmittedPart] when the body was stored without attachments
     allow_remote    INTEGER NOT NULL DEFAULT 0, -- user chose "Load images" for this message
-    thread_id       INTEGER  -- conversation; the id of one of its messages
+    thread_id       INTEGER, -- conversation; the id of one of its messages
+    identity        TEXT,    -- non-Gmail: EMAILID, or Message-ID + size (copies are one message)
+    keywords        TEXT NOT NULL DEFAULT '', -- IMAP keywords (tags), space-separated
+    local_copy      INTEGER NOT NULL DEFAULT 0, -- our own sent mail, shown before the server has it
+    pending_send    INTEGER, -- its outgoing row while queued
+    draft_id        INTEGER  -- a local draft's row, while it's one
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_gm ON messages(account_id, gm_msgid) WHERE gm_msgid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_nobody ON messages(account_id, has_body, date DESC);
+CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
+CREATE INDEX IF NOT EXISTS messages_msgid ON messages(account_id, message_id);
+CREATE UNIQUE INDEX IF NOT EXISTS messages_identity ON messages(account_id, identity) WHERE identity IS NOT NULL;
 
 -- Message-IDs each message refers to (In-Reply-To + References), for threading.
 CREATE TABLE IF NOT EXISTS msgrefs (
@@ -133,12 +143,56 @@ CREATE TABLE IF NOT EXISTS entries (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     uid        INTEGER,
     date       INTEGER NOT NULL,
+    thread_id  INTEGER, -- copy of messages.thread_id (kept exact by triggers)
     PRIMARY KEY (folder_id, message_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS entries_list ON entries(folder_id, date DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS entries_uid ON entries(folder_id, uid) WHERE uid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS entries_msg ON entries(message_id);
+-- entries.thread_id mirrors messages.thread_id so a folder's conversations can be listed from
+-- one covering index.
+CREATE INDEX IF NOT EXISTS entries_thread ON entries(folder_id, thread_id, date);
+CREATE TRIGGER IF NOT EXISTS entries_thread_ins AFTER INSERT ON entries BEGIN
+    UPDATE entries SET thread_id=(SELECT thread_id FROM messages WHERE id=NEW.message_id)
+    WHERE folder_id=NEW.folder_id AND message_id=NEW.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS messages_thread_upd AFTER UPDATE OF thread_id ON messages BEGIN
+    UPDATE entries SET thread_id=NEW.thread_id WHERE message_id=NEW.id;
+END;
+
+-- Quick search over sender, recipients and subject. Contentless: it stores only the index, rows
+-- are joined back to `messages` by rowid. Triggers keep it current.
+CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
+    subject, sender, recipients,
+    content='', contentless_delete=1,
+    tokenize='unicode61 remove_diacritics 2', prefix='2 3');
+CREATE TRIGGER IF NOT EXISTS msg_fts_ins AFTER INSERT ON messages BEGIN
+    INSERT INTO msg_fts(rowid, subject, sender, recipients)
+    VALUES (NEW.id, NEW.subject, NEW.from_name || ' ' || NEW.from_addr, NEW.to_addrs);
+END;
+CREATE TRIGGER IF NOT EXISTS msg_fts_del AFTER DELETE ON messages BEGIN
+    DELETE FROM msg_fts WHERE rowid = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS msg_fts_upd AFTER UPDATE OF subject, from_name, from_addr, to_addrs ON messages BEGIN
+    DELETE FROM msg_fts WHERE rowid = OLD.id;
+    INSERT INTO msg_fts(rowid, subject, sender, recipients)
+    VALUES (NEW.id, NEW.subject, NEW.from_name || ' ' || NEW.from_addr, NEW.to_addrs);
+END;
 "#;
+
+/// Schema versions (`PRAGMA user_version`). `SCHEMA` is always the current schema, whole:
+/// a new database gets it directly. A database at `BASE_VERSION` or later is brought up to
+/// date by the steps in `MIGRATIONS` it hasn't had (step i takes BASE_VERSION + i to the next).
+/// One older than the base isn't upgraded: it's deleted, with its bodies, and its accounts sync
+/// from scratch; one newer than this build is refused.
+///
+/// While the app has one user, the steps are folded back into `SCHEMA` now and then and the
+/// base moved up, once every machine has run them (the base is 4 since 2026-11-03). With more
+/// users this needs a stricter policy.
+const BASE_VERSION: i64 = 4;
+/// Schema changes since the base, oldest first. Add one per change (and change `SCHEMA` too).
+const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[];
+const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
 const BODY_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS bodies (
@@ -190,7 +244,6 @@ pub struct Snapshot {
     pub entries: Vec<SnapEntry>,
     pub flags: Vec<(i64, i64)>,
     /// (message, stored keywords)
-    #[serde(default)]
     pub keywords: Vec<(i64, String)>,
 }
 
@@ -353,71 +406,6 @@ fn assign_thread(
     Ok(())
 }
 
-/// v2: references used to be split on whitespace, so damaged headers produced junk ids
-/// (`org`, `(Your`, encoded-words) that glued unrelated conversations together. Re-parse every
-/// message's references from its stored headers (first 64 KB of the raw message; headers come
-/// first) and rebuild all conversations. Messages without a body get their stored lists cleaned.
-fn rethread(db: &mut Connection, bodies: &Connection) -> Result<()> {
-    let started = std::time::Instant::now();
-    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, bool)> = {
-        let mut stmt = db.prepare("SELECT id, message_id, in_reply_to, refs, has_body FROM messages")?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let mut head = bodies.prepare("SELECT substr(raw, 1, 65536) FROM bodies WHERE message_id = ?1")?;
-    let tx = db.transaction()?;
-    {
-        let mut update =
-            tx.prepare("UPDATE messages SET message_id = ?2, in_reply_to = ?3, refs = ?4 WHERE id = ?1")?;
-        let clean = |s: &Option<String>| -> Option<String> {
-            s.as_deref().map(crate::mime::clean_stored_ids).filter(|v| !v.is_empty()).map(|v| v.join(" "))
-        };
-        for (id, mid, irt, refs, has_body) in &rows {
-            let raw: Option<Vec<u8>> =
-                if *has_body { head.query_row([id], |r| r.get(0)).optional()? } else { None };
-            let (mid, irt, refs) = match raw {
-                Some(raw) => {
-                    let p = crate::mime::parse_header_block(&raw);
-                    (p.message_id.or_else(|| mid.clone()), p.in_reply_to, p.refs)
-                }
-                None => (mid.clone(), clean(irt), clean(refs)),
-            };
-            update.execute(params![id, mid, irt, refs])?;
-        }
-        tx.execute_batch("DELETE FROM msgrefs; UPDATE messages SET thread_id = NULL;")?;
-    }
-    tx.commit()?;
-    backfill_threads(db)?;
-    tracing::info!(n = rows.len(), ms = started.elapsed().as_millis() as u64, "rebuilt conversations from cleaned references");
-    Ok(())
-}
-
-/// Thread messages stored before threading existed (oldest first, as they arrived).
-fn backfill_threads(db: &mut Connection) -> Result<()> {
-    let tx = db.transaction()?;
-    let pending: Vec<(i64, i64, Option<String>, Option<String>, Option<String>)> = {
-        let mut stmt = tx.prepare(
-            "SELECT id, account_id, message_id, in_reply_to, refs FROM messages
-             WHERE thread_id IS NULL ORDER BY date, id",
-        )?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let started = std::time::Instant::now();
-    for (id, account_id, mid, irt, refs) in &pending {
-        assign_thread(&tx, *account_id, *id, mid.as_deref(), irt.as_deref(), refs.as_deref())?;
-    }
-    tx.commit()?;
-    tracing::info!(n = pending.len(), ms = started.elapsed().as_millis() as u64, "threaded existing messages");
-    Ok(())
-}
-
 /// Make a message's membership in label-backed folders match its Gmail labels exactly.
 /// `current` (the folder being synced) is left alone; folders not in `label_folders`
 /// (All Mail, Trash, Spam) are never touched. A message in Trash or Spam keeps its labels
@@ -528,16 +516,6 @@ impl std::fmt::Display for SyncSuperseded {
 
 impl std::error::Error for SyncSuperseded {}
 
-// Schema/data versions (PRAGMA user_version): 1 = Gmail label resync, 2 = conversations
-// rebuilt from cleaned references, 3 = keywords (tags) kept: flags re-fetched once, 4 = no
-// label folders for messages in Trash/Spam.
-//
-// PLANNED CLEANUP: this is a greenfield app with one user. Once all three of the user's
-// machines have run a build at the current version, fold these steps
-// into SCHEMA (all columns/tables/indexes created directly), reset the version baseline, and
-// delete the migration code (version checks, rethread, column-adding loop). Older databases
-// then just resync from scratch.
-
 fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
     conn.execute_batch(
@@ -551,93 +529,33 @@ impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
         let mut db = open(&dir.join("mail.db"))?;
+        let fresh = !db.prepare("SELECT 1 FROM sqlite_master")?.exists([])?;
+        let mut version: i64 = if fresh { SCHEMA_VERSION } else { db.query_row("PRAGMA user_version", [], |r| r.get(0))? };
+        if version > SCHEMA_VERSION {
+            anyhow::bail!("The mail database in {} is from a newer version of the app.", dir.display());
+        }
+        if version < BASE_VERSION {
+            tracing::warn!(version, "mail database older than the base schema; starting over");
+            drop(db);
+            for f in ["mail.db", "mail.db-wal", "mail.db-shm", "bodies.db", "bodies.db-wal", "bodies.db-shm"] {
+                let p = dir.join(f);
+                if p.exists() {
+                    std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+                }
+            }
+            db = open(&dir.join("mail.db"))?;
+            version = SCHEMA_VERSION;
+        }
+        while version < SCHEMA_VERSION {
+            let tx = db.transaction()?;
+            MIGRATIONS[(version - BASE_VERSION) as usize](&tx)?;
+            version += 1;
+            tx.execute_batch(&format!("PRAGMA user_version={version};"))?;
+            tx.commit()?;
+            tracing::info!(version, "mail database upgraded");
+        }
         db.execute_batch(SCHEMA)?;
-        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            // v1: Gmail system labels were mis-parsed, dropping label-derived memberships.
-            db.execute_batch(
-                "UPDATE folders SET top_uid=0, low_uid=0, complete=0, highest_modseq=0;
-                 PRAGMA user_version=1;",
-            )?;
-        }
-        for (table, column, ddl) in [
-            ("messages", "omitted", "ALTER TABLE messages ADD COLUMN omitted TEXT"),
-            ("messages", "allow_remote", "ALTER TABLE messages ADD COLUMN allow_remote INTEGER NOT NULL DEFAULT 0"),
-            ("messages", "thread_id", "ALTER TABLE messages ADD COLUMN thread_id INTEGER"),
-            ("messages", "identity", "ALTER TABLE messages ADD COLUMN identity TEXT"),
-            ("messages", "keywords", "ALTER TABLE messages ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"),
-            ("accounts", "smtp_host", "ALTER TABLE accounts ADD COLUMN smtp_host TEXT"),
-            // Our own sent mail, shown before the server has it (see `insert_local_copy`).
-            ("messages", "local_copy", "ALTER TABLE messages ADD COLUMN local_copy INTEGER NOT NULL DEFAULT 0"),
-            ("messages", "pending_send", "ALTER TABLE messages ADD COLUMN pending_send INTEGER"),
-            ("messages", "draft_id", "ALTER TABLE messages ADD COLUMN draft_id INTEGER"),
-            ("accounts", "smtp_port", "ALTER TABLE accounts ADD COLUMN smtp_port INTEGER"),
-        ] {
-            let exists = db
-                .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2")?
-                .exists([table, column])?;
-            if !exists {
-                db.execute_batch(ddl)?;
-            }
-        }
-        let entries_has_thread = db
-            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name='thread_id'")?
-            .exists([])?;
-        if !entries_has_thread {
-            db.execute_batch(
-                "ALTER TABLE entries ADD COLUMN thread_id INTEGER;
-                 UPDATE entries SET thread_id=(SELECT thread_id FROM messages m WHERE m.id=entries.message_id);",
-            )?;
-        }
-        // entries.thread_id mirrors messages.thread_id so a folder's conversations can be listed
-        // from one covering index; triggers keep the copy exact.
-        db.execute_batch(
-            "CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
-             CREATE INDEX IF NOT EXISTS messages_msgid ON messages(account_id, message_id);
-             CREATE UNIQUE INDEX IF NOT EXISTS messages_identity ON messages(account_id, identity)
-                 WHERE identity IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS entries_thread ON entries(folder_id, thread_id, date);
-             CREATE TRIGGER IF NOT EXISTS entries_thread_ins AFTER INSERT ON entries BEGIN
-                 UPDATE entries SET thread_id=(SELECT thread_id FROM messages WHERE id=NEW.message_id)
-                 WHERE folder_id=NEW.folder_id AND message_id=NEW.message_id;
-             END;
-             CREATE TRIGGER IF NOT EXISTS messages_thread_upd AFTER UPDATE OF thread_id ON messages BEGIN
-                 UPDATE entries SET thread_id=NEW.thread_id WHERE message_id=NEW.id;
-             END;",
-        )?;
-        backfill_threads(&mut db)?;
-        // Quick search index over sender, recipients and subject. Contentless: it stores only
-        // the index, rows are joined back to `messages` by rowid. Triggers keep it current.
-        db.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
-                 subject, sender, recipients,
-                 content='', contentless_delete=1,
-                 tokenize='unicode61 remove_diacritics 2', prefix='2 3');
-             CREATE TRIGGER IF NOT EXISTS msg_fts_ins AFTER INSERT ON messages BEGIN
-                 INSERT INTO msg_fts(rowid, subject, sender, recipients)
-                 VALUES (NEW.id, NEW.subject, NEW.from_name || ' ' || NEW.from_addr, NEW.to_addrs);
-             END;
-             CREATE TRIGGER IF NOT EXISTS msg_fts_del AFTER DELETE ON messages BEGIN
-                 DELETE FROM msg_fts WHERE rowid = OLD.id;
-             END;
-             CREATE TRIGGER IF NOT EXISTS msg_fts_upd AFTER UPDATE OF subject, from_name, from_addr, to_addrs ON messages BEGIN
-                 DELETE FROM msg_fts WHERE rowid = OLD.id;
-                 INSERT INTO msg_fts(rowid, subject, sender, recipients)
-                 VALUES (NEW.id, NEW.subject, NEW.from_name || ' ' || NEW.from_addr, NEW.to_addrs);
-             END;",
-        )?;
-        let indexed: bool = db.prepare("SELECT 1 FROM msg_fts LIMIT 1")?.exists([])?;
-        if !indexed {
-            let started = std::time::Instant::now();
-            let n = db.execute(
-                "INSERT INTO msg_fts(rowid, subject, sender, recipients)
-                 SELECT id, subject, from_name || ' ' || from_addr, to_addrs FROM messages",
-                [],
-            )?;
-            if n > 0 {
-                tracing::info!(n, ms = started.elapsed().as_millis() as u64, "built search index");
-            }
-        }
+        db.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
         let bodies = open(&dir.join("bodies.db"))?;
         bodies.execute_batch(BODY_SCHEMA)?;
         bodies.execute_batch(ATTACHMENT_SCHEMA)?;
@@ -645,26 +563,6 @@ impl Store {
             "DELETE FROM stash WHERE created < unixepoch() - ?1",
             [STASH_TTL_SECS],
         )?;
-        if version < 2 {
-            rethread(&mut db, &bodies)?;
-            db.execute_batch("PRAGMA user_version=2;")?;
-        }
-        if version < 3 {
-            // v3: keywords (Thunderbird tags) are now kept. Forget the CONDSTORE position so the
-            // next pass fetches every message's flags once, keywords included.
-            db.execute_batch("UPDATE folders SET highest_modseq=0; PRAGMA user_version=3;")?;
-        }
-        if version < 4 {
-            // v4: Gmail messages in Trash/Spam were put back under their labels (Sent…) from the
-            // labels they keep there. Drop those label-derived entries.
-            db.execute_batch(
-                "DELETE FROM entries WHERE uid IS NULL
-                   AND folder_id IN (SELECT id FROM folders WHERE coalesce(role, '') NOT IN ('all', 'trash', 'junk'))
-                   AND message_id IN (SELECT e.message_id FROM entries e JOIN folders f ON f.id = e.folder_id
-                                      WHERE f.role IN ('trash', 'junk') AND e.uid IS NOT NULL);
-                 PRAGMA user_version=4;",
-            )?;
-        }
         let have_tags: bool = db.prepare("SELECT 1 FROM tags LIMIT 1")?.exists([])?;
         if !have_tags {
             for (i, (k, n, c)) in crate::tags::DEFAULTS.iter().enumerate() {
@@ -2790,29 +2688,32 @@ mod tests {
         }
     }
 
-    /// Rethread a copy of a real mail.db against a real bodies.db (opened read-only):
-    /// MAIL_DB_COPY=/copy/mail.db BODIES_DB=/live/bodies.db cargo test -p mail-core real_rethread -- --ignored --nocapture
     #[test]
-    #[ignore]
-    fn real_rethread() {
-        let mut db = Connection::open(std::env::var("MAIL_DB_COPY").unwrap()).unwrap();
-        let bodies = Connection::open_with_flags(
-            std::env::var("BODIES_DB").unwrap(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let stats = |db: &Connection| -> (i64, Vec<i64>) {
-            let junk: i64 = db.query_row("SELECT count(*) FROM msgrefs WHERE instr(ref_msgid,'@')=0", [], |r| r.get(0)).unwrap();
-            let mut stmt = db.prepare("SELECT count(*) c FROM messages GROUP BY thread_id ORDER BY c DESC LIMIT 5").unwrap();
-            (junk, stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect())
+    fn schema_versions() {
+        let dir = std::env::temp_dir().join(format!("mail-core-test-versions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let version = |dir: &Path| -> i64 {
+            Connection::open(dir.join("mail.db")).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
         };
-        println!("before: junk refs {:?}", stats(&db));
-        let t = std::time::Instant::now();
-        rethread(&mut db, &bodies).unwrap();
-        println!("rethread took {:?}", t.elapsed());
-        println!("after:  junk refs {:?}", stats(&db));
-        let threads: i64 = db.query_row("SELECT count(DISTINCT thread_id) FROM messages", [], |r| r.get(0)).unwrap();
-        println!("conversations: {threads}");
+        let set_version = |dir: &Path, v: i64| Connection::open(dir.join("mail.db")).unwrap().execute_batch(&format!("PRAGMA user_version={v};")).unwrap();
+        // New: the whole schema, current version.
+        let store = Store::open(&dir).unwrap();
+        store.insert_account("x@example.com", "x", Provider::Imap, "h", 993).unwrap();
+        drop(store);
+        assert_eq!(version(&dir), SCHEMA_VERSION);
+        // At the base (or later): kept as it is.
+        assert_eq!(Store::open(&dir).unwrap().accounts().unwrap().len(), 1);
+        // From a newer build: refused, untouched.
+        set_version(&dir, SCHEMA_VERSION + 1);
+        assert!(Store::open(&dir).is_err());
+        assert_eq!(version(&dir), SCHEMA_VERSION + 1);
+        // Older than the base: started over.
+        set_version(&dir, BASE_VERSION - 1);
+        let store = Store::open(&dir).unwrap();
+        assert!(store.accounts().unwrap().is_empty());
+        drop(store);
+        assert_eq!(version(&dir), SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

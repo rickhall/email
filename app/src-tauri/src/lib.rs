@@ -250,9 +250,9 @@ async fn next_unread(
     folder_id: i64,
     after: Option<i64>,
     threaded: bool,
-    back: Option<bool>,
+    back: bool,
 ) -> Res<Option<NextUnread>> {
-    core.next_unread(folder_id, after, threaded, back.unwrap_or(false)).map_err(err)
+    core.next_unread(folder_id, after, threaded, back).map_err(err)
 }
 
 #[tauri::command]

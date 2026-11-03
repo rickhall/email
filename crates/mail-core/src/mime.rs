@@ -97,22 +97,6 @@ pub fn parse_msg_ids(raw: &str, ignore_addrs: &HashSet<String>) -> Vec<String> {
     out
 }
 
-/// Clean a stored id list from before `parse_msg_ids` existed (space-separated, brackets
-/// already stripped): keep only plausible ids.
-pub fn clean_stored_ids(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for tok in s.split_whitespace() {
-        let tok = tok.trim_matches(['<', '>']);
-        let tok = if tok.starts_with("=?") { decode_rfc2047(tok) } else { tok.to_string() };
-        for id in parse_msg_ids(&tok, &HashSet::new()) {
-            if !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    }
-    out
-}
-
 fn join_ids(ids: Vec<String>) -> Option<String> {
     (!ids.is_empty()).then(|| ids.join(" "))
 }
@@ -563,8 +547,6 @@ mod tests {
         // Bare ids without brackets.
         assert_eq!(parse_msg_ids("a@x, b@y", &none), vec!["a@x", "b@y"]);
         assert!(parse_msg_ids("org", &none).is_empty());
-        // Old stored lists: fragments dropped, real ids kept.
-        assert_eq!(clean_stored_ids("a@x org .org (Your b@y"), vec!["a@x", "b@y"]);
     }
 
     #[test]

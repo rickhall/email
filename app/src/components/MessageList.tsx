@@ -34,8 +34,6 @@ import { registerListNav, runShortcut } from '../lib/actions';
 import { commandFor } from '../lib/shortcuts';
 import { showToast } from './Toast';
 
-/** Pages (×200 rows) searched for a remembered item before giving up on restoring it. */
-const RESTORE_MAX_PAGES = 10;
 import { DRAG } from '../lib/platform';
 
 type Item = MessageSummary | ThreadSummary;
@@ -473,11 +471,7 @@ export function MessageList(props: {
       // index_of answers both questions at once: still in this folder, and where (any depth).
       void api
         .indexOf(folderId, remembered, threaded)
-        .then(
-          (i) => i,
-          // Older core without index_of: fall back to walking the first pages.
-          () => model.locate(remembered, RESTORE_MAX_PAGES).then((k) => (k >= 0 ? k : null)),
-        )
+        .catch(() => null)
         .then(async (idx) => {
           if (disposed) return;
           if (idx == null) {

@@ -246,7 +246,7 @@ function checkSelectedMessage(changed: number[]) {
         selectMessage(null);
       })
       .catch(() => {
-        /* core without message_in_folder: keep the selection */
+        /* couldn't tell: keep the selection */
       });
   }, 60);
 }
