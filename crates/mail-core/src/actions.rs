@@ -75,6 +75,9 @@ pub enum ServerOp {
     /// sent, because its UID there wasn't known yet. Label changes must go to All Mail: sent to
     /// the Inbox (or a label) copy, removing that folder's own label is ignored (`OK`, no change).
     Find { folder: String, gm_msgid: u64, then: Box<ServerOp> },
+    /// Store a message (base64 of the raw message) in `folder`, marked read: a copy of mail we
+    /// sent, on servers that don't file it themselves.
+    Append { folder: String, raw: String },
 }
 
 impl ServerOp {
@@ -83,7 +86,7 @@ impl ServerOp {
         let mut op = self.clone();
         match &mut op {
             ServerOp::Labels { uid: u, .. } | ServerOp::Move { uid: u, .. } | ServerOp::Flags { uid: u, .. } | ServerOp::Expunge { uid: u, .. } => *u = uid,
-            ServerOp::Find { .. } => {}
+            ServerOp::Find { .. } | ServerOp::Append { .. } => {}
         }
         op
     }

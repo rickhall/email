@@ -644,6 +644,8 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
 async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
     let mut focus = shared.focus.clone();
     let mut conn: Option<Connection> = None;
+    // The folder IDLE last started watching (on this connection).
+    let mut watching: Option<i64> = None;
     loop {
         let inbox = shared
             .store
@@ -678,7 +680,18 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             std::future::pending::<()>().await;
             unreachable!();
         }
-        guarded!(c, "selecting the watched folder", c.select(&raw))?;
+        let mb = guarded!(c, "selecting the watched folder", c.select(&raw))?;
+        // IDLE only reports what changes after it starts: mail that arrived since the folder was
+        // last synced would wait for the next poll. Catch up first, once per folder watched.
+        if watching != Some(folder_id) {
+            watching = Some(folder_id);
+            if mb.exists != shared.store.local_uid_count(folder_id)? {
+                sync_pushed_folder(&shared, &mut c, folder_id).await?;
+                tracing::info!(folder = raw, "caught up before watching");
+                conn = Some(c);
+                continue;
+            }
+        }
         let imap::Connection { session, caps, activity, .. } = c;
         let mut handle = session.idle();
         imap::stall_timeout(&activity, STALL_TIMEOUT, "starting IDLE", handle.init()).await??;
@@ -1130,10 +1143,20 @@ async fn send_one(shared: &Shared, mailer: &mut Option<crate::smtp::Mailer>, o: 
                     }
                 }
             }
-            // Gmail files the sent copy itself: sync Sent now so it takes over our local copy.
             if let Ok(folders) = shared.store.folders(account_id) {
                 if let Some(sent) = folders.iter().find(|f| f.role == Some(FolderRole::Sent)) {
-                    let _ = shared.urgent.send(Job::Refresh(sent.id));
+                    if shared.account.provider == crate::model::Provider::Imap {
+                        // Other servers don't file what's sent through SMTP: put a copy in Sent,
+                        // through the outbox (kept across restarts, retried). Sent is synced once
+                        // it's there, and the server's copy takes over our local one.
+                        if let Err(e) = file_sent_copy(shared, sent, &o.raw) {
+                            tracing::warn!(id = o.id, "filing the sent copy: {e:#}");
+                        }
+                    } else {
+                        // Gmail and Outlook file it themselves: sync Sent now so their copy takes
+                        // over our local one.
+                        let _ = shared.urgent.send(Job::Refresh(sent.id));
+                    }
                 }
             }
         }
@@ -1145,6 +1168,24 @@ async fn send_one(shared: &Shared, mailer: &mut Option<crate::smtp::Mailer>, o: 
             let _ = shared.store.retry_outgoing(o.id, now_ms() + backoff);
         }
     }
+}
+
+/// Queue a copy of a message we sent for the account's Sent folder (`ServerOp::Append`).
+fn file_sent_copy(shared: &Shared, sent: &Folder, raw: &[u8]) -> Result<()> {
+    use base64::Engine;
+    let op = crate::actions::ServerOp::Append {
+        folder: sent.raw_name.clone(),
+        raw: base64::engine::general_purpose::STANDARD.encode(raw),
+    };
+    shared.store.enqueue_ops(
+        shared.account.id,
+        &serde_json::to_string(&[op])?,
+        &serde_json::to_string(&crate::store::Snapshot::default())?,
+        &serde_json::to_string(&[sent.id])?,
+        now_ms(),
+    )?;
+    shared.outbox.notify_one();
+    Ok(())
 }
 
 /// Replied/forwarded marker on the original, like a user action (locally now, server via the

@@ -921,7 +921,8 @@ impl Store {
                 "SELECT id FROM messages WHERE account_id=?1 AND local_copy=1 AND gm_msgid IS NULL AND message_id=?2",
             )?;
             let mut adopt = tx.prepare_cached(
-                "UPDATE messages SET local_copy=0, pending_send=NULL, gm_msgid=coalesce(gm_msgid, ?2)
+                "UPDATE messages SET local_copy=0, pending_send=NULL, gm_msgid=coalesce(gm_msgid, ?2),
+                    identity=coalesce(identity, ?3)
                  WHERE id=?1 AND local_copy=1",
             )?;
             let mut entry = tx.prepare_cached(
@@ -964,10 +965,15 @@ impl Store {
                         },
                     },
                 };
+                // Not known yet: maybe it's our local copy of a message we sent (on any server).
+                let existing = match (existing, &rec.message_id) {
+                    (None, Some(mid)) => by_local.query_row(params![account_id, mid], |r| r.get(0)).optional()?,
+                    (found, _) => found,
+                };
                 let id = match existing {
                     Some(id) => {
                         update_flags.execute(params![id, rec.flags, crate::tags::join(&rec.keywords)])?;
-                        adopt.execute(params![id, rec.gm_msgid.map(|g| g as i64)])?;
+                        adopt.execute(params![id, rec.gm_msgid.map(|g| g as i64), identity])?;
                         id
                     }
                     None => {
@@ -1605,6 +1611,15 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// The account's own SMTP server; `None` falls back to the default for its IMAP server.
+    pub fn set_smtp_server(&self, account_id: i64, server: Option<(&str, u16)>) -> Result<()> {
+        self.db().execute(
+            "UPDATE accounts SET smtp_host=?2, smtp_port=?3 WHERE id=?1",
+            params![account_id, server.map(|s| s.0), server.map(|s| s.1)],
+        )?;
+        Ok(())
     }
 
     /// Whether `account_id` downloads whole messages, attachments included (offline use).

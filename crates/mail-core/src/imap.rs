@@ -663,6 +663,11 @@ impl Connection {
                     drop(r);
                 }
             }
+            ServerOp::Append { folder, raw } => {
+                use base64::Engine;
+                let raw = base64::engine::general_purpose::STANDARD.decode(raw)?;
+                self.session.append(folder, Some("(\\Seen)"), None, &raw).await?;
+            }
             ServerOp::Find { .. } => return Err(anyhow!("nested Find")),
         }
         Ok(())

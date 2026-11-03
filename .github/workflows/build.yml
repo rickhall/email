@@ -20,6 +20,14 @@ jobs:
       # The Tauri crate needs the built frontend (app/dist) to compile; it's built in
       # the bundle job. The tests live in the core and CLI crates.
       - run: cargo test --workspace --exclude mail-app
+      # The sync engine against real servers: Dovecot (IMAP) and Mailpit (SMTP) in Docker.
+      - name: Server tests
+        run: |
+          eval "$(test-server/test-server.sh up)"
+          cargo test -p mail-core --test server
+      - name: Server logs
+        if: failure()
+        run: docker logs mail-test-dovecot 2>&1 | tail -100; docker logs mail-test-mailpit 2>&1 | tail -50
 
   bundle:
     needs: test

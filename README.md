@@ -79,6 +79,18 @@ Data lives in `~/.local/share/dev.mailclient.desktop/` on Linux (`~/Library/Appl
 - **macOS:** inset title bar with the traffic lights over the sidebar; the pane tops drag the window (macOS only; Linux keeps its native title bar). Closing the window keeps the app (and sync) running; the Dock icon reopens it and ⌘Q quits. Native menu bar with File (New Message), Edit (copy/paste) and View (Search, Group by Conversation ⌘T, Show All Mail ⇧⌘A); New Message and Search use the keyboard preset's keys.
 - **Versions:** `major.minor` is set in `app/src-tauri/tauri.conf.json`; the patch is the number of commits (`app/src-tauri/build.rs`, and CI writes the same into the bundles), so a commit has the same version on every machine and every build upgrades the previous one. Shown with the commit, e.g. `0.1.47 (f43351f)`, in Settings › Troubleshooting, at the bottom of the sync status popover, and in the log.
 
+## Test against real servers
+
+`crates/mail-core/tests/server.rs` runs the sync engine against Dovecot (IMAP: CONDSTORE, QRESYNC, MOVE, IDLE, special-use folders) and Mailpit (SMTP), in Docker or Podman. Each test signs in as a new user, so it starts from an empty mailbox; a second connection plays another mail client (puts mail in, changes it, checks what reached the server). Covered: the first sync in chunks with all bodies, new mail by IDLE, read and deleted elsewhere, actions reaching the server (and an undone one not), and sending (out through SMTP, filed in Sent, the server's copy replacing the local one; for now ignored, as it hangs). CI runs them on every push.
+
+```sh
+eval "$(test-server/test-server.sh up)"     # start both, set MAIL_TEST_* and SSL_CERT_FILE
+cargo test -p mail-core --test server
+test-server/test-server.sh down
+```
+
+TLS is real: the script makes a throwaway CA, and `SSL_CERT_FILE` makes the app's normal certificate check trust it. Without the environment the tests skip, so `cargo test` works anywhere. Mailpit shows what was sent at http://localhost:31080.
+
 ## Benchmark sync
 
 ```sh

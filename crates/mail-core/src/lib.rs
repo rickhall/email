@@ -641,6 +641,18 @@ impl Core {
             .collect()
     }
 
+    /// Send `account_id`'s mail through `server` (host, port), or with `None` through the default
+    /// for its IMAP server. Its sync restarts to pick it up.
+    pub fn set_smtp_server(&self, account_id: i64, server: Option<(&str, u16)>) -> Result<()> {
+        self.store.set_smtp_server(account_id, server)?;
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
+        if let Some(old) = self.running.lock().unwrap().remove(&account_id) {
+            old.stop();
+            self.start_account(account)?;
+        }
+        Ok(())
+    }
+
     /// Messages and space used per account (slow on a cold disk: call off the UI's path).
     pub fn account_storage(&self) -> Result<Vec<AccountStorage>> {
         self.store.account_storage()
