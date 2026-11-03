@@ -328,6 +328,11 @@ impl AccountSync {
         self.shared.outbox.notify_one();
     }
 
+    /// There's more to download (attachments are now kept): wake the body workers.
+    pub fn wake_bodies(&self) {
+        self.shared.new_headers.notify_waiters();
+    }
+
     /// A message was queued for sending (or taken back): re-check the send queue.
     pub fn wake_sender(&self) {
         self.shared.sender.notify_one();
@@ -798,6 +803,8 @@ async fn download(
     announce: bool,
     whole: bool,
 ) -> Result<HashSet<i64>> {
+    // An account kept for offline use downloads everything, attachments included.
+    let whole = whole || shared.store.keeps_attachments(shared.account.id)?;
     // Group by the folder we can fetch each message from.
     let mut by_folder: HashMap<String, Vec<(u32, i64)>> = HashMap::new();
     for &id in ids {
@@ -1277,6 +1284,7 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
     loop {
         let focus = *shared.focus.borrow();
         let preferred = preferred_body_folder(&shared);
+        let keep = shared.store.keeps_attachments(shared.account.id)?;
         let batch: Vec<i64> = {
             let skipped = shared.body_failures.lock().unwrap().values().filter(|&&n| n >= MAX_BODY_FAILURES).count();
             let candidates = shared.store.messages_missing_body(shared.account.id, focus, 400 + skipped as u32)?;
@@ -1294,8 +1302,8 @@ async fn body_task(shared: Arc<Shared>) -> Result<()> {
                 if *folder.get_or_insert(loc.folder_id) != loc.folder_id {
                     continue;
                 }
-                // Attachments are skipped, so a big message mostly costs its text part.
-                let cost = (loc.size as u64).min(512 * 1024);
+                // Attachments are skipped (unless kept), so a big message mostly costs its text part.
+                let cost = if keep { loc.size as u64 } else { (loc.size as u64).min(512 * 1024) };
                 if !batch.is_empty() && bytes + cost > BODY_BATCH_BYTES {
                     break;
                 }

@@ -109,6 +109,11 @@ async fn update_password(core: State<'_, Arc<Core>>, account_id: i64, password: 
 }
 
 #[tauri::command]
+fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
+    core.set_keep_attachments(account_id, keep).map_err(err)
+}
+
+#[tauri::command]
 async fn search_messages(
     core: State<'_, Arc<Core>>,
     account_id: i64,
@@ -719,6 +724,7 @@ pub fn run() {
             list_threads,
             get_thread,
             update_password,
+            set_keep_attachments,
             search_messages,
             message_in_folder,
             open_attachment,

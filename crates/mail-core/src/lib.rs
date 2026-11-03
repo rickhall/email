@@ -617,13 +617,16 @@ impl Core {
 
     /// Every account with its servers (Settings › Accounts).
     pub fn account_details(&self) -> Result<Vec<AccountDetails>> {
-        Ok(self
-            .store
+        self.store
             .accounts()?
             .into_iter()
             .map(|a| {
                 let smtp = a.smtp();
-                AccountDetails {
+                let (attachments_missing, attachments_missing_bytes) = self.store.attachments_missing(a.id)?;
+                Ok(AccountDetails {
+                    keep_attachments: self.store.keeps_attachments(a.id)?,
+                    attachments_missing,
+                    attachments_missing_bytes,
                     id: a.id,
                     smtp_default: a.smtp_host.as_deref().is_none_or(|h| h.trim().is_empty()),
                     smtp_host: smtp.as_ref().map(|s| s.0.clone()),
@@ -633,9 +636,21 @@ impl Core {
                     provider: a.provider,
                     imap_host: a.imap_host,
                     imap_port: a.imap_port,
-                }
+                })
             })
-            .collect())
+            .collect()
+    }
+
+    /// Download whole messages for `account_id` (attachments for offline use), or stop doing so.
+    /// Turning it on also fetches, in the background, the messages already stored without them.
+    pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {
+        self.store.set_keep_attachments(account_id, keep)?;
+        if keep {
+            if let Some(s) = self.running.lock().unwrap().get(&account_id) {
+                s.wake_bodies();
+            }
+        }
+        Ok(())
     }
 
     /// Addresses for the composer's To/Cc/Bcc matching what's typed, best first.

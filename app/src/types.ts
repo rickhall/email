@@ -244,6 +244,11 @@ export interface AccountDetails {
   smtpPort: number | null;
   /** the SMTP server is derived from the IMAP server, not set for the account */
   smtpDefault: boolean;
+  /** whole messages are downloaded, attachments included (offline use) */
+  keepAttachments: boolean;
+  /** messages stored without their attachments, and their size on the server (bytes) */
+  attachmentsMissing: number;
+  attachmentsMissingBytes: number;
 }
 
 /** A file chosen to attach (picker or drop). */
@@ -369,6 +374,7 @@ export interface CommandMap {
   message_in_folder: { args: { id: number; folderId: number | null }; ret: boolean };
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };
+  set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
 }
 
 export type CommandName = keyof CommandMap;

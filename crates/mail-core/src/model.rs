@@ -307,6 +307,12 @@ pub struct AccountDetails {
     pub smtp_port: Option<u16>,
     /// The SMTP server is the default derived from the IMAP server, not one set for the account.
     pub smtp_default: bool,
+    /// Whole messages are downloaded, attachments included, for offline use.
+    pub keep_attachments: bool,
+    /// Messages stored without their attachments, and their size on the server (bytes): what
+    /// keeping attachments would still download.
+    pub attachments_missing: u64,
+    pub attachments_missing_bytes: u64,
 }
 
 /// A message to send, as the composer has it.

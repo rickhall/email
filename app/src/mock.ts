@@ -566,6 +566,8 @@ export function createMockBackend(): Backend {
   const folderMsgs = new Map<number, MessageSummary[]>();
   const byId = new Map<number, MessageSummary>();
   const remoteAllowed = new Set<number>();
+  /** accounts downloading whole messages (Settings › Accounts › Offline) */
+  const keepAttachments = new Set<number>();
   /** message id -> quoted-reply sample used as its body */
   const quoteSampleFor = new Map<number, QuoteSample>();
   /** Last search result set; any messages-changed invalidates it. */
@@ -1699,8 +1701,16 @@ export function createMockBackend(): Backend {
           smtpHost: gmail ? 'smtp.gmail.com' : null,
           smtpPort: gmail ? 465 : null,
           smtpDefault: true,
+          keepAttachments: keepAttachments.has(a.id),
+          attachmentsMissing: keepAttachments.has(a.id) ? 0 : gmail ? 7845 : 1793,
+          attachmentsMissingBytes: keepAttachments.has(a.id) ? 0 : gmail ? 3_594_000_000 : 1_902_000_000,
         };
       });
+    },
+    async set_keep_attachments({ accountId, keep }) {
+      await sleep(3);
+      if (keep) keepAttachments.add(accountId);
+      else keepAttachments.delete(accountId);
     },
     async show_data_dir() {
       await sleep(3);

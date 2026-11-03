@@ -166,6 +166,9 @@ export const api = {
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
   updatePassword: (accountId: number, password: string): Promise<void> =>
     call('update_password', { accountId, password }),
+  /** Download whole messages for the account (attachments for offline use), or stop. */
+  setKeepAttachments: (accountId: number, keep: boolean): Promise<void> =>
+    call('set_keep_attachments', { accountId, keep }),
 };
 
 async function on<K extends EventName>(event: K, cb: (p: EventMap[K]) => void): Promise<() => void> {

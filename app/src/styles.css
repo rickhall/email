@@ -4401,6 +4401,22 @@ body.dragging-account * {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.st-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.st-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.st-acct-note {
+  margin: 2px 0 6px 140px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
 .st-field-action {
   margin-left: auto;
   flex: none;

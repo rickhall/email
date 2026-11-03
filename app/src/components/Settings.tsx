@@ -18,7 +18,7 @@ import {
 import { ChevronIcon, CloseIcon } from './Icons';
 import { api, errorMessage, type AccountDetails } from '../api';
 import { accounts } from '../state';
-import { loadPref, savePref } from '../lib/format';
+import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
 
 // Settings: sections on the left, the chosen one on the right (each with its own heading,
@@ -262,6 +262,20 @@ function Field(props: { label: string; children: JSX.Element }) {
 }
 
 function AccountCard(props: { d: AccountDetails }) {
+  const [keep, setKeep] = createSignal(props.d.keepAttachments);
+  /** What keeping attachments means for this account, given what's stored now. */
+  const offlineNote = () => {
+    const n = props.d.attachmentsMissing;
+    const what = `${fmtNum(n)} ${n === 1 ? 'message' : 'messages'} (about ${fmtSize(props.d.attachmentsMissingBytes)})`;
+    if (keep()) {
+      return n > 0
+        ? `Whole messages are downloaded. The attachments of ${what} already here are being fetched in the background.`
+        : 'Whole messages are downloaded, attachments included.';
+    }
+    return n > 0
+      ? `Attachments are downloaded when you open them. Keeping them would also fetch those of ${what} already here.`
+      : 'Attachments are downloaded when you open them.';
+  };
   const account = () => (accounts() ?? []).find((a) => a.id === props.d.id);
   const [editing, setEditing] = createSignal(false);
   const [pw, setPw] = createSignal('');
@@ -332,6 +346,24 @@ function AccountCard(props: { d: AccountDetails }) {
           </form>
         </Show>
       </Field>
+      <Field label="Offline">
+        <label class="st-check">
+          <input
+            type="checkbox"
+            checked={keep()}
+            onChange={(e) => {
+              const on = e.currentTarget.checked;
+              setKeep(on);
+              api.setKeepAttachments(props.d.id, on).catch((err) => {
+                setKeep(!on);
+                setMsg({ text: errorMessage(err), error: true });
+              });
+            }}
+          />
+          Keep attachments on this computer
+        </label>
+      </Field>
+      <p class="st-acct-note">{offlineNote()}</p>
       <Show when={msg()}>{(m) => <p class="st-acct-msg" classList={{ error: !!m().error }}>{m().text}</p>}</Show>
     </section>
   );

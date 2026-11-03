@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     imap_host    TEXT NOT NULL,
     imap_port    INTEGER NOT NULL,
     smtp_host    TEXT,
-    smtp_port    INTEGER
+    smtp_port    INTEGER,
+    keep_attachments INTEGER NOT NULL DEFAULT 0 -- download whole messages (offline attachments)
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -191,7 +192,10 @@ END;
 /// users this needs a stricter policy.
 const BASE_VERSION: i64 = 4;
 /// Schema changes since the base, oldest first. Add one per change (and change `SCHEMA` too).
-const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[];
+const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
+    // 5: an account can keep its attachments for offline use
+    |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN keep_attachments INTEGER NOT NULL DEFAULT 0;")?),
+];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
 const BODY_SCHEMA: &str = r#"
@@ -1576,7 +1580,31 @@ impl Store {
             .optional()?)
     }
 
-    /// Newest messages still missing a body, preferring `focus_folder`.
+    /// Whether `account_id` downloads whole messages, attachments included (offline use).
+    pub fn keeps_attachments(&self, account_id: i64) -> Result<bool> {
+        Ok(self
+            .rdb()
+            .query_row("SELECT keep_attachments FROM accounts WHERE id=?1", [account_id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {
+        self.db().execute("UPDATE accounts SET keep_attachments=?2 WHERE id=?1", params![account_id, keep])?;
+        Ok(())
+    }
+
+    /// Messages stored without their attachments, and their size on the server (bytes).
+    pub fn attachments_missing(&self, account_id: i64) -> Result<(u64, u64)> {
+        Ok(self.rdb().query_row(
+            "SELECT count(*), coalesce(sum(size), 0) FROM messages WHERE account_id=?1 AND omitted IS NOT NULL",
+            [account_id],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )?)
+    }
+
+    /// Newest messages still missing a body, preferring `focus_folder`; then, for an account
+    /// that keeps attachments, the newest stored without them.
     pub fn messages_missing_body(
         &self,
         account_id: i64,
@@ -1605,12 +1633,29 @@ impl Store {
                 }
             }
         }
+        let keep: bool = db
+            .query_row("SELECT keep_attachments FROM accounts WHERE id=?1", [account_id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false);
+        if keep && out.len() < limit as usize {
+            let mut stmt = db.prepare_cached(
+                "SELECT id FROM messages WHERE account_id=?1 AND has_body=1 AND omitted IS NOT NULL
+                 ORDER BY date DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![account_id, limit - out.len() as u32], |r| r.get::<_, i64>(0))?;
+            for id in rows {
+                out.push(id?);
+            }
+        }
         Ok(out)
     }
 
+    /// (messages, messages with everything they should have downloaded): a body, and for an
+    /// account that keeps attachments, the attachments too.
     pub fn count_missing_bodies(&self, account_id: i64) -> Result<(u64, u64)> {
         Ok(self.rdb().query_row(
-            "SELECT count(*), sum(has_body) FROM messages WHERE account_id=?1",
+            "SELECT count(*), sum(m.has_body AND (a.keep_attachments = 0 OR m.omitted IS NULL))
+             FROM messages m JOIN accounts a ON a.id = m.account_id WHERE m.account_id=?1",
             [account_id],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64)),
         )?)
@@ -1630,6 +1675,10 @@ impl Store {
                 "INSERT OR REPLACE INTO bodies (message_id, raw) VALUES (?1, ?2)",
                 params![id, raw],
             )?;
+            // A whole message holds its attachments: separately fetched copies are spares now.
+            if omitted.is_none() {
+                bodies.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
+            }
         }
         self.db().execute(
             "UPDATE messages SET has_body=1, snippet=?2, has_attachments=?3, omitted=?4 WHERE id=?1",
@@ -2405,6 +2454,34 @@ mod tests {
     }
 
     #[test]
+    fn kept_attachments_queue_partial_bodies() {
+        let dir = std::env::temp_dir().join(format!("mail-core-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@gmail.com", "x", Provider::Gmail, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store.sync_folder_list(acct.id, &[lf("[Gmail]/All Mail", Some(FolderRole::All))]).unwrap();
+        let all = store.folders(acct.id).unwrap()[0].id;
+        store.upsert_headers(acct.id, all, &[rec(1, 101, &[]), rec(2, 102, &[]), rec(3, 103, &[])], &HashMap::new()).unwrap();
+        let id = |u: u32| store.message_ids_for_uids(all, &[u]).unwrap()[0];
+        // 1: no body yet; 2: stored without its attachment; 3: complete.
+        store.store_body(id(2), b"Subject: m2\r\n\r\npartial", None, true, Some("[]")).unwrap();
+        store.store_body(id(3), b"Subject: m3\r\n\r\nwhole", None, false, None).unwrap();
+        assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1)]);
+        assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (3, 2));
+        assert_eq!(store.attachments_missing(acct.id).unwrap(), (1, 10));
+        // Kept: the partial one is queued too, after anything without a body.
+        store.set_keep_attachments(acct.id, true).unwrap();
+        assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1), id(2)]);
+        assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (3, 1));
+        // Downloaded whole: done.
+        store.store_body(id(2), b"Subject: m2\r\n\r\nwhole", None, true, None).unwrap();
+        assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1)]);
+        assert_eq!(store.attachments_missing(acct.id).unwrap(), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn threads_by_references() {
         let dir = std::env::temp_dir().join(format!("mail-core-thread-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2701,8 +2778,16 @@ mod tests {
         store.insert_account("x@example.com", "x", Provider::Imap, "h", 993).unwrap();
         drop(store);
         assert_eq!(version(&dir), SCHEMA_VERSION);
-        // At the base (or later): kept as it is.
-        assert_eq!(Store::open(&dir).unwrap().accounts().unwrap().len(), 1);
+        // At the base (or later): kept, and brought up to date by the steps since.
+        {
+            let db = Connection::open(dir.join("mail.db")).unwrap();
+            db.execute_batch(&format!("ALTER TABLE accounts DROP COLUMN keep_attachments; PRAGMA user_version={BASE_VERSION};")).unwrap();
+        }
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert!(!store.keeps_attachments(store.accounts().unwrap()[0].id).unwrap());
+        drop(store);
+        assert_eq!(version(&dir), SCHEMA_VERSION);
         // From a newer build: refused, untouched.
         set_version(&dir, SCHEMA_VERSION + 1);
         assert!(Store::open(&dir).is_err());
