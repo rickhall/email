@@ -50,7 +50,7 @@ function RailAccount(props: { account: Account }) {
     <div class="rail-acct">
       <button
         class="rail-marker"
-        classList={{ folded: collapsed(), selected: collapsed() && holdsSelection() }}
+        classList={{ selected: collapsed() && holdsSelection() }}
         title={tip()}
         aria-label={`${props.account.email}: ${collapsed() ? 'show' : 'hide'} folders`}
         aria-expanded={!collapsed()}

@@ -8,7 +8,10 @@ const host = process.env.TAURI_DEV_HOST;
 
 // Tauri v2 conventions: https://v2.tauri.app/start/frontend/vite/
 export default defineConfig({
-  plugins: [solid()],
+  // No hot swapping of components: much UI state lives in module-level signals (open dialogs,
+  // menus, the keymap…), and a swapped module leaves the page holding the old copy (Settings
+  // stopped opening). A changed file reloads the page instead.
+  plugins: [solid({ hot: false })],
   clearScreen: false,
   server: {
     port: 1420,

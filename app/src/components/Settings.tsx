@@ -16,7 +16,7 @@ import {
   type Command,
 } from '../lib/shortcuts';
 import { ChevronIcon, CloseIcon } from './Icons';
-import { api, errorMessage, type AccountDetails } from '../api';
+import { api, errorMessage, type AccountDetails, type AccountStorage } from '../api';
 import { accounts } from '../state';
 import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
@@ -261,7 +261,23 @@ function Field(props: { label: string; children: JSX.Element }) {
   );
 }
 
+// Space per account: counted the first time Settings › Accounts is shown in a session (seconds
+// on a cold disk, so in the background), kept for the session, recounted on request.
+const [storage, setStorage] = createSignal<AccountStorage[] | null>(null);
+const [counting, setCounting] = createSignal(false);
+const [storageError, setStorageError] = createSignal(false);
+function countStorage() {
+  if (counting()) return;
+  setCounting(true);
+  setStorageError(false);
+  api
+    .accountStorage()
+    .then(setStorage, () => setStorageError(true))
+    .finally(() => setCounting(false));
+}
+
 function AccountCard(props: { d: AccountDetails }) {
+  const stored = () => storage()?.find((s) => s.accountId === props.d.id);
   const [keep, setKeep] = createSignal(props.d.keepAttachments);
   /** What keeping attachments means for this account, given what's stored now. */
   const offlineNote = () => {
@@ -346,6 +362,26 @@ function AccountCard(props: { d: AccountDetails }) {
           </form>
         </Show>
       </Field>
+      <Field label="Storage">
+        {/* the row is there from the start; its text arrives when counted */}
+        <span class="st-oneline">
+          <Show
+            when={stored()}
+            fallback={<span class="st-muted">{storageError() ? 'Couldn’t count' : 'Counting…'}</span>}
+          >
+            {(s) => (
+              <>
+                {fmtNum(s().messages)} {s().messages === 1 ? 'message' : 'messages'} · {fmtSize(s().localBytes)} local
+                <span class="st-muted"> · {fmtSize(s().serverBytes)} on the server</span>
+              </>
+            )}
+          </Show>
+        </span>
+        {/* same label while counting (the old figures stay until the new ones are in) */}
+        <button class="link-btn st-field-action" disabled={counting()} onClick={countStorage}>
+          Recount
+        </button>
+      </Field>
       <Field label="Offline">
         <label class="st-check">
           <input
@@ -371,6 +407,7 @@ function AccountCard(props: { d: AccountDetails }) {
 
 function AccountsSection() {
   const [details] = createResource(() => api.accountDetails());
+  if (storage() == null) countStorage();
   // in the user's order (as in the sidebar)
   const ordered = () => {
     const d = details() ?? [];

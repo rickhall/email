@@ -2915,7 +2915,9 @@ html.macos .rail-top {
 .rail-marker {
   position: relative;
   width: 36px;
-  height: 24px;
+  /* a folder button's size, folded or not: folding moves nothing, and the folded badge sits
+     on it as on the Inbox icon */
+  height: 32px;
   display: grid;
   place-items: center;
   margin-bottom: 2px;
@@ -2927,10 +2929,6 @@ html.macos .rail-top {
 }
 .rail-marker.selected {
   background: var(--sel-folder-bg);
-}
-/* Folded: a folder button's size, so its badge sits on it as on the Inbox icon */
-.rail-marker.folded {
-  height: 32px;
 }
 
 .rail-letter {
@@ -4410,6 +4408,12 @@ body.dragging-account * {
 .st-check input {
   margin: 0;
   accent-color: var(--accent);
+}
+.st-oneline {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .st-acct-note {
   margin: 2px 0 6px 140px;

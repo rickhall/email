@@ -108,6 +108,13 @@ async fn update_password(core: State<'_, Arc<Core>>, account_id: i64, password: 
     core.update_password(account_id, password).await.map_err(err)
 }
 
+/// Messages and space per account: seconds on a cold disk, so off the async runtime.
+#[tauri::command]
+async fn account_storage(core: State<'_, Arc<Core>>) -> Res<Vec<AccountStorage>> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.account_storage()).await.map_err(|e| e.to_string())?.map_err(err)
+}
+
 #[tauri::command]
 fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
     core.set_keep_attachments(account_id, keep).map_err(err)
@@ -725,6 +732,7 @@ pub fn run() {
             get_thread,
             update_password,
             set_keep_attachments,
+            account_storage,
             search_messages,
             message_in_folder,
             open_attachment,

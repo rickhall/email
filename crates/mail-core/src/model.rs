@@ -315,6 +315,18 @@ pub struct AccountDetails {
     pub attachments_missing_bytes: u64,
 }
 
+/// How much of an account is stored here (Settings › Accounts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountStorage {
+    pub account_id: i64,
+    pub messages: u64,
+    /// Their size on the server (as it reports it).
+    pub server_bytes: u64,
+    /// Bodies and fetched attachments stored here.
+    pub local_bytes: u64,
+}
+
 /// A message to send, as the composer has it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

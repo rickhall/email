@@ -2,6 +2,7 @@ import type {
   Account,
   Action,
   AccountDetails,
+  AccountStorage,
   ActionResult,
   Addr,
   FileInfo,
@@ -166,6 +167,8 @@ export const api = {
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
   updatePassword: (accountId: number, password: string): Promise<void> =>
     call('update_password', { accountId, password }),
+  /** Messages and space used per account (can take a few seconds). */
+  accountStorage: (): Promise<AccountStorage[]> => call('account_storage', undefined),
   /** Download whole messages for the account (attachments for offline use), or stop. */
   setKeepAttachments: (accountId: number, keep: boolean): Promise<void> =>
     call('set_keep_attachments', { accountId, keep }),

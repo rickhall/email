@@ -641,6 +641,11 @@ impl Core {
             .collect()
     }
 
+    /// Messages and space used per account (slow on a cold disk: call off the UI's path).
+    pub fn account_storage(&self) -> Result<Vec<AccountStorage>> {
+        self.store.account_storage()
+    }
+
     /// Download whole messages for `account_id` (attachments for offline use), or stop doing so.
     /// Turning it on also fetches, in the background, the messages already stored without them.
     pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {

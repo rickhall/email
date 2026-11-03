@@ -1707,6 +1707,13 @@ export function createMockBackend(): Backend {
         };
       });
     },
+    async account_storage() {
+      await sleep(400);
+      return accounts.map((a) => {
+        const n = [...byId.values()].filter((m) => meta.get(m.id)?.accountId === a.id).length;
+        return { accountId: a.id, messages: n, serverBytes: n * 61_000, localBytes: n * (keepAttachments.has(a.id) ? 52_000 : 19_000) };
+      });
+    },
     async set_keep_attachments({ accountId, keep }) {
       await sleep(3);
       if (keep) keepAttachments.add(accountId);

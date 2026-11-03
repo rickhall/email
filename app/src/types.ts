@@ -251,6 +251,16 @@ export interface AccountDetails {
   attachmentsMissingBytes: number;
 }
 
+/** How much of an account is stored here (Settings › Accounts). */
+export interface AccountStorage {
+  accountId: number;
+  messages: number;
+  /** their size on the server, as it reports it */
+  serverBytes: number;
+  /** bodies and fetched attachments stored here */
+  localBytes: number;
+}
+
 /** A file chosen to attach (picker or drop). */
 export interface FileInfo {
   path: string;
@@ -375,6 +385,7 @@ export interface CommandMap {
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
+  account_storage: { args: undefined; ret: AccountStorage[] };
 }
 
 export type CommandName = keyof CommandMap;

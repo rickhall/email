@@ -501,6 +501,7 @@ pub struct Store {
     read: Mutex<Connection>,
     bodies: Mutex<Connection>,
     bodies_read: Mutex<Connection>,
+    dir: std::path::PathBuf,
     /// Bumped by every local change (an action applied or undone). A sync step that read the
     /// server before the change must not write its results over it: see [`SyncSuperseded`].
     local_epoch: AtomicU64,
@@ -578,8 +579,34 @@ impl Store {
             read: Mutex::new(open(&dir.join("mail.db"))?),
             bodies: Mutex::new(bodies),
             bodies_read: Mutex::new(open(&dir.join("bodies.db"))?),
+            dir: dir.to_path_buf(),
             local_epoch: AtomicU64::new(0),
         })
+    }
+
+    /// Per account: messages, their size on the server, and the space their bodies and
+    /// separately fetched attachments take here. Reads every stored body's length, which takes
+    /// seconds on a cold disk, so on connections of its own (the app's reads aren't held up).
+    pub fn account_storage(&self) -> Result<Vec<AccountStorage>> {
+        let db = Connection::open_with_flags(self.dir.join("mail.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.execute("ATTACH DATABASE ?1 AS b", [self.dir.join("bodies.db").to_string_lossy()])?;
+        let mut stmt = db.prepare(
+            "SELECT m.account_id, count(*), coalesce(sum(m.size), 0),
+                    coalesce(sum(length(x.raw)), 0)
+                      + coalesce((SELECT sum(length(c.data)) FROM b.attachment_cache c
+                                  JOIN messages n ON n.id = c.message_id WHERE n.account_id = m.account_id), 0)
+             FROM messages m LEFT JOIN b.bodies x ON x.message_id = m.id
+             GROUP BY m.account_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AccountStorage {
+                account_id: r.get(0)?,
+                messages: r.get::<_, i64>(1)? as u64,
+                server_bytes: r.get::<_, i64>(2)? as u64,
+                local_bytes: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -2478,6 +2505,10 @@ mod tests {
         store.store_body(id(2), b"Subject: m2\r\n\r\nwhole", None, true, None).unwrap();
         assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1)]);
         assert_eq!(store.attachments_missing(acct.id).unwrap(), (0, 0));
+        // Storage: three messages of 10 bytes on the server; two bodies here.
+        let s = store.account_storage().unwrap();
+        assert_eq!((s.len(), s[0].messages, s[0].server_bytes), (1, 3, 30));
+        assert_eq!(s[0].local_bytes, (b"Subject: m2\r\n\r\nwhole".len() + b"Subject: m3\r\n\r\nwhole".len()) as u64);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
