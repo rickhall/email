@@ -16,6 +16,9 @@
   --bg-hover: rgba(0, 0, 0, 0.045);
   --bg-active: rgba(0, 0, 0, 0.08);
   --bg-subtle: rgba(0, 0, 0, 0.035);
+  /* the header band across the list and the reader (search, folder title, subject): neutral,
+     since blue means selected */
+  --bg-band: rgba(0, 0, 0, 0.035);
 
   --text: #1d1d1f;
   --text-2: #4f4f55;
@@ -66,6 +69,7 @@
     --bg-hover: rgba(255, 255, 255, 0.05);
     --bg-active: rgba(255, 255, 255, 0.09);
     --bg-subtle: rgba(255, 255, 255, 0.04);
+    --bg-band: rgba(255, 255, 255, 0.055);
 
     --text: #ececef;
     --text-2: #b4b4bb;
@@ -743,10 +747,11 @@ body.resizing iframe {
 }
 .reader-subject {
   margin: 0 0 16px;
-  font-size: 22px;
+  /* a headline: a little larger, a little lighter than bold, set tighter */
+  font-size: 24px;
   line-height: 1.25;
-  font-weight: 700;
-  letter-spacing: -0.015em;
+  font-weight: 650;
+  letter-spacing: -0.022em;
   overflow-wrap: anywhere;
 }
 
@@ -1456,14 +1461,15 @@ body.resizing iframe {
   height: 30px;
   padding: 0 6px 0 10px;
   border-radius: 8px;
-  background: var(--bg-hover);
-  border: 1px solid transparent;
+  /* white on the tinted header band, like a toolbar field */
+  background: var(--bg-input);
+  border: 1px solid var(--sep);
   color: var(--text-3);
   transition: background 120ms, border-color 120ms, box-shadow 120ms;
   cursor: text;
 }
 .search-field:hover {
-  background: var(--bg-active);
+  border-color: color-mix(in srgb, var(--text-3) 45%, transparent);
 }
 .search-field:focus-within {
   background: var(--bg-input);
@@ -1980,6 +1986,7 @@ body.resizing iframe {
 .search-bar {
   height: var(--search-bar-h);
   padding: 0 12px;
+  background: var(--bg-band);
   display: flex;
   align-items: flex-end;
   padding-bottom: 4px;
@@ -1992,6 +1999,7 @@ body.resizing iframe {
 /* list header (folder, threaded/flat, loading, empty) and search header: same box */
 .list-head,
 .list-head.search-head {
+  background: var(--bg-band);
   height: calc(var(--pane-head-h) - var(--search-bar-h));
   min-height: calc(var(--pane-head-h) - var(--search-bar-h));
   max-height: calc(var(--pane-head-h) - var(--search-bar-h));
@@ -2012,6 +2020,7 @@ body.resizing iframe {
 .list-placeholder::before {
   content: '';
   display: block;
+  background: var(--bg-band);
   height: calc(var(--pane-head-h) - var(--search-bar-h));
   border-bottom: 1px solid var(--sep);
 }
@@ -2025,17 +2034,18 @@ body.resizing iframe {
   max-height: var(--pane-head-h);
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0 28px 13px;
+  padding: 0 28px;
+  background: var(--bg-band);
   border-bottom: 1px solid var(--sep);
   overflow: hidden;
   user-select: text;
   -webkit-user-select: text;
   animation: none;
 }
+/* The band mirrors the list's two rows beside it: the subject where the search field is (its
+   30px box, 4px above the search row's foot), the info row centred where the folder title is. */
 .reader-band .reader-subject {
-  margin: 0;
+  margin: calc(var(--search-bar-h) - 34px) 0 0;
   flex: none;
   white-space: nowrap;
   overflow: hidden;
@@ -2060,6 +2070,10 @@ body.resizing iframe {
 }
 .reader-band .conv-meta {
   justify-content: space-between;
+}
+.reader-band .conv-meta,
+.reader-band .band-meta {
+  margin-top: calc(4px + (var(--pane-head-h) - var(--search-bar-h) - 24px) / 2);
 }
 .band-meta .dot-sep {
   margin: 0 6px;

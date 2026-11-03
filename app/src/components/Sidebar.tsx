@@ -111,8 +111,11 @@ function syncLabel(s: SyncStatus): string {
   switch (s.phase) {
     case 'connecting':
       return s.message || 'Connecting…';
-    case 'folders':
-      return 'Updating folders…';
+    case 'folders': {
+      // the folder being checked or counted, when the core says (first pass after connecting)
+      const f = s.folderId != null ? folderById(s.folderId) : undefined;
+      return f ? `Updating ${f.displayName}…` : 'Updating folders…';
+    }
     case 'headers':
       return s.total > 0 ? `Syncing ${fmtNum(s.done)} / ${fmtNum(s.total)}` : 'Syncing…';
     case 'bodies':
@@ -281,7 +284,7 @@ export function SyncFooter(props: { compact?: boolean }) {
     let text: string;
     if (activeList.length === 1) {
       const st = activeList[0]!.status!;
-      text = st.phase === 'connecting' || st.phase === 'folders' ? 'Updating…' : syncLabel(st);
+      text = st.phase === 'connecting' ? 'Updating…' : syncLabel(st);
     } else if (total > 0) {
       text = `Syncing ${activeList.length} accounts · ${fmtNum(done)} / ${fmtNum(total)}`;
     } else {

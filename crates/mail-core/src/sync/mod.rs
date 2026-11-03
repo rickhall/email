@@ -200,6 +200,15 @@ impl Shared {
             SyncStatus { account_id: self.account.id, phase, folder_id, done, total, message };
     }
 
+    /// While the first pass after connecting shows "Updating folders", name the folder it's on
+    /// (routine passes stay quiet: they don't report this phase).
+    fn note_folder(&self, folder_id: i64) {
+        let mut s = self.header.lock().unwrap();
+        if s.phase == SyncPhase::Folders {
+            s.folder_id = Some(folder_id);
+        }
+    }
+
     async fn connect(&self) -> Result<Connection> {
         use std::sync::atomic::Ordering;
         if self.auth_failed.load(Ordering::SeqCst) {
@@ -566,6 +575,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 epoch,
                 report: &report,
             };
+            shared.note_folder(next);
             let activity = conn.activity.clone();
             let what = format!("syncing {}", folder.raw_name);
             let step = imap::stall_timeout(&activity, STALL_TIMEOUT, &what, shared.strategy.step(&mut conn, &ctx)).await?;
@@ -608,6 +618,7 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
     let wanted = folders.iter().filter(|f| f.selectable && only.is_none_or(|o| o.contains(&f.id)));
     for (i, f) in wanted.enumerate() {
         // A stall ends the sweep (the connection is gone); a folder's own error doesn't.
+        shared.note_folder(f.id);
         let activity = conn.activity.clone();
         match imap::stall_timeout(&activity, STALL_TIMEOUT, "counting messages", conn.status(&f.raw_name)).await? {
             Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,

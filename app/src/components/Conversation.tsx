@@ -43,10 +43,18 @@ export function AutoHeightFrame(props: { doc: string }) {
     f.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox');
     f.setAttribute('referrerpolicy', 'no-referrer');
     f.setAttribute('scrolling', 'no');
-    f.style.height = '160px';
+    // Until its images are in (they give most HTML mail its height), the frame keeps at least
+    // the room left in the pane: a long message opens at about its size instead of growing from
+    // a strip as each image arrives; a short one shrinks once, at the end.
+    let floor = 160;
+    const pane = host.closest('.conv-scroll');
+    if (pane) floor = Math.max(floor, Math.floor(pane.getBoundingClientRect().bottom - host.getBoundingClientRect().top - 16));
+    let settled = false;
+    f.style.height = `${floor}px`;
     f.srcdoc = props.doc;
 
     let ro: ResizeObserver | undefined;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     let last = -1;
     const measure = () => {
       const doc = f.contentDocument;
@@ -57,7 +65,7 @@ export function AutoHeightFrame(props: { doc: string }) {
       const margins = cs ? parseFloat(cs.marginTop) + parseFloat(cs.marginBottom) : 0;
       // The html box's own height shrinks with content (unlike scrollHeight, which is floored
       // at the viewport); body.scrollHeight catches overflowing children.
-      const h = Math.ceil(Math.max(de.getBoundingClientRect().height, body.scrollHeight + margins, 24));
+      const h = Math.ceil(Math.max(de.getBoundingClientRect().height, body.scrollHeight + margins, settled ? 24 : floor));
       if (Math.abs(h - last) > 1) {
         last = h;
         f.style.height = `${h}px`;
@@ -67,9 +75,7 @@ export function AutoHeightFrame(props: { doc: string }) {
       const doc = f.contentDocument;
       if (!doc) return;
       forwardFrameKeys(f);
-      // First pass: the frame is still small, so scrollHeight is exact here.
       last = -1;
-      f.style.height = `${Math.max(24, doc.documentElement.scrollHeight)}px`;
       measure();
       ro?.disconnect();
       ro = new ResizeObserver(() => measure());
@@ -78,16 +84,34 @@ export function AutoHeightFrame(props: { doc: string }) {
       ro.observe(f); // width changes (pane resize) reflow the content
       // Expanding/collapsing quoted history (native <details>): 'toggle' doesn't bubble, so capture.
       doc.addEventListener('toggle', measure, true);
+      // Settled once every image has loaded (or failed), or after a while regardless.
+      let pending = 0;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(settleTimer);
+        measure();
+      };
+      const imageDone = () => {
+        measure();
+        if (--pending === 0) settle();
+      };
       doc.querySelectorAll('img').forEach((img) => {
         if (!img.complete) {
-          img.addEventListener('load', measure);
-          img.addEventListener('error', measure);
+          pending++;
+          img.addEventListener('load', imageDone, { once: true });
+          img.addEventListener('error', imageDone, { once: true });
         }
       });
+      if (pending === 0) settle();
+      else settleTimer = setTimeout(settle, 2500);
       void doc.fonts?.ready.then(measure);
     });
     host.replaceChildren(f);
-    onCleanup(() => ro?.disconnect());
+    onCleanup(() => {
+      ro?.disconnect();
+      clearTimeout(settleTimer);
+    });
   });
   return <div class="card-frame-wrap" ref={host} />;
 }
