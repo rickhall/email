@@ -256,20 +256,24 @@ export async function initApp(): Promise<void> {
   if (started) return;
   started = true;
 
-  void events.onFoldersChanged(({ accountId }) => {
-    const known = (accounts() ?? []).some((a) => a.id === accountId);
-    if (!known) {
-      void reloadAccounts();
-      return;
-    }
-    loadFolders(accountId)
-      .then(() => ensureFolderSelected())
-      .catch((e) => console.error('list_folders', e));
-  });
-  void events.onMessagesChanged(({ folderIds }) => checkSelectedMessage(folderIds));
-  void events.onSyncStatus((s) => {
-    setSyncByAccount(s.accountId, s);
-  });
+  // Listening before the first loads: a change between a load and its listener would be lost.
+  const listening = [
+    events.onFoldersChanged(({ accountId }) => {
+      const known = (accounts() ?? []).some((a) => a.id === accountId);
+      if (!known) {
+        void reloadAccounts();
+        return;
+      }
+      loadFolders(accountId)
+        .then(() => ensureFolderSelected())
+        .catch((e) => console.error('list_folders', e));
+    }),
+    events.onMessagesChanged(({ folderIds }) => checkSelectedMessage(folderIds)),
+    events.onSyncStatus((s) => {
+      setSyncByAccount(s.accountId, s);
+    }),
+  ];
+  await Promise.all(listening).catch((e) => console.warn('subscribing to core events', e));
 
   try {
     await reloadAccounts();

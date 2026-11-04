@@ -309,10 +309,20 @@ pub struct AccountDetails {
     pub smtp_default: bool,
     /// Whole messages are downloaded, attachments included, for offline use.
     pub keep_attachments: bool,
-    /// Messages stored without their attachments, and their size on the server (bytes): what
-    /// keeping attachments would still download.
-    pub attachments_missing: u64,
-    pub attachments_missing_bytes: u64,
+}
+
+/// An account's messages with attachments (Settings › Accounts › Offline); sizes are the
+/// messages' sizes on the server.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentCounts {
+    pub account_id: i64,
+    /// Stored without their attachments: what keeping attachments (still) downloads.
+    pub missing: u64,
+    pub missing_bytes: u64,
+    /// Stored with true attachments (what Remove takes away).
+    pub kept: u64,
+    pub kept_bytes: u64,
 }
 
 /// How much of an account is stored here (Settings › Accounts).

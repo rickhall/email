@@ -116,6 +116,30 @@ async fn account_storage(core: State<'_, Arc<Core>>) -> Res<Vec<AccountStorage>>
 }
 
 #[tauri::command]
+fn attachment_counts(core: State<'_, Arc<Core>>) -> Res<Vec<AttachmentCounts>> {
+    core.attachment_counts().map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovedAttachments {
+    messages: u64,
+    freed_bytes: u64,
+}
+
+/// Remove an account's stored attachments: a minute or two on a large store (it's compacted),
+/// so off the async runtime.
+#[tauri::command]
+async fn remove_attachments(core: State<'_, Arc<Core>>, account_id: i64) -> Res<RemovedAttachments> {
+    let core = core.inner().clone();
+    let (messages, freed_bytes) = tauri::async_runtime::spawn_blocking(move || core.remove_attachments(account_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)?;
+    Ok(RemovedAttachments { messages, freed_bytes })
+}
+
+#[tauri::command]
 fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
     core.set_keep_attachments(account_id, keep).map_err(err)
 }
@@ -353,7 +377,12 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
                     let _ = app.emit("send-failed", SendPayload { account_id, id, message: Some(message) });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!("event forwarder lagged by {n}");
+                    // Changes were dropped: say everything changed, so nothing on screen stays stale.
+                    tracing::warn!("event forwarder lagged by {n}; refreshing everything");
+                    for account in core.store.accounts().unwrap_or_default() {
+                        accounts_dirty.insert(account.id);
+                        folders_dirty.extend(core.store.folders(account.id).unwrap_or_default().iter().map(|f| f.id));
+                    }
                 }
                 Err(_) => return,
             },
@@ -733,6 +762,8 @@ pub fn run() {
             update_password,
             set_keep_attachments,
             account_storage,
+            attachment_counts,
+            remove_attachments,
             search_messages,
             message_in_folder,
             open_attachment,

@@ -455,6 +455,9 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
     clearTimeout(refetchTimer);
     refetchTimer = setTimeout(() => void load(), 80);
   });
+  // A change while subscribing (a round trip, with the first load already under way) would be
+  // missed: load again once listening.
+  void unlistenP.then(() => void load());
   onCleanup(() => {
     token++;
     clearTimeout(refetchTimer);

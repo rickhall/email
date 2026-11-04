@@ -246,6 +246,12 @@ export function createPagedList<T extends { id: number }>(
     // folderId null = results span folders (search): any change may affect them.
     if (folderId == null || folderIds.includes(folderId)) invalidate();
   });
+  // Subscribing takes a round trip, and the first page is fetched meanwhile: a change in between
+  // would never be heard (right after launch, the Inbox's new mail arrives just then). Look
+  // again once listening.
+  void unlistenP.then(() => {
+    if (!disposed) invalidate();
+  });
   onCleanup(() => {
     disposed = true;
     void unlistenP.then((un) => un());

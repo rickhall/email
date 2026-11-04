@@ -568,6 +568,9 @@ export function createMockBackend(): Backend {
   const remoteAllowed = new Set<number>();
   /** accounts downloading whole messages (Settings › Accounts › Offline) */
   const keepAttachments = new Set<number>();
+  /** per account, messages still stored without their attachments (unset: all of them) */
+  const attachmentsMissing = new Map<number, number>();
+  const attachmentTimers = new Map<number, ReturnType<typeof setInterval>>();
   /** message id -> quoted-reply sample used as its body */
   const quoteSampleFor = new Map<number, QuoteSample>();
   /** Last search result set; any messages-changed invalidates it. */
@@ -1702,8 +1705,6 @@ export function createMockBackend(): Backend {
           smtpPort: gmail ? 465 : null,
           smtpDefault: true,
           keepAttachments: keepAttachments.has(a.id),
-          attachmentsMissing: keepAttachments.has(a.id) ? 0 : gmail ? 7845 : 1793,
-          attachmentsMissingBytes: keepAttachments.has(a.id) ? 0 : gmail ? 3_594_000_000 : 1_902_000_000,
         };
       });
     },
@@ -1714,10 +1715,43 @@ export function createMockBackend(): Backend {
         return { accountId: a.id, messages: n, serverBytes: n * 61_000, localBytes: n * (keepAttachments.has(a.id) ? 52_000 : 19_000) };
       });
     },
+    async attachment_counts() {
+      await sleep(4);
+      return accounts.map((a) => {
+        const total = a.provider === 'gmail' ? 7845 : 1793;
+        const missing = attachmentsMissing.get(a.id) ?? total;
+        const per = 458_000; // bytes per message with attachments
+        return { accountId: a.id, missing, missingBytes: missing * per, kept: total - missing, keptBytes: (total - missing) * per };
+      });
+    },
+    async remove_attachments({ accountId }) {
+      await sleep(1500);
+      const acc = accounts.find((x) => x.id === accountId);
+      const total = acc?.provider === 'gmail' ? 7845 : 1793;
+      const kept = total - (attachmentsMissing.get(accountId) ?? total);
+      attachmentsMissing.set(accountId, total);
+      return { messages: kept, freedBytes: kept * 458_000 };
+    },
     async set_keep_attachments({ accountId, keep }) {
       await sleep(3);
       if (keep) keepAttachments.add(accountId);
       else keepAttachments.delete(accountId);
+      // Kept: the missing attachments come down over a few seconds, with body progress
+      // statuses like the real sync's.
+      clearInterval(attachmentTimers.get(accountId));
+      if (!keep) return;
+      const acc = accounts.find((x) => x.id === accountId);
+      const total = acc?.provider === 'gmail' ? 7845 : 1793;
+      const timer = setInterval(() => {
+        const left = Math.max(0, (attachmentsMissing.get(accountId) ?? total) - 700);
+        attachmentsMissing.set(accountId, left);
+        if (left > 0) setStatus(accountId, 'bodies', null, total - left, total, 'Downloading messages');
+        else {
+          clearInterval(timer);
+          setStatus(accountId, 'idle', null, 0, 0, null);
+        }
+      }, 400);
+      attachmentTimers.set(accountId, timer);
     },
     async show_data_dir() {
       await sleep(3);

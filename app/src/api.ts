@@ -3,6 +3,7 @@ import type {
   Action,
   AccountDetails,
   AccountStorage,
+  AttachmentCounts,
   ActionResult,
   Addr,
   FileInfo,
@@ -167,6 +168,11 @@ export const api = {
   setAllowRemote: (id: number, allow: boolean): Promise<void> => call('set_allow_remote', { id, allow }),
   updatePassword: (accountId: number, password: string): Promise<void> =>
     call('update_password', { accountId, password }),
+  /** Remove an account's stored attachments (fetched again when opened); can take a minute. */
+  removeAttachments: (accountId: number): Promise<{ messages: number; freedBytes: number }> =>
+    call('remove_attachments', { accountId }),
+  /** Per account, messages with attachments still to download and already stored. */
+  attachmentCounts: (): Promise<AttachmentCounts[]> => call('attachment_counts', undefined),
   /** Messages and space used per account (can take a few seconds). */
   accountStorage: (): Promise<AccountStorage[]> => call('account_storage', undefined),
   /** Download whole messages for the account (attachments for offline use), or stop. */

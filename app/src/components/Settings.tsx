@@ -16,7 +16,7 @@ import {
   type Command,
 } from '../lib/shortcuts';
 import { ChevronIcon, CloseIcon } from './Icons';
-import { api, errorMessage, type AccountDetails, type AccountStorage } from '../api';
+import { api, errorMessage, events, type AccountDetails, type AccountStorage, type AttachmentCounts } from '../api';
 import { accounts } from '../state';
 import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
@@ -276,21 +276,51 @@ function countStorage() {
     .finally(() => setCounting(false));
 }
 
+// Messages with attachments per account, counted when Settings › Accounts opens and again as
+// downloads progress (at most once a second while it's open).
+const [attachmentCounts, setAttachmentCounts] = createSignal<AttachmentCounts[] | null>(null);
+function recountAttachments() {
+  api.attachmentCounts().then(setAttachmentCounts, (e) => console.warn('attachment_counts', e));
+}
+let recountTimer: ReturnType<typeof setTimeout> | undefined;
+function recountSoon() {
+  if (recountTimer) return;
+  recountTimer = setTimeout(() => {
+    recountTimer = undefined;
+    recountAttachments();
+  }, 1000);
+}
+
 function AccountCard(props: { d: AccountDetails }) {
   const stored = () => storage()?.find((s) => s.accountId === props.d.id);
   const [keep, setKeep] = createSignal(props.d.keepAttachments);
-  /** What keeping attachments means for this account, given what's stored now. */
+  const counts = () => attachmentCounts()?.find((x) => x.accountId === props.d.id);
+  const [removing, setRemoving] = createSignal(false);
+  /** Where this account's attachments are: still to download (and the cost), or here. */
   const offlineNote = () => {
-    const n = props.d.attachmentsMissing;
-    const what = `${fmtNum(n)} ${n === 1 ? 'message' : 'messages'} (about ${fmtSize(props.d.attachmentsMissingBytes)})`;
-    if (keep()) {
-      return n > 0
-        ? `Whole messages are downloaded. The attachments of ${what} already here are being fetched in the background.`
-        : 'Whole messages are downloaded, attachments included.';
-    }
-    return n > 0
-      ? `Attachments are downloaded when you open them. Keeping them would also fetch those of ${what} already here.`
-      : 'Attachments are downloaded when you open them.';
+    const c = counts();
+    if (!c) return '\u00a0'; // counting: the line is there already
+    if (removing()) return `Removing the attachments of ${fmtNum(c.kept)} ${c.kept === 1 ? 'message' : 'messages'}…`;
+    const of = (n: number, bytes: number) => `${fmtNum(n)} ${n === 1 ? 'message' : 'messages'} (about ${fmtSize(bytes)})`;
+    const here = `${fmtSize(c.keptBytes)} of attachments from ${fmtNum(c.kept)} ${c.kept === 1 ? 'message' : 'messages'} are on this computer.`;
+    if (keep()) return c.missing > 0 ? `Downloading the attachments of ${of(c.missing, c.missingBytes)}.` : c.kept > 0 ? here : 'No messages with attachments.';
+    // Not kept: what's here can be removed (a separate step); otherwise what keeping would cost.
+    if (c.kept > 0) return here;
+    return c.missing > 0 ? `Enable to download the attachments of ${of(c.missing, c.missingBytes)}.` : 'No messages with attachments.';
+  };
+  const remove = () => {
+    setRemoving(true);
+    setMsg(null);
+    api
+      .removeAttachments(props.d.id)
+      // Done shows in place: the note turns to "Enable to download…" and Storage recounts (no
+      // extra line under the card).
+      .catch((err) => setMsg({ text: errorMessage(err), error: true }))
+      .finally(() => {
+        setRemoving(false);
+        recountAttachments();
+        countStorage();
+      });
   };
   const account = () => (accounts() ?? []).find((a) => a.id === props.d.id);
   const [editing, setEditing] = createSignal(false);
@@ -387,10 +417,11 @@ function AccountCard(props: { d: AccountDetails }) {
           <input
             type="checkbox"
             checked={keep()}
+            disabled={removing()}
             onChange={(e) => {
               const on = e.currentTarget.checked;
               setKeep(on);
-              api.setKeepAttachments(props.d.id, on).catch((err) => {
+              api.setKeepAttachments(props.d.id, on).then(recountAttachments, (err) => {
                 setKeep(!on);
                 setMsg({ text: errorMessage(err), error: true });
               });
@@ -399,7 +430,16 @@ function AccountCard(props: { d: AccountDetails }) {
           Keep attachments on this computer
         </label>
       </Field>
-      <p class="st-acct-note">{offlineNote()}</p>
+      <p class="st-acct-note">
+        {offlineNote()}
+        {/* removing is its own step, offered only once attachments aren't kept */}
+        <Show when={!keep() && !removing() && (counts()?.kept ?? 0) > 0}>
+          {' · '}
+          <button class="link-btn st-note-action" onClick={remove}>
+            Remove
+          </button>
+        </Show>
+      </p>
       <Show when={msg()}>{(m) => <p class="st-acct-msg" classList={{ error: !!m().error }}>{m().text}</p>}</Show>
     </section>
   );
@@ -408,6 +448,14 @@ function AccountCard(props: { d: AccountDetails }) {
 function AccountsSection() {
   const [details] = createResource(() => api.accountDetails());
   if (storage() == null) countStorage();
+  recountAttachments();
+  // Sync progress (bodies coming down) changes the counts: follow it while shown.
+  const unlisten = events.onSyncStatus(recountSoon);
+  onCleanup(() => {
+    clearTimeout(recountTimer);
+    recountTimer = undefined;
+    void unlisten.then((un) => un());
+  });
   // in the user's order (as in the sidebar)
   const ordered = () => {
     const d = details() ?? [];

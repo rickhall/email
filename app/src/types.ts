@@ -246,9 +246,17 @@ export interface AccountDetails {
   smtpDefault: boolean;
   /** whole messages are downloaded, attachments included (offline use) */
   keepAttachments: boolean;
-  /** messages stored without their attachments, and their size on the server (bytes) */
-  attachmentsMissing: number;
-  attachmentsMissingBytes: number;
+}
+
+/** An account's messages with attachments (Settings › Accounts › Offline); sizes on the server. */
+export interface AttachmentCounts {
+  accountId: number;
+  /** stored without their attachments: what keeping attachments (still) downloads */
+  missing: number;
+  missingBytes: number;
+  /** stored with their attachments */
+  kept: number;
+  keptBytes: number;
 }
 
 /** How much of an account is stored here (Settings › Accounts). */
@@ -386,6 +394,8 @@ export interface CommandMap {
   update_password: { args: { accountId: number; password: string }; ret: void };
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };
+  attachment_counts: { args: undefined; ret: AttachmentCounts[] };
+  remove_attachments: { args: { accountId: number }; ret: { messages: number; freedBytes: number } };
 }
 
 export type CommandName = keyof CommandMap;

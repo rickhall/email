@@ -622,11 +622,8 @@ impl Core {
             .into_iter()
             .map(|a| {
                 let smtp = a.smtp();
-                let (attachments_missing, attachments_missing_bytes) = self.store.attachments_missing(a.id)?;
                 Ok(AccountDetails {
                     keep_attachments: self.store.keeps_attachments(a.id)?,
-                    attachments_missing,
-                    attachments_missing_bytes,
                     id: a.id,
                     smtp_default: a.smtp_host.as_deref().is_none_or(|h| h.trim().is_empty()),
                     smtp_host: smtp.as_ref().map(|s| s.0.clone()),
@@ -651,6 +648,26 @@ impl Core {
             self.start_account(account)?;
         }
         Ok(())
+    }
+
+    /// Remove the attachments stored for `account_id` (they're fetched again when opened) and
+    /// give the space back: (messages changed, bytes freed). Takes a while (compacts the body
+    /// database): call off the UI's path. Refused while the account keeps attachments.
+    pub fn remove_attachments(&self, account_id: i64) -> Result<(u64, u64)> {
+        if self.store.keeps_attachments(account_id)? {
+            return Err(anyhow!("Turn off keeping attachments first."));
+        }
+        let done = self.store.remove_attachments(account_id)?;
+        tracing::info!(account_id, messages = done.0, freed = done.1, "removed stored attachments");
+        if let Some(folders) = self.store.folders(account_id).ok() {
+            let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders.iter().map(|f| f.id).collect() });
+        }
+        Ok(done)
+    }
+
+    /// Per account, messages with attachments still to download and already stored.
+    pub fn attachment_counts(&self) -> Result<Vec<AttachmentCounts>> {
+        self.store.attachment_counts()
     }
 
     /// Messages and space used per account (slow on a cold disk: call off the UI's path).

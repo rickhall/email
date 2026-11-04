@@ -252,6 +252,13 @@ async fn changes_made_elsewhere_arrive() {
     other.session.uid_expunge(uid.to_string()).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
     until("Note 2 gone", 20, || !a.subjects(FolderRole::Inbox).iter().any(|s| s == "Note 2")).await;
     assert_eq!(a.messages(FolderRole::Inbox).len(), 5);
+    // The badge shows what the list shows: 4 unread (Note 3 read, Note 2 gone).
+    until("the badge to match the list", 20, || {
+        let shown = a.messages(FolderRole::Inbox).iter().filter(|m| m.unread).count() as u32;
+        let inbox = a.folder(FolderRole::Inbox);
+        shown == 4 && inbox.unread == shown && inbox.total == 5
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

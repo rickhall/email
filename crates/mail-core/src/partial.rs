@@ -231,6 +231,133 @@ fn build(node: &Node, s: &dyn Sections, tag: &str) -> Option<(Vec<u8>, Vec<u8>)>
     }
 }
 
+/// A stored whole message made attachment-free locally, in the form a download without its
+/// attachments stores: the rules of [`plan`] except that inline images stay at any size (only
+/// true attachments go), sections numbered as IMAP numbers them (so an omitted part can be
+/// fetched later), rebuilt by [`rebuild`]. `None` when there's nothing to omit (or it can't be
+/// parsed).
+pub fn strip_local(raw: &[u8], seed: u32) -> Option<(Vec<u8>, Vec<OmittedPart>)> {
+    use mail_parser::PartType;
+    let msg = mail_parser::MessageParser::default().parse(raw)?;
+    let parts = &msg.parts;
+    let (tree, omitted) = local_plan(parts)?;
+    if omitted.is_empty() {
+        return None;
+    }
+
+    /// The stored message's own bytes, served as the server would serve its sections.
+    struct Local<'a> {
+        raw: &'a [u8],
+        parts: &'a [mail_parser::MessagePart<'a>],
+        /// section path -> part index
+        index: std::collections::HashMap<Vec<u32>, usize>,
+    }
+    impl Sections for Local<'_> {
+        fn header(&self) -> Option<&[u8]> {
+            self.raw.get(..self.parts.first()?.offset_body as usize)
+        }
+        fn mime(&self, path: &[u32]) -> Option<&[u8]> {
+            let p = &self.parts[*self.index.get(path)?];
+            self.raw.get(p.offset_header as usize..p.offset_body as usize)
+        }
+        fn content(&self, path: &[u32]) -> Option<&[u8]> {
+            let p = &self.parts[*self.index.get(path)?];
+            self.raw.get(p.offset_body as usize..p.offset_end as usize)
+        }
+    }
+    fn index(parts: &[mail_parser::MessagePart], i: usize, path: Vec<u32>, out: &mut std::collections::HashMap<Vec<u32>, usize>) {
+        if let PartType::Multipart(ids) = &parts[i].body {
+            for (k, &id) in ids.iter().enumerate() {
+                let mut p = path.clone();
+                p.push(k as u32 + 1);
+                index(parts, id as usize, p, out);
+            }
+        }
+        out.insert(path, i);
+    }
+    let mut map = std::collections::HashMap::new();
+    index(parts, 0, vec![], &mut map);
+    let plan = Plan { tree, omitted };
+    let rebuilt = rebuild(&plan, &Local { raw, parts, index: map }, seed)?;
+    Some((rebuilt, plan.omitted))
+}
+
+/// Whether a stored whole message holds parts a download without attachments leaves out (what
+/// [`strip_local`] would remove).
+pub fn has_omittable(raw: &[u8]) -> bool {
+    mail_parser::MessageParser::default()
+        .parse(raw)
+        .and_then(|m| local_plan(&m.parts))
+        .is_some_and(|(_, omitted)| !omitted.is_empty())
+}
+
+/// [`plan`]'s decision for a parsed message: the kept tree and the omitted parts.
+fn local_plan(parts: &[mail_parser::MessagePart]) -> Option<(Option<Node>, Vec<OmittedPart>)> {
+    use mail_parser::{MimeHeaders, PartType};
+    // The rules of `walk`, on a parsed part.
+    fn keep_or_omit(
+        parts: &[mail_parser::MessagePart],
+        i: usize,
+        path: &[u32],
+        omitted: &mut Vec<OmittedPart>,
+    ) -> Option<Node> {
+        let part = &parts[i];
+        let (ty, sub) = part
+            .content_type()
+            .map(|c| (c.ctype().to_ascii_lowercase(), c.subtype().unwrap_or("").to_ascii_lowercase()))
+            .unwrap_or_else(|| ("text".into(), "plain".into()));
+        if let PartType::Multipart(ids) = &part.body {
+            let children: Vec<Node> = ids
+                .iter()
+                .enumerate()
+                .filter_map(|(k, &id)| {
+                    let mut p = path.to_vec();
+                    p.push(k as u32 + 1);
+                    keep_or_omit(parts, id as usize, &p, omitted)
+                })
+                .collect();
+            return (!children.is_empty()).then(|| Node::Multipart { subtype: sub, children });
+        }
+        let attachment = part.content_disposition().is_some_and(|d| d.is_attachment());
+        let octets = part.offset_end.saturating_sub(part.offset_body);
+        let keep = match ty.as_str() {
+            "text" => !attachment,
+            // Pictures the HTML shows stay, whatever their size: only true attachments go.
+            "image" => part.content_id().is_some() && !attachment,
+            _ => false, // message/rfc822 and everything else: an attachment
+        };
+        if keep {
+            return Some(Node::Leaf { path: path.to_vec() });
+        }
+        let encoding = match part.encoding {
+            mail_parser::Encoding::Base64 => "base64",
+            mail_parser::Encoding::QuotedPrintable => "quoted-printable",
+            mail_parser::Encoding::None => "7bit",
+        };
+        let fallback = match ty.as_str() {
+            "text" => "attachment.txt",
+            "message" => "forwarded message.eml",
+            _ => "attachment",
+        };
+        omitted.push(OmittedPart {
+            name: part.attachment_name().map(str::to_string).unwrap_or_else(|| fallback.to_string()),
+            mime: format!("{ty}/{sub}"),
+            size: if encoding == "base64" { octets as usize * 3 / 4 } else { octets as usize },
+            section: Some(section(path)),
+            encoding: Some(encoding.to_string()),
+        });
+        None
+    }
+
+    let mut omitted = Vec::new();
+    // A non-multipart message's content is section 1 (as in `plan`).
+    let tree = match &parts.first()?.body {
+        PartType::Multipart(_) => keep_or_omit(parts, 0, &[], &mut omitted),
+        _ => keep_or_omit(parts, 0, &[1], &mut omitted),
+    };
+    Some((tree, omitted))
+}
+
 /// Copy a header block without the named fields (including their folded continuation lines)
 /// and without the terminating blank line.
 fn strip_fields(header: &[u8], names: &[&str]) -> Vec<u8> {
@@ -278,6 +405,33 @@ mod tests {
         fn content(&self, p: &[u32]) -> Option<&[u8]> {
             self.parts.get(&section(p)).map(|x| x.1.as_slice())
         }
+    }
+
+    #[test]
+    fn strips_a_stored_message_like_a_partial_download() {
+        let raw = b"From: Jane Doe <jane@example.com>\r\nTo: john@example.com\r\nSubject: Report\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n\
+--outer\r\nContent-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n\
+--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee attached.\r\n\
+--alt\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>See attached.</p>\r\n\
+--alt--\r\n\
+--outer\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQKJcfsj6IKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoK\r\n\
+--outer--\r\n";
+        let (stripped, omitted) = strip_local(raw, 1).unwrap();
+        assert_eq!(omitted.len(), 1);
+        assert_eq!((omitted[0].name.as_str(), omitted[0].mime.as_str()), ("report.pdf", "application/pdf"));
+        assert_eq!((omitted[0].section.as_deref(), omitted[0].encoding.as_deref()), (Some("2"), Some("base64")));
+        let msg = mail_parser::MessageParser::default().parse(&stripped).unwrap();
+        assert_eq!(msg.subject(), Some("Report"));
+        assert_eq!(msg.body_text(0).unwrap().trim(), "See attached.");
+        assert!(msg.body_html(0).unwrap().contains("<p>See attached.</p>"));
+        assert_eq!(msg.attachment_count(), 0);
+        assert!(String::from_utf8_lossy(&stripped).contains("X-Mail-Partial: attachments-omitted"));
+        assert!(stripped.len() < raw.len());
+        // Nothing to omit: left alone.
+        let plain = b"Subject: Hi\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
+        assert!(strip_local(plain, 1).is_none());
     }
 
     #[test]

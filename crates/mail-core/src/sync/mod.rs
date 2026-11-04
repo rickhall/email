@@ -182,6 +182,9 @@ struct Shared {
     /// Folders whose contents changed since their counts were last fetched; recounted
     /// individually between steps (cheap, unlike a full sweep over every folder).
     counts_dirty: Mutex<HashSet<i64>>,
+    /// Per folder, the last (server counts, stored counts) that differed and got a sync: counts
+    /// that keep disagreeing the same way aren't synced again and again.
+    count_mismatch: Mutex<HashMap<i64, ((u32, u32), (u32, u32))>>,
     urgent: mpsc::UnboundedSender<Job>,
     options: SyncOptions,
 }
@@ -290,6 +293,7 @@ impl AccountSync {
             sender: Notify::new(),
             counts_due: std::sync::atomic::AtomicBool::new(true),
             counts_dirty: Mutex::new(HashSet::new()),
+            count_mismatch: Mutex::new(HashMap::new()),
             urgent: urgent_tx.clone(),
             options,
         });
@@ -620,13 +624,41 @@ const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// connection.
 async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&HashSet<i64>>) -> Result<()> {
     let folders = shared.store.folders(shared.account.id)?;
+    // Folders synced directly (Gmail labels aren't: their contents come from All Mail).
+    let synced: HashSet<i64> = shared.strategy.plan(&shared.account, &folders, None, conn.caps.gmail).into_iter().collect();
+    let mut behind = Vec::new();
     let wanted = folders.iter().filter(|f| f.selectable && only.is_none_or(|o| o.contains(&f.id)));
     for (i, f) in wanted.enumerate() {
         // A stall ends the sweep (the connection is gone); a folder's own error doesn't.
         shared.note_folder(f.id);
         let activity = conn.activity.clone();
         match imap::stall_timeout(&activity, STALL_TIMEOUT, "counting messages", conn.status(&f.raw_name)).await? {
-            Ok((total, unread)) => shared.store.set_folder_counts(f.id, total, unread)?,
+            Ok((total, unread)) => {
+                // A fully synced folder shows what's stored, so its badge never promises mail the
+                // list can't show yet; the server's counts only tell whether it's behind. Others
+                // (a first sync under way, Gmail labels) show the server's.
+                if synced.contains(&f.id) && shared.store.folder_sync_state(f.id)?.complete {
+                    let stored = shared.store.local_counts(f.id)?;
+                    shared.store.set_folder_counts(f.id, stored.0, stored.1)?;
+                    // Where they disagree, mail we haven't seen (or still show, or show read when
+                    // it's unread) is waiting: sync it now, once per distinct disagreement. Once
+                    // it's stored, the recount after the sync updates the badge with the list.
+                    // Gmail's STATUS of All Mail counts more than SELECTing it lists (113,400 vs
+                    // 113,388 on a real account, every message accounted for): only its unread
+                    // count can be compared.
+                    let total = if conn.caps.gmail && f.role == Some(FolderRole::All) { stored.0 } else { total };
+                    let server = (total, unread);
+                    let mut seen = shared.count_mismatch.lock().unwrap();
+                    if stored == server {
+                        seen.remove(&f.id);
+                    } else if seen.insert(f.id, (server, stored)) != Some((server, stored)) {
+                        tracing::info!(folder = f.raw_name, ?server, ?stored, "counts differ; syncing the folder");
+                        behind.push(f.id);
+                    }
+                } else {
+                    shared.store.set_folder_counts(f.id, total, unread)?;
+                }
+            }
             Err(e) => tracing::debug!(folder = f.raw_name, "STATUS failed: {e:#}"),
         }
         if i % 10 == 9 {
@@ -634,6 +666,10 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
         }
     }
     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
+    if !behind.is_empty() {
+        shared.dirty.lock().unwrap().extend(behind);
+        shared.refresh.notify_one();
+    }
     Ok(())
 }
 
@@ -644,8 +680,9 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
 async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
     let mut focus = shared.focus.clone();
     let mut conn: Option<Connection> = None;
-    // The folder IDLE last started watching (on this connection).
-    let mut watching: Option<i64> = None;
+    // The (folder, server count, server change counter) last caught up on: a difference that a
+    // catch-up didn't settle isn't retried until the server's side changes.
+    let mut caught_up: Option<(i64, u32, Option<u64>)> = None;
     loop {
         let inbox = shared
             .store
@@ -681,16 +718,20 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             unreachable!();
         }
         let mb = guarded!(c, "selecting the watched folder", c.select(&raw))?;
-        // IDLE only reports what changes after it starts: mail that arrived since the folder was
-        // last synced would wait for the next poll. Catch up first, once per folder watched.
-        if watching != Some(folder_id) {
-            watching = Some(folder_id);
-            if mb.exists != shared.store.local_uid_count(folder_id)? {
-                sync_pushed_folder(&shared, &mut c, folder_id).await?;
-                tracing::info!(folder = raw, "caught up before watching");
-                conn = Some(c);
-                continue;
-            }
+        // IDLE only reports what changes after it starts: whatever happened since the folder was
+        // last synced (before the first watch, or while a push was being handled) would wait for
+        // the next poll. Catch up first when the server has moved on: another message count, or
+        // (CONDSTORE) another change counter, which flag changes and expunges move too.
+        let stored = shared.store.local_uid_count(folder_id)?;
+        let synced_modseq = shared.store.folder_sync_state(folder_id)?.highest_modseq;
+        let moved = mb.exists != stored || mb.highest_modseq.is_some_and(|m| m != synced_modseq);
+        tracing::debug!(folder = raw, server = mb.exists, stored, modseq = ?mb.highest_modseq, synced_modseq, "watching");
+        if moved && caught_up != Some((folder_id, mb.exists, mb.highest_modseq)) {
+            caught_up = Some((folder_id, mb.exists, mb.highest_modseq));
+            sync_pushed_folder(&shared, &mut c, folder_id).await?;
+            tracing::info!(folder = raw, "caught up before watching");
+            conn = Some(c);
+            continue;
         }
         let imap::Connection { session, caps, activity, .. } = c;
         let mut handle = session.idle();
@@ -779,11 +820,17 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
             r?;
         }
     }
-    // This folder's counts, now, on this connection (re-SELECT for EXISTS, then count UNSEEN);
-    // the other folders catch up in the headers task's next sweep.
-    let mb = guarded!(conn, "counting messages", conn.select(&folder.raw_name))?;
-    let unread = guarded!(conn, "counting unread messages", conn.session.search("UNSEEN"))?.len() as u32;
-    shared.store.set_folder_counts(folder_id, mb.exists, unread)?;
+    // This folder's counts, now (the other folders catch up in the headers task's next sweep):
+    // once fully synced, what's stored, like the sweep (the badge matches the list); during a
+    // first sync, the server's (re-SELECT for EXISTS, then count UNSEEN).
+    if shared.store.folder_sync_state(folder_id)?.complete {
+        let (total, unread) = shared.store.local_counts(folder_id)?;
+        shared.store.set_folder_counts(folder_id, total, unread)?;
+    } else {
+        let mb = guarded!(conn, "counting messages", conn.select(&folder.raw_name))?;
+        let unread = guarded!(conn, "counting unread messages", conn.session.search("UNSEEN"))?.len() as u32;
+        shared.store.set_folder_counts(folder_id, mb.exists, unread)?;
+    }
     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
     if !shared.counts_dirty.lock().unwrap().is_empty() {
         shared.refresh.notify_one();
@@ -817,7 +864,8 @@ async fn download(
     whole: bool,
 ) -> Result<HashSet<i64>> {
     // An account kept for offline use downloads everything, attachments included.
-    let whole = whole || shared.store.keeps_attachments(shared.account.id)?;
+    let keep = shared.store.keeps_attachments(shared.account.id)?;
+    let whole = whole || keep;
     // Group by the folder we can fetch each message from.
     let mut by_folder: HashMap<String, Vec<(u32, i64)>> = HashMap::new();
     for &id in ids {
@@ -874,6 +922,17 @@ async fn download(
         for (uid, raw, omitted) in downloaded {
             let Some(&id) = by_uid.get(&uid) else { continue };
             let (snippet, has_att) = mime::body_summary(&raw);
+            // A whole message an account doesn't keep attachments for (the fallback after a failed
+            // partial download, or one the server described as having none) is stored as the
+            // partial download would have stored it: true attachments left out, fetched again
+            // when opened.
+            let (raw, omitted) = match omitted {
+                None if has_att && !keep => match crate::partial::strip_local(&raw, uid) {
+                    Some((stripped, parts)) => (stripped, Some(serde_json::to_string(&parts)?)),
+                    None => (raw, None),
+                },
+                other => (raw, other),
+            };
             shared.store.store_body(id, &raw, snippet.as_deref(), has_att || omitted.is_some(), omitted.as_deref())?;
             stored.insert(id);
             changed.extend(shared.store.folders_of_message(id)?);

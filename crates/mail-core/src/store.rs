@@ -73,7 +73,11 @@ CREATE TABLE IF NOT EXISTS messages (
     keywords        TEXT NOT NULL DEFAULT '', -- IMAP keywords (tags), space-separated
     local_copy      INTEGER NOT NULL DEFAULT 0, -- our own sent mail, shown before the server has it
     pending_send    INTEGER, -- its outgoing row while queued
-    draft_id        INTEGER  -- a local draft's row, while it's one
+    draft_id        INTEGER, -- a local draft's row, while it's one
+    -- whole body holding true attachments: 1 kept (Remove takes them); 2 not meant to be kept
+    -- (a whole-message fallback in an account without "keep"), stripped at the next start;
+    -- NULL not known yet
+    attachments_stored INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS messages_gm ON messages(account_id, gm_msgid) WHERE gm_msgid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_nobody ON messages(account_id, has_body, date DESC);
@@ -195,6 +199,16 @@ const BASE_VERSION: i64 = 4;
 const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
     // 5: an account can keep its attachments for offline use
     |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN keep_attachments INTEGER NOT NULL DEFAULT 0;")?),
+    // 6: which stored bodies hold true attachments (filled in by `mark_stored_attachments`)
+    |db| Ok(db.execute_batch("ALTER TABLE messages ADD COLUMN attachments_stored INTEGER;")?),
+    // 7: attachments stored by the whole-message fallback in accounts that don't keep them go
+    // (`strip_unwanted_attachments`, once)
+    |db| {
+        Ok(db.execute_batch(
+            "UPDATE messages SET attachments_stored=2 WHERE attachments_stored=1
+               AND account_id IN (SELECT id FROM accounts WHERE keep_attachments=0);",
+        )?)
+    },
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
@@ -574,14 +588,17 @@ impl Store {
                 db.execute("INSERT INTO tags (keyword, name, color, position) VALUES (?1,?2,?3,?4)", params![k, n, c, i as i64])?;
             }
         }
-        Ok(Store {
+        let store = Store {
             db: Mutex::new(db),
             read: Mutex::new(open(&dir.join("mail.db"))?),
             bodies: Mutex::new(bodies),
             bodies_read: Mutex::new(open(&dir.join("bodies.db"))?),
             dir: dir.to_path_buf(),
             local_epoch: AtomicU64::new(0),
-        })
+        };
+        store.mark_stored_attachments()?;
+        store.strip_unwanted_attachments()?;
+        Ok(store)
     }
 
     /// Per account: messages, their size on the server, and the space their bodies and
@@ -858,6 +875,17 @@ impl Store {
             "SELECT count(*) FROM entries WHERE folder_id=?1 AND uid IS NOT NULL",
             [folder_id],
             |r| r.get(0),
+        )?)
+    }
+
+    /// (messages, unread) stored for `folder_id` with a server UID: what a STATUS of it should say.
+    pub fn local_counts(&self, folder_id: i64) -> Result<(u32, u32)> {
+        Ok(self.db().query_row(
+            "SELECT count(*), coalesce(sum((m.flags & 1) = 0), 0)
+             FROM entries e JOIN messages m ON m.id = e.message_id
+             WHERE e.folder_id=?1 AND e.uid IS NOT NULL",
+            [folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
     }
 
@@ -1645,6 +1673,89 @@ impl Store {
         )?)
     }
 
+    /// Bodies marked as holding attachments their account doesn't keep (`attachments_stored = 2`)
+    /// become the partial copies a download would have stored. No compaction: the space is
+    /// reused by new mail.
+    fn strip_unwanted_attachments(&self) -> Result<()> {
+        let ids: Vec<i64> = {
+            let db = self.rdb();
+            let mut stmt = db.prepare("SELECT id FROM messages WHERE attachments_stored=2")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        for &id in &ids {
+            match self.body(id)?.and_then(|raw| crate::partial::strip_local(&raw, id as u32)) {
+                Some((stripped, omitted)) => {
+                    let (snippet, _) = crate::mime::body_summary(&stripped);
+                    self.store_body(id, &stripped, snippet.as_deref(), true, Some(&serde_json::to_string(&omitted)?))?;
+                }
+                None => {
+                    self.db().execute("UPDATE messages SET attachments_stored=0 WHERE id=?1", [id])?;
+                }
+            }
+        }
+        if !ids.is_empty() {
+            tracing::info!(n = ids.len(), "left out attachments stored by the whole-message fallback");
+        }
+        Ok(())
+    }
+
+    /// Make an account's stored messages attachment-free again (Settings › Accounts › Offline ›
+    /// Remove): each whole message with attachments becomes the copy a download without them
+    /// would have stored (`partial::strip_local`), its attachments fetched again when opened.
+    /// Then the body database is compacted so the space goes back to the disk. Returns the
+    /// messages changed and the bytes freed.
+    pub fn remove_attachments(&self, account_id: i64) -> Result<(u64, u64)> {
+        let ids: Vec<i64> = {
+            let db = self.rdb();
+            let mut stmt = db.prepare(
+                "SELECT id FROM messages WHERE account_id=?1 AND attachments_stored=1",
+            )?;
+            stmt.query_map([account_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let mut changed = 0u64;
+        for id in ids {
+            let Some(raw) = self.body(id)? else { continue };
+            let Some((stripped, omitted)) = crate::partial::strip_local(&raw, id as u32) else { continue };
+            let (snippet, _) = crate::mime::body_summary(&stripped);
+            self.store_body(id, &stripped, snippet.as_deref(), true, Some(&serde_json::to_string(&omitted)?))?;
+            changed += 1;
+        }
+        let file = self.dir.join("bodies.db");
+        let size = || std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(self.dir.join("bodies.db-wal")).map(|m| m.len()).unwrap_or(0);
+        let before = size();
+        if changed > 0 {
+            let bodies = self.bodies.lock().unwrap_or_else(|e| e.into_inner());
+            // VACUUM builds a whole temporary copy: on disk, not in memory (temp_store is MEMORY
+            // for everything else).
+            bodies.execute_batch("PRAGMA temp_store=FILE; VACUUM; PRAGMA temp_store=MEMORY; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        Ok((changed, before.saturating_sub(size())))
+    }
+
+    /// Per account: messages with attachments still to download (stored without them) and
+    /// those stored with them, with their sizes on the server. One pass over the messages.
+    pub fn attachment_counts(&self) -> Result<Vec<AttachmentCounts>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached(
+            "SELECT account_id,
+                    coalesce(sum(omitted IS NOT NULL), 0),
+                    coalesce(sum(CASE WHEN omitted IS NOT NULL THEN size END), 0),
+                    coalesce(sum(attachments_stored = 1), 0),
+                    coalesce(sum(CASE WHEN attachments_stored = 1 THEN size END), 0)
+             FROM messages GROUP BY account_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AttachmentCounts {
+                account_id: r.get(0)?,
+                missing: r.get::<_, i64>(1)? as u64,
+                missing_bytes: r.get::<_, i64>(2)? as u64,
+                kept: r.get::<_, i64>(3)? as u64,
+                kept_bytes: r.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Newest messages still missing a body, preferring `focus_folder`; then, for an account
     /// that keeps attachments, the newest stored without them.
     pub fn messages_missing_body(
@@ -1722,10 +1833,47 @@ impl Store {
                 bodies.execute("DELETE FROM attachment_cache WHERE message_id=?1", [id])?;
             }
         }
+        // Whether Remove would have something to take (true attachments, not text parts or
+        // inline pictures): parsed only for whole bodies the parser says have attachments.
+        let stored = omitted.is_none() && has_attachments && crate::partial::has_omittable(raw);
         self.db().execute(
-            "UPDATE messages SET has_body=1, snippet=?2, has_attachments=?3, omitted=?4 WHERE id=?1",
-            params![id, snippet, has_attachments, omitted],
+            "UPDATE messages SET has_body=1, snippet=?2, has_attachments=?3, omitted=?4, attachments_stored=?5 WHERE id=?1",
+            params![id, snippet, has_attachments, omitted, stored],
         )?;
+        Ok(())
+    }
+
+    /// Fill in `attachments_stored` for bodies stored before it was recorded (once, after the
+    /// upgrade that added it): only whole bodies with attachments need a look. In an account
+    /// that doesn't keep attachments they came by the whole-message fallback: marked to go.
+    fn mark_stored_attachments(&self) -> Result<()> {
+        let ids: Vec<(i64, bool)> = {
+            let db = self.db();
+            db.execute(
+                "UPDATE messages SET attachments_stored=0
+                 WHERE attachments_stored IS NULL AND NOT (has_body=1 AND omitted IS NULL AND has_attachments=1)",
+                [],
+            )?;
+            let mut stmt = db.prepare(
+                "SELECT m.id, a.keep_attachments FROM messages m JOIN accounts a ON a.id = m.account_id
+                 WHERE m.attachments_stored IS NULL",
+            )?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<(i64, bool)>>>()?
+        };
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        for &(id, keep) in &ids {
+            let stored = self.body(id)?.is_some_and(|raw| crate::partial::has_omittable(&raw));
+            let flag = match (stored, keep) {
+                (false, _) => 0,
+                (true, true) => 1,
+                (true, false) => 2,
+            };
+            self.db().execute("UPDATE messages SET attachments_stored=?2 WHERE id=?1", params![id, flag])?;
+        }
+        tracing::info!(n = ids.len(), ms = started.elapsed().as_millis() as u64, "looked for stored attachments");
         Ok(())
     }
 
@@ -2512,18 +2660,86 @@ mod tests {
         assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1)]);
         assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (3, 2));
         assert_eq!(store.attachments_missing(acct.id).unwrap(), (1, 10));
+        let c = &store.attachment_counts().unwrap()[0];
+        assert_eq!((c.missing, c.missing_bytes, c.kept, c.kept_bytes), (1, 10, 0, 0));
         // Kept: the partial one is queued too, after anything without a body.
         store.set_keep_attachments(acct.id, true).unwrap();
         assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1), id(2)]);
         assert_eq!(store.count_missing_bodies(acct.id).unwrap(), (3, 1));
-        // Downloaded whole: done.
-        store.store_body(id(2), b"Subject: m2\r\n\r\nwhole", None, true, None).unwrap();
+        // Downloaded whole (a real attachment this time): done.
+        let whole = b"Subject: m2\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nwhole\r\n\
+--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"r.pdf\"\r\n\r\n%PDF\r\n--b--\r\n";
+        store.store_body(id(2), whole, None, true, None).unwrap();
         assert_eq!(store.messages_missing_body(acct.id, None, 10).unwrap(), vec![id(1)]);
         assert_eq!(store.attachments_missing(acct.id).unwrap(), (0, 0));
+        let c = &store.attachment_counts().unwrap()[0];
+        assert_eq!((c.missing, c.kept, c.kept_bytes), (0, 1, 10), "now stored with its attachment");
         // Storage: three messages of 10 bytes on the server; two bodies here.
         let s = store.account_storage().unwrap();
         assert_eq!((s.len(), s[0].messages, s[0].server_bytes), (1, 3, 30));
-        assert_eq!(s[0].local_bytes, (b"Subject: m2\r\n\r\nwhole".len() + b"Subject: m3\r\n\r\nwhole".len()) as u64);
+        assert_eq!(s[0].local_bytes, (whole.len() + b"Subject: m3\r\n\r\nwhole".len()) as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_attachments_keeps_the_text() {
+        let dir = std::env::temp_dir().join(format!("mail-core-remove-att-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@gmail.com", "x", Provider::Gmail, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store.sync_folder_list(acct.id, &[lf("[Gmail]/All Mail", Some(FolderRole::All))]).unwrap();
+        let all = store.folders(acct.id).unwrap()[0].id;
+        store.upsert_headers(acct.id, all, &[rec(1, 101, &[])], &HashMap::new()).unwrap();
+        let id = store.message_ids_for_uids(all, &[1]).unwrap()[0];
+        let raw = b"Subject: Report\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n\
+--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"r.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n\
+--b--\r\n";
+        store.store_body(id, raw, None, true, None).unwrap();
+        let c = &store.attachment_counts().unwrap()[0];
+        assert_eq!((c.missing, c.kept), (0, 1));
+
+        assert_eq!(store.remove_attachments(acct.id).unwrap().0, 1);
+        let c = &store.attachment_counts().unwrap()[0];
+        assert_eq!((c.missing, c.kept), (1, 0), "to be fetched again when opened");
+        let body = store.body(id).unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("See attached."));
+        assert!(!String::from_utf8_lossy(&body).contains("JVBERi0xLjQK"));
+        let omitted: Vec<crate::partial::OmittedPart> =
+            serde_json::from_str(&store.rdb().query_row("SELECT omitted FROM messages WHERE id=?1", [id], |r| r.get::<_, String>(0)).unwrap()).unwrap();
+        assert_eq!((omitted[0].name.as_str(), omitted[0].section.as_deref()), ("r.pdf", Some("2")));
+        // Nothing left to remove.
+        assert_eq!(store.remove_attachments(acct.id).unwrap().0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_attachments_are_left_out_once() {
+        let dir = std::env::temp_dir().join(format!("mail-core-fallback-att-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("x@gmail.com", "x", Provider::Gmail, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store.sync_folder_list(acct.id, &[lf("[Gmail]/All Mail", Some(FolderRole::All))]).unwrap();
+        let all = store.folders(acct.id).unwrap()[0].id;
+        store.upsert_headers(acct.id, all, &[rec(1, 101, &[])], &HashMap::new()).unwrap();
+        let id = store.message_ids_for_uids(all, &[1]).unwrap()[0];
+        let raw = b"Subject: Report\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n\
+--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"r.pdf\"\r\n\r\n%PDF\r\n--b--\r\n";
+        store.store_body(id, raw, None, true, None).unwrap();
+        // As upgrade step 7 (or the first look after step 6) marks it in an account not keeping
+        // attachments; the next start strips it, once.
+        store.db().execute("UPDATE messages SET attachments_stored=2 WHERE id=?1", [id]).unwrap();
+        drop(store);
+        let store = Store::open(&dir).unwrap();
+        let c = &store.attachment_counts().unwrap()[0];
+        assert_eq!((c.missing, c.kept), (1, 0));
+        assert!(String::from_utf8_lossy(&store.body(id).unwrap().unwrap()).contains("See attached."));
+        let flag: i64 = store.rdb().query_row("SELECT attachments_stored FROM messages WHERE id=?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(flag, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2827,7 +3043,11 @@ mod tests {
         // At the base (or later): kept, and brought up to date by the steps since.
         {
             let db = Connection::open(dir.join("mail.db")).unwrap();
-            db.execute_batch(&format!("ALTER TABLE accounts DROP COLUMN keep_attachments; PRAGMA user_version={BASE_VERSION};")).unwrap();
+            db.execute_batch(&format!(
+                "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE messages DROP COLUMN attachments_stored;
+                 PRAGMA user_version={BASE_VERSION};"
+            ))
+            .unwrap();
         }
         let store = Store::open(&dir).unwrap();
         assert_eq!(store.accounts().unwrap().len(), 1);
