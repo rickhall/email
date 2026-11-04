@@ -399,6 +399,31 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
     }
 }
 
+/// The mail data can't be opened: say so in a window of its own (a panic would only show in a
+/// terminal, and launched from the desktop nothing at all), then quit when it's closed.
+fn cannot_open(app: &tauri::AppHandle, e: &anyhow::Error) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    tracing::error!("opening the mail data: {e:#}");
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.destroy();
+    }
+    let (title, text) = match e.downcast_ref::<mail_core::store::NewerDatabase>() {
+        Some(_) => (
+            "Email needs updating",
+            format!(
+                "The mail on this computer was last opened by a newer version of Email ({} is too old for it).\n\n\
+                 Install the latest version of Email to open it. Nothing has been changed.",
+                version_label()
+            ),
+        ),
+        None => {
+            let log = app.path().app_log_dir().map(|d| d.join(LOG_FILE).display().to_string()).unwrap_or_default();
+            ("Email couldn't start", format!("It couldn't open the mail on this computer: {e:#}\n\nDetails are in the log: {log}"))
+        }
+    };
+    app.dialog().message(text).title(title).kind(MessageDialogKind::Error).show(|_| std::process::exit(1));
+}
+
 /// The app's own pages are served from the dev server or the `tauri:` asset scheme.
 fn is_app_url(url: &tauri::Url) -> bool {
     matches!(url.scheme(), "tauri" | "about" | "data")
@@ -734,7 +759,13 @@ pub fn run() {
                 let _ = std::fs::remove_dir_all(dir);
             }
             let dir = app.path().app_data_dir()?;
-            let core = Arc::new(Core::open(&dir, Secrets::Keyring)?);
+            let core = match Core::open(&dir, Secrets::Keyring) {
+                Ok(core) => Arc::new(core),
+                Err(e) => {
+                    cannot_open(app.handle(), &e);
+                    return Ok(());
+                }
+            };
             tracing::info!("data directory: {}", dir.display());
             app.manage(core.clone());
             let handle = app.handle().clone();

@@ -544,6 +544,29 @@ fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// The mail database was last opened by a newer version of the app (its schema is ahead of this
+/// build's): refused, untouched. The app tells the user to update.
+#[derive(Debug)]
+pub struct NewerDatabase {
+    pub dir: std::path::PathBuf,
+    pub version: i64,
+    pub supported: i64,
+}
+
+impl std::fmt::Display for NewerDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The mail database in {} is from a newer version of the app (schema {}; this version knows up to {}).",
+            self.dir.display(),
+            self.version,
+            self.supported
+        )
+    }
+}
+
+impl std::error::Error for NewerDatabase {}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
@@ -551,7 +574,7 @@ impl Store {
         let fresh = !db.prepare("SELECT 1 FROM sqlite_master")?.exists([])?;
         let mut version: i64 = if fresh { SCHEMA_VERSION } else { db.query_row("PRAGMA user_version", [], |r| r.get(0))? };
         if version > SCHEMA_VERSION {
-            anyhow::bail!("The mail database in {} is from a newer version of the app.", dir.display());
+            return Err(NewerDatabase { dir: dir.to_path_buf(), version, supported: SCHEMA_VERSION }.into());
         }
         if version < BASE_VERSION {
             tracing::warn!(version, "mail database older than the base schema; starting over");
