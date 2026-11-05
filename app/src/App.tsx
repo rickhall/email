@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, Match, onCleanup, onMount, Show
 import type { Account } from './api';
 import {
   accounts,
+  flushReader,
   folderById,
   initApp,
   onAccountAdded,
@@ -168,6 +169,7 @@ export function App() {
   };
 
   const openReader = () => {
+    flushReader(); // a reader switch still pending: do it now, so focus lands in the right one
     // Focus the reader so Space / arrows scroll the body; iframe takes focus if present.
     if (readerEl?.classList.contains('conv-scroll') && readerEl.isConnected) {
       readerEl.focus();

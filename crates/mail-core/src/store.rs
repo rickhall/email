@@ -84,6 +84,8 @@ CREATE INDEX IF NOT EXISTS messages_nobody ON messages(account_id, has_body, dat
 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
 CREATE INDEX IF NOT EXISTS messages_msgid ON messages(account_id, message_id);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_identity ON messages(account_id, identity) WHERE identity IS NOT NULL;
+-- Messages stored without their attachments (counted for download progress without a scan).
+CREATE INDEX IF NOT EXISTS messages_omitted ON messages(account_id) WHERE omitted IS NOT NULL;
 
 -- Message-IDs each message refers to (In-Reply-To + References), for threading.
 CREATE TABLE IF NOT EXISTS msgrefs (
@@ -1827,14 +1829,16 @@ impl Store {
     }
 
     /// (messages, messages with everything they should have downloaded): a body, and for an
-    /// account that keeps attachments, the attachments too.
+    /// account that keeps attachments, the attachments too. From indexes only (it's polled for
+    /// progress): a scan of the messages took 0.18 s on a 113k-message account.
     pub fn count_missing_bodies(&self, account_id: i64) -> Result<(u64, u64)> {
-        Ok(self.rdb().query_row(
-            "SELECT count(*), sum(m.has_body AND (a.keep_attachments = 0 OR m.omitted IS NULL))
-             FROM messages m JOIN accounts a ON a.id = m.account_id WHERE m.account_id=?1",
-            [account_id],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64)),
-        )?)
+        let db = self.rdb();
+        let count = |sql: &str| -> Result<u64> { Ok(db.prepare_cached(sql)?.query_row([account_id], |r| r.get::<_, i64>(0))? as u64) };
+        let total = count("SELECT count(*) FROM messages WHERE account_id=?1")?;
+        let no_body = count("SELECT count(*) FROM messages WHERE account_id=?1 AND has_body=0")?;
+        let keep = count("SELECT keep_attachments FROM accounts WHERE id=?1")? != 0;
+        let partial = if keep { count("SELECT count(*) FROM messages WHERE account_id=?1 AND omitted IS NOT NULL")? } else { 0 };
+        Ok((total, total.saturating_sub(no_body + partial)))
     }
 
     pub fn store_body(

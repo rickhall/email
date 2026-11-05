@@ -169,6 +169,9 @@ struct Shared {
     body_failures: Mutex<HashMap<i64, u32>>,
     /// Signalled when new headers arrive (wakes idle body workers).
     new_headers: Notify,
+    /// Something that changes the download progress happened (headers or bodies stored, keeping
+    /// attachments turned on): the status task counts again.
+    progress_dirty: std::sync::atomic::AtomicBool,
     /// Folders the server told us changed (IDLE); the headers task re-syncs them first.
     dirty: Mutex<HashSet<i64>>,
     /// Wakes the headers task (dirty folders, count sweep requests).
@@ -287,6 +290,7 @@ impl AccountSync {
             inflight: Mutex::new(HashSet::new()),
             body_failures: Mutex::new(HashMap::new()),
             new_headers: Notify::new(),
+            progress_dirty: std::sync::atomic::AtomicBool::new(true),
             dirty: Mutex::new(HashSet::new()),
             refresh: Notify::new(),
             outbox: Notify::new(),
@@ -334,6 +338,7 @@ impl AccountSync {
 
     /// There's more to download (attachments are now kept): wake the body workers.
     pub fn wake_bodies(&self) {
+        self.shared.progress_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
         self.shared.new_headers.notify_waiters();
     }
 
@@ -379,12 +384,23 @@ fn initial_status(account_id: i64) -> SyncStatus {
 /// download progress. Emitted on change, at most once a second, so the UI can't get stuck on
 /// a stale intermediate state.
 async fn status_task(shared: Arc<Shared>) {
+    use std::sync::atomic::Ordering;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Download progress, counted only when something changed it (and once a minute regardless):
+    // counting every second with nothing to download kept a quarter of a core busy and the
+    // read connection, which the window's queries share, taken.
+    let mut counted: Option<(u64, u64)> = None;
+    let mut last_count = tokio::time::Instant::now();
     loop {
         tick.tick().await;
         let mut s = shared.header.lock().unwrap().clone();
         if s.phase == SyncPhase::Idle && shared.options.download_bodies {
-            if let Ok((total, have)) = shared.store.count_missing_bodies(shared.account.id) {
+            let stale = last_count.elapsed() >= Duration::from_secs(60);
+            if shared.progress_dirty.swap(false, Ordering::SeqCst) || stale || counted.is_none() {
+                counted = shared.store.count_missing_bodies(shared.account.id).ok();
+                last_count = tokio::time::Instant::now();
+            }
+            if let Some((total, have)) = counted {
                 // Messages skipped this session (repeated failures) aren't "pending".
                 let skipped = shared.body_failures.lock().unwrap().values().filter(|&&n| n >= MAX_BODY_FAILURES).count() as u64;
                 let total = total.saturating_sub(skipped);
@@ -561,6 +577,8 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
             let report = |p: Progress| match p {
                 Progress::Changed(ids) => {
                     shared.new_headers.notify_waiters();
+            shared.progress_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+                    shared.progress_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
                     shared.counts_dirty.lock().unwrap().extend(ids.iter().copied());
                     shared.emit(CoreEvent::MessagesChanged { folder_ids: ids });
                 }
@@ -940,6 +958,9 @@ async fn download(
                 shared.emit(CoreEvent::MessageReady { id });
             }
         }
+    }
+    if !stored.is_empty() {
+        shared.progress_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     if !changed.is_empty() {
         shared.emit(CoreEvent::MessagesChanged { folder_ids: changed.into_iter().collect() });

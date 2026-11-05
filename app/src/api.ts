@@ -171,6 +171,8 @@ export const api = {
   /** Remove an account's stored attachments (fetched again when opened); can take a minute. */
   removeAttachments: (accountId: number): Promise<{ messages: number; freedBytes: number }> =>
     call('remove_attachments', { accountId }),
+  /** A line for the app log (slow screen updates and the like). */
+  uiLog: (message: string): Promise<void> => call('ui_log', { message }),
   /** Per account, messages with attachments still to download and already stored. */
   attachmentCounts: (): Promise<AttachmentCounts[]> => call('attachment_counts', undefined),
   /** Messages and space used per account (can take a few seconds). */

@@ -1715,6 +1715,9 @@ export function createMockBackend(): Backend {
         return { accountId: a.id, messages: n, serverBytes: n * 61_000, localBytes: n * (keepAttachments.has(a.id) ? 52_000 : 19_000) };
       });
     },
+    async ui_log({ message }) {
+      console.info('[ui log]', message);
+    },
     async attachment_counts() {
       await sleep(4);
       return accounts.map((a) => {

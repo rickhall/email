@@ -8,7 +8,7 @@ import {
   conversationScope,
   folderById,
   includeTrash,
-  selectedThread,
+  readerThread,
   selectedThreadId,
   selectThread,
 } from '../state';
@@ -600,7 +600,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
 export function ConversationReader(props: { ref?: (el: HTMLElement) => void }) {
   return (
     <section class="reader conv" aria-label="Conversation">
-      <Show when={selectedThread()} keyed fallback={<ReaderEmpty />}>
+      <Show when={readerThread()} keyed fallback={<ReaderEmpty />}>
         {(t) => <ConversationView thread={t} ref={props.ref} />}
       </Show>
     </section>

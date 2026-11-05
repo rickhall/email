@@ -395,6 +395,7 @@ export interface CommandMap {
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };
+  ui_log: { args: { message: string }; ret: void };
   remove_attachments: { args: { accountId: number }; ret: { messages: number; freedBytes: number } };
 }
 

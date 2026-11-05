@@ -52,7 +52,7 @@ async fn open_folder(core: State<'_, Arc<Core>>, folder_id: i64) -> Res<()> {
 
 #[tauri::command]
 async fn list_messages(core: State<'_, Arc<Core>>, folder_id: i64, offset: u32, limit: u32) -> Res<MessagePage> {
-    core.list_messages(folder_id, offset, limit).map_err(err)
+    timed("list_messages", || core.list_messages(folder_id, offset, limit)).map_err(err)
 }
 
 /// `allow_remote` is enforced by the reader's iframe CSP; the core always returns the same
@@ -60,7 +60,7 @@ async fn list_messages(core: State<'_, Arc<Core>>, folder_id: i64, offset: u32, 
 #[tauri::command]
 async fn get_message(core: State<'_, Arc<Core>>, id: i64, allow_remote: Option<bool>) -> Res<Option<MessageDetail>> {
     let _ = allow_remote;
-    core.get_message(id).map_err(err)
+    timed("get_message", || core.get_message(id)).map_err(err)
 }
 
 #[tauri::command]
@@ -89,7 +89,7 @@ async fn list_threads(
     scope: Option<ConversationScope>,
     include_trash: Option<bool>,
 ) -> Res<ThreadPage> {
-    core.list_threads(folder_id, thread_scope(scope, include_trash), offset, limit).map_err(err)
+    timed("list_threads", || core.list_threads(folder_id, thread_scope(scope, include_trash), offset, limit)).map_err(err)
 }
 
 #[tauri::command]
@@ -100,7 +100,7 @@ async fn get_thread(
     scope: Option<ConversationScope>,
     include_trash: Option<bool>,
 ) -> Res<ThreadView> {
-    core.thread_messages(thread_id, folder_id, thread_scope(scope, include_trash)).map_err(err)
+    timed("get_thread", || core.thread_messages(thread_id, folder_id, thread_scope(scope, include_trash))).map_err(err)
 }
 
 #[tauri::command]
@@ -115,8 +115,44 @@ async fn account_storage(core: State<'_, Arc<Core>>) -> Res<Vec<AccountStorage>>
     tauri::async_runtime::spawn_blocking(move || core.account_storage()).await.map_err(|e| e.to_string())?.map_err(err)
 }
 
+/// Run a read the window waits on, logging it when slow (to see whether reads slow down over a
+/// long session).
+fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    let ms = started.elapsed().as_millis() as u64;
+    if ms > 200 {
+        tracing::info!(ms, "slow read: {what}");
+    }
+    out
+}
+
+/// Every 15 minutes, how much memory the app holds and for how long it has run: shows whether a
+/// long session grows (`ps` works on Linux and macOS alike).
+async fn health_log() {
+    let started = std::time::Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_secs(15 * 60));
+    tick.tick().await; // the first tick is immediate
+    loop {
+        tick.tick().await;
+        let rss_mb = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .map(|kb| kb / 1024);
+        tracing::info!(minutes = started.elapsed().as_secs() / 60, rss_mb, "health");
+    }
+}
+
+/// A line from the window for the app log (e.g. slow screen updates).
 #[tauri::command]
-fn attachment_counts(core: State<'_, Arc<Core>>) -> Res<Vec<AttachmentCounts>> {
+fn ui_log(message: String) {
+    tracing::info!(target: "ui", "{message}");
+}
+
+#[tauri::command]
+async fn attachment_counts(core: State<'_, Arc<Core>>) -> Res<Vec<AttachmentCounts>> {
     core.attachment_counts().map_err(err)
 }
 
@@ -140,7 +176,7 @@ async fn remove_attachments(core: State<'_, Arc<Core>>, account_id: i64) -> Res<
 }
 
 #[tauri::command]
-fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
+async fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
     core.set_keep_attachments(account_id, keep).map_err(err)
 }
 
@@ -155,7 +191,7 @@ async fn search_messages(
     fields: Option<Vec<String>>,
 ) -> Res<MessagePage> {
     let fields: Vec<&str> = fields.iter().flatten().map(String::as_str).collect();
-    core.search(account_id, folder_id, &query, &fields, offset, limit).map_err(err)
+    timed("search", || core.search(account_id, folder_id, &query, &fields, offset, limit)).map_err(err)
 }
 
 #[tauri::command]
@@ -277,7 +313,7 @@ async fn undo_action(core: State<'_, Arc<Core>>, op_id: i64) -> Res<()> {
 
 #[tauri::command]
 async fn index_of(core: State<'_, Arc<Core>>, folder_id: i64, id: i64, threaded: bool) -> Res<Option<u32>> {
-    core.index_of(folder_id, id, threaded).map_err(err)
+    timed("index_of", || core.index_of(folder_id, id, threaded)).map_err(err)
 }
 
 #[tauri::command]
@@ -768,6 +804,7 @@ pub fn run() {
             };
             tracing::info!("data directory: {}", dir.display());
             app.manage(core.clone());
+            tauri::async_runtime::spawn(health_log());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Sync tasks are spawned onto Tauri's tokio runtime from inside it.
@@ -794,6 +831,7 @@ pub fn run() {
             set_keep_attachments,
             account_storage,
             attachment_counts,
+            ui_log,
             remove_attachments,
             search_messages,
             message_in_folder,

@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createRoot, createSignal } from 'solid-js';
+import { batch, createEffect, createMemo, createRoot, createSignal, on, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, events, type Account, type Folder, type MessageSummary, type SyncStatus, type ThreadSummary, type ConversationScope, type SearchField } from './api';
 import { loadPref, savePref } from './lib/format';
@@ -153,6 +153,76 @@ export function setSearchScope(s: SearchScope): void {
 export function selectThread(t: ThreadSummary | null): void {
   if (t && t.id === selectedThreadId()) return;
   setSelectedThread(t ? { ...t, participants: [...t.participants] } : null);
+}
+
+// ------------------------------------------------------------- what the reader shows
+
+// The readers follow the selection a painted frame later: building a message (an HTML document
+// per message of a conversation) and tearing down the last one can take a while in WebKit, and
+// done in the same step it held up the highlight too. While the selection moves quickly (arrow
+// keys held), the reader waits for a pause instead of building every message passed over.
+// Actions use the selection itself: they apply to what's highlighted.
+const [readerThread, setReaderThread] = createSignal<ThreadSummary | null>(null);
+const [readerMessageId, setReaderMessageId] = createSignal<number | null>(null);
+export { readerThread, readerMessageId };
+
+/** Slower than this (ms) is written to the app log. */
+const SLOW_MS = 250;
+let lastSelect = 0;
+let readerFrame = 0;
+let readerTimer: ReturnType<typeof setTimeout> | undefined;
+let readerPending: (() => void) | null = null;
+
+function showSelection(selectedAt: number) {
+  readerPending = null;
+  const start = performance.now();
+  const t = untrack(selectedThread);
+  batch(() => {
+    setReaderThread(t);
+    setReaderMessageId(untrack(selectedMessageId));
+  });
+  // The reader's work and its layout are done by the second frame from here.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      const ms = Math.round(performance.now() - start);
+      if (ms > SLOW_MS) {
+        const what = t ? `conversation of ${t.messageCount} messages` : 'message';
+        void api.uiLog(`slow reader: ${ms} ms to show a ${what} (${Math.round(start - selectedAt)} ms after selecting)`).catch(() => {});
+      }
+    }),
+  );
+}
+
+createRoot(() =>
+  createEffect(
+    on([selectedThread, selectedMessageId], () => {
+      const now = performance.now();
+      const rapid = now - lastSelect < 150;
+      lastSelect = now;
+      cancelAnimationFrame(readerFrame);
+      clearTimeout(readerTimer);
+      readerPending = () => showSelection(now);
+      if (rapid) {
+        readerTimer = setTimeout(() => readerPending?.(), 120);
+        return;
+      }
+      // After the highlight is painted (the frame's callback runs before its paint: wait for the
+      // next task).
+      readerFrame = requestAnimationFrame(() => {
+        const painted = Math.round(performance.now() - now);
+        if (painted > SLOW_MS) void api.uiLog(`slow highlight: ${painted} ms from selecting to the frame`).catch(() => {});
+        readerTimer = setTimeout(() => readerPending?.(), 0);
+      });
+    }),
+  ),
+);
+
+/** Show the selection in the reader now (before moving focus into it). */
+export function flushReader(): void {
+  if (!readerPending) return;
+  cancelAnimationFrame(readerFrame);
+  clearTimeout(readerTimer);
+  readerPending();
 }
 
 export function setThreaded(v: boolean): void {

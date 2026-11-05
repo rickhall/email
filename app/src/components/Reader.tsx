@@ -5,7 +5,7 @@ export { AttachmentControl };
 import { analyzePlain, collapseHtmlQuotes, QUOTE_FRAME_CSS, type QNode } from '../lib/quotes';
 import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } from '../lib/body';
 import { avatarColor, initials, linkify, longDate } from '../lib/format';
-import { patchSelectedSummary, restorePending, searchActive, selectedFolderId, selectedMessageId, selectedSummary } from '../state';
+import { patchSelectedSummary, readerMessageId, restorePending, searchActive, selectedFolderId, selectedMessageId, selectedSummary } from '../state';
 import { HeaderActions, type ActionTarget } from './Actions';
 import { searchTag, TagChips } from './Tags';
 import { runAction } from '../lib/actions';
@@ -229,7 +229,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   // New message → images blocked again.
-  createEffect(on(selectedMessageId, () => setAllowRemote(false)));
+  createEffect(on(readerMessageId, () => setAllowRemote(false)));
 
   /** "Load images": show them now and remember the choice for this message. */
   function allowRemoteFor(id: number | null) {
@@ -295,7 +295,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   }
 
   createEffect(() => {
-    const id = selectedMessageId();
+    const id = readerMessageId();
     const remote = allowRemote();
     if (id == null) {
       token++;
@@ -308,7 +308,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   });
 
   onMessageReady((id) => {
-    if (id === selectedMessageId() && phase() === 'downloading') void load(id, allowRemote());
+    if (id === readerMessageId() && phase() === 'downloading') void load(id, allowRemote());
   });
   onCleanup(() => clearTimeout(retryTimer));
 
@@ -316,10 +316,10 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   const head = createMemo(() => {
     const d = detail();
     const s = selectedSummary();
-    if (d && d.id === selectedMessageId()) {
+    if (d && d.id === readerMessageId()) {
       return { subject: d.subject, from: d.from, to: d.to, cc: d.cc, date: d.date, attachments: d.attachments };
     }
-    if (s && s.id === selectedMessageId()) {
+    if (s && s.id === readerMessageId()) {
       return {
         subject: s.subject,
         from: { name: s.fromName || null, addr: s.fromAddr },
@@ -335,7 +335,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   /** Body to render: the loaded one, or the previous body of the same message while re-fetching with images. */
   const ready = () => {
     const s = shown();
-    if (!s || s.d.id !== selectedMessageId()) return null;
+    if (!s || s.d.id !== readerMessageId()) return null;
     return phase() === 'ready' || phase() === 'loading' ? s : null;
   };
 
@@ -355,19 +355,19 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
               <div class="band-meta" data-tauri-drag-region={DRAG}>
                 <time dateTime={new Date(h().date * 1000).toISOString()}>{longDate(h().date)}</time>
                 {/* Icon only (title says which): the band's date mustn't be squeezed. */}
-                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.answered}>
+                <Show when={selectedSummary()?.id === readerMessageId() && selectedSummary()?.answered}>
                   <span class="dot-sep">·</span>
                   <span class="band-mark" title="Replied" aria-label="Replied">
                     <ReplyIcon size={13} />
                   </span>
                 </Show>
-                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.forwarded}>
+                <Show when={selectedSummary()?.id === readerMessageId() && selectedSummary()?.forwarded}>
                   <span class="dot-sep">·</span>
                   <span class="band-mark" title="Forwarded" aria-label="Forwarded">
                     <ForwardIcon size={13} />
                   </span>
                 </Show>
-                <Show when={selectedSummary()?.id === selectedMessageId() && selectedSummary()?.draftId}>
+                <Show when={selectedSummary()?.id === readerMessageId() && selectedSummary()?.draftId}>
                   {(d) => (
                     <>
                       <span class="dot-sep">·</span>
@@ -415,7 +415,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                 <Show when={h().attachments.length > 0 || selectedSummary()?.hasAttachments}>
                   <div class="hdr-att">
                     <Show when={h().attachments.length > 0} fallback={<span class="att-pill-ph" />}>
-                      <AttachmentControl messageId={selectedMessageId()!} list={h().attachments} />
+                      <AttachmentControl messageId={readerMessageId()!} list={h().attachments} />
                     </Show>
                   </div>
                 </Show>
@@ -426,7 +426,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                 <ImageIcon size={14} />
                 <span>Remote images blocked</span>
                 <span class="dot-sep">·</span>
-                <button class="link-btn" onClick={() => allowRemoteFor(selectedMessageId())}>
+                <button class="link-btn" onClick={() => allowRemoteFor(readerMessageId())}>
                   Load images
                 </button>
               </div>
@@ -440,7 +440,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                     <button
                       class="btn secondary"
                       onClick={() => {
-                        const id = selectedMessageId();
+                        const id = readerMessageId();
                         if (id != null) void load(id, allowRemote());
                       }}
                     >
