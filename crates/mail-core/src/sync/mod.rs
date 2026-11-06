@@ -262,7 +262,6 @@ impl Shared {
 /// Work for the interactive connection.
 enum Job {
     Body(i64),
-    Seen { id: i64, seen: bool },
     Part(PartRequest),
     /// Sync this folder now (e.g. Sent right after sending), rather than in the headers task's
     /// turn.
@@ -376,11 +375,6 @@ impl AccountSync {
         if let Err(mpsc::error::SendError(Job::Part(req))) = self.urgent_tx.send(Job::Part(req)) {
             let _ = req.reply.send(Err(anyhow::anyhow!("account is not syncing")));
         }
-    }
-
-    /// Push a \\Seen change to the server (the local store is updated by the caller).
-    pub fn set_seen(&self, message_id: i64, seen: bool) {
-        let _ = self.urgent_tx.send(Job::Seen { id: message_id, seen });
     }
 
     pub fn status(&self) -> SyncStatus {
@@ -1056,7 +1050,6 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             jobs.push(j);
         }
         let mut bodies = Vec::new();
-        let mut seen = Vec::new();
         let mut parts = Vec::new();
         let mut refresh: Vec<i64> = Vec::new();
         for j in jobs {
@@ -1066,7 +1059,6 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                     shared.emit(CoreEvent::MessageReady { id });
                 }
                 Job::Body(id) => bodies.push(id),
-                Job::Seen { id, seen: s } => seen.push((id, s)),
                 Job::Part(p) => parts.push(p),
                 Job::Refresh(f) => {
                     if !refresh.contains(&f) {
@@ -1076,7 +1068,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
             }
         }
         let focus = *shared.focus.borrow();
-        let pending_messages = !(bodies.is_empty() && seen.is_empty());
+        let pending_messages = !bodies.is_empty();
         for attempt in 0..(if pending_messages { 2 } else { 0 }) {
             let started = std::time::Instant::now();
             if conn.is_none() {
@@ -1095,7 +1087,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 if download(&shared, c, &bodies, focus, true, false).await.is_err() {
                     download(&shared, c, &bodies, focus, true, true).await?;
                 }
-                store_seen(&shared, c, &seen, focus).await
+                anyhow::Ok(())
             })
             .await
             .and_then(|r| r);
@@ -1420,24 +1412,6 @@ async fn fetch_part(shared: &Shared, conn: &mut Connection, req: &PartRequest, p
         .ok_or_else(|| anyhow::anyhow!("This message is no longer on the server."))?;
     conn.ensure_selected(&loc.raw_name).await?;
     conn.fetch_omitted_part(loc.uid, req.ordinal, req.section.as_deref(), req.encoding.as_deref()).await
-}
-
-async fn store_seen(
-    shared: &Shared,
-    conn: &mut Connection,
-    changes: &[(i64, bool)],
-    preferred: Option<i64>,
-) -> Result<()> {
-    for &(id, seen) in changes {
-        // Every folder copy shares flags on Gmail; elsewhere update the copy we know about.
-        let Some(loc) = shared.store.body_location(id, preferred)? else { continue };
-        conn.ensure_selected(&loc.raw_name).await?;
-        let op = if seen { "+FLAGS.SILENT (\\Seen)" } else { "-FLAGS.SILENT (\\Seen)" };
-        let responses: Vec<_> =
-            futures::TryStreamExt::try_collect(conn.session.uid_store(loc.uid.to_string(), op).await?).await?;
-        drop(responses);
-    }
-    Ok(())
 }
 
 const BODY_BATCH: usize = 40;

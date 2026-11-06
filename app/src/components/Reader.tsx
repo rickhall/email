@@ -270,11 +270,10 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
         // A remembered "Load images" choice applies without asking again.
         setShown({ d, remote: remote || d.remoteAllowed });
         setPhase('ready');
-        // Opening a message marks it read; the core no-ops if it already is.
-        api
-          .setRead(id, true)
-          .then(() => patchSelectedSummary(id, { unread: false }))
-          .catch(() => {});
+        // Opening a message marks it read; the core no-ops if it already is. Shown read first, so
+        // a "Mark unread" made meanwhile isn't overwritten when the answer comes back.
+        if (selectedSummary()?.id === id && selectedSummary()?.unread) patchSelectedSummary(id, { unread: false });
+        api.setRead(id, true).catch(() => {});
         return;
       }
       setPhase('downloading');

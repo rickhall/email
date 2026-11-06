@@ -952,17 +952,18 @@ impl Core {
     }
 
     /// Mark a message read or unread: instantly in the local store, then on the server.
+    /// Read or unread, as an action (opening a message marks it read): through the same queue
+    /// as "Mark unread" and the rest, so the server gets the changes in the order they were made.
+    /// (A separate fast path for "read" could reach the server after a later "unread", and the
+    /// next sync then put "read" back.) Already in that state: nothing to send.
     pub fn set_read(&self, id: i64, read: bool) -> Result<()> {
-        let Some(folders) = self.store.set_flag(id, flags::SEEN, read)? else {
+        let seen = self.store.message_flags(id)? & flags::SEEN != 0;
+        if seen == read {
             return Ok(());
-        };
-        let account_id = self.store.message_account(id)?.ok_or_else(|| anyhow!("no such message"))?;
-        let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders });
-        let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
-        if let Some(s) = self.running.lock().unwrap().get(&account_id) {
-            s.set_seen(id, read);
         }
-        Ok(())
+        let Some(&folder) = self.store.message_folder_ids(id)?.first() else { return Ok(()) };
+        let action = if read { actions::Action::Read } else { actions::Action::Unread };
+        self.apply_action(action, &[id], folder).map(|_| ())
     }
 
     pub fn sync_status(&self) -> Vec<SyncStatus> {

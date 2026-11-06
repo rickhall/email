@@ -294,9 +294,12 @@ function Toolbar(props: {
     if (url) chain.setLink({ href: /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}` }).run();
     else chain.unsetLink().run();
   };
+  // Out of the Tab order (Tab from the subject goes straight to the text); the buttons stay
+  // clickable and their shortcuts (⌘B…) work in the text.
   const B = (p: { label: string; key: string; name?: string; onClick: () => void; children: string }) => (
     <button
       class="fmt-btn"
+      tabIndex={-1}
       classList={{ on: !!p.name && active(p.name) }}
       title={`${p.label}${p.key ? ` (${p.key})` : ''}`}
       aria-label={p.label}
@@ -360,7 +363,7 @@ function Toolbar(props: {
           ❝
         </B>
         <span class="fmt-fill" />
-        <button class="fmt-btn fmt-attach" title="Attach files" aria-label="Attach files" onClick={() => props.onAttach()}>
+        <button class="fmt-btn fmt-attach" tabIndex={-1} title="Attach files" aria-label="Attach files" onClick={() => props.onAttach()}>
           <PaperclipIcon size={15} />
         </button>
       </Show>
