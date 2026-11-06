@@ -566,6 +566,8 @@ export function createMockBackend(): Backend {
   const folderMsgs = new Map<number, MessageSummary[]>();
   const byId = new Map<number, MessageSummary>();
   const remoteAllowed = new Set<number>();
+  /** resolves a pending mock browser sign-in as cancelled */
+  let signInCancel: (() => void) | null = null;
   /** accounts downloading whole messages (Settings › Accounts › Offline) */
   const keepAttachments = new Set<number>();
   /** per account, messages still stored without their attachments (unset: all of them) */
@@ -679,7 +681,7 @@ export function createMockBackend(): Backend {
   }
 
   function createAccount(email: string, displayName: string, provider: Provider, specs: FolderSpec[]): Account {
-    const acc: Account = { id: nextAccountId++, email, displayName, provider };
+    const acc: Account = { id: nextAccountId++, email, displayName, provider, auth: provider === 'outlook' ? 'microsoft' : 'password' };
     accounts.push(acc);
     const me: Person = { name: displayName, addr: email };
     const rnd = mulberry32(acc.id * 7919);
@@ -1394,6 +1396,37 @@ export function createMockBackend(): Backend {
       void simulateSync(acc, 2_400, a.imapHost || `imap.${domain}`);
       emit('folders-changed', { accountId: acc.id });
       return { ...acc };
+    },
+    async detect_provider({ email }) {
+      await sleep(150);
+      const domain = email.split('@')[1]?.trim().toLowerCase() ?? '';
+      if (!domain.includes('.')) return null;
+      if (domain === 'gmail.com' || domain === 'googlemail.com') return 'gmail';
+      // outlook.com and friends by name; `ms.example` plays a Microsoft 365 domain (found by MX).
+      if (/^(outlook|hotmail|live|msn)\./.test(domain) || domain === 'ms.example') return 'outlook';
+      return 'imap';
+    },
+    async add_microsoft_account({ loginHint, displayName }) {
+      // Plays the browser sign-in: a few seconds, cancellable.
+      const ok = await new Promise<boolean>((resolve) => {
+        signInCancel = () => resolve(false);
+        setTimeout(() => resolve(true), 3000);
+      });
+      signInCancel = null;
+      if (!ok) throw 'Sign-in cancelled.';
+      const email = (loginHint ?? '').trim() || 'john.doe@outlook.com';
+      if (accounts.some((x) => x.email === email)) throw `Account ${email} already exists`;
+      const acc = createAccount(email, displayName?.trim() || email, 'outlook', SMALL_FOLDERS);
+      void simulateSync(acc, 2_400, 'outlook.office365.com');
+      emit('folders-changed', { accountId: acc.id });
+      return { ...acc };
+    },
+    async microsoft_sign_in_again({ accountId }) {
+      await sleep(2000);
+      setStatus(accountId, 'idle', null, 0, 0, null);
+    },
+    async cancel_sign_in() {
+      signInCancel?.();
     },
     async list_folders({ accountId }) {
       await latency();

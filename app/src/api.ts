@@ -8,6 +8,7 @@ import type {
   Addr,
   FileInfo,
   NextUnread,
+  Provider,
   ReplyContext,
   ReplyMode,
   SendQueued,
@@ -74,6 +75,15 @@ export function errorMessage(e: unknown): string {
 
 export const api = {
   listAccounts: (): Promise<Account[]> => call('list_accounts', undefined),
+  /** Whose mail service an address is on (known domains, else its MX records); null: unknown. */
+  detectProvider: (email: string): Promise<Provider | null> => call('detect_provider', { email }),
+  /** Add a Microsoft account by signing in in the browser (resolves once that's done). */
+  addMicrosoftAccount: (loginHint: string | null, displayName: string | null): Promise<Account> =>
+    call('add_microsoft_account', { loginHint, displayName }),
+  /** Sign a Microsoft account in again (its sign-in expired or was revoked). */
+  microsoftSignInAgain: (accountId: number): Promise<void> => call('microsoft_sign_in_again', { accountId }),
+  /** Stop waiting for a browser sign-in (the pending call fails with "Sign-in cancelled."). */
+  cancelSignIn: (): Promise<void> => call('cancel_sign_in', undefined),
   addAccount: (a: AddAccountArgs): Promise<Account> =>
     call('add_account', {
       email: a.email,

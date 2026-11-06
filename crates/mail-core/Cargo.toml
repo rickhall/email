@@ -5,10 +5,12 @@ edition = "2024"
 
 [dependencies]
 ammonia = "4.2.4"
+aws-lc-rs = "1.18.2"
 anyhow = "1.0.104"
 async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.23.1"
 chrono = "0.4.45"
+form_urlencoded = "1.2.2"
 futures = "0.3.34"
 hickory-resolver = "0.26.3"
 imap-proto = "0.17"

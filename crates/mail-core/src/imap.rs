@@ -194,6 +194,9 @@ pub fn classify_sign_in_refusal(message: &str) -> anyhow::Error {
         "[overquota]",
         "bandwidth",
         "try again later",
+        // Exchange Online, when several connections sign in at once with the same token: the
+        // sign-in was fine, a retry shortly after connects.
+        "authenticated but not connected",
     ];
     if temporary.iter().any(|t| m.contains(t)) {
         ConnectionLimit(message.trim().to_string()).into()
@@ -211,7 +214,7 @@ fn auth_error(e: async_imap::error::Error) -> anyhow::Error {
 
 /// Header fields fetched during header sync. Content-Type lets us guess attachments early.
 pub const HEADER_FIELDS: &str =
-    "FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE";
+    "FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE X-MICROSOFT-ORIGINAL-MESSAGE-ID";
 
 #[derive(Clone)]
 pub enum Credentials {
@@ -271,7 +274,7 @@ pub fn ensure_crypto_provider() {
     });
 }
 
-fn tls_config() -> Arc<ClientConfig> {
+pub(crate) fn tls_config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
@@ -794,6 +797,7 @@ fn parse_header_fetch(f: &Fetch) -> Option<HeaderRecord> {
         gm_labels: gmail_labels(f),
         keywords: keywords(f),
         message_id: parsed.message_id,
+        original_message_id: parsed.original_message_id,
         in_reply_to: parsed.in_reply_to,
         refs: parsed.refs,
         subject: parsed.subject,
@@ -932,6 +936,7 @@ mod tests {
         assert!(limit("[ALERT] Too many simultaneous connections. (Failure)"));
         assert!(limit("[UNAVAILABLE] Server busy, try again later"));
         assert!(limit("[OVERQUOTA] Account exceeded bandwidth limits"));
+        assert!(limit("User is authenticated but not connected."), "Exchange Online: retry");
         assert!(auth("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"));
         assert!(auth("[ALERT] Application-specific password required"));
         assert!(auth("LOGIN failed."));

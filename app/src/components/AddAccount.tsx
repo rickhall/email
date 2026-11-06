@@ -1,5 +1,5 @@
-import { createSignal, Show } from 'solid-js';
-import { api, errorMessage, type Account } from '../api';
+import { createSignal, onCleanup, Show } from 'solid-js';
+import { api, errorMessage, type Account, type Provider } from '../api';
 import { AlertIcon, ChevronIcon, CloseIcon, MailIcon } from './Icons';
 import { DRAG } from '../lib/platform';
 
@@ -17,6 +17,29 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
   const [advanced, setAdvanced] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  /** Whose service the address is on (asked a moment after typing stops). */
+  const [provider, setProvider] = createSignal<Provider | null>(null);
+  let detectTimer: ReturnType<typeof setTimeout> | undefined;
+  let detectSeq = 0;
+  onCleanup(() => clearTimeout(detectTimer));
+  const onEmail = (v: string) => {
+    setEmail(v);
+    clearTimeout(detectTimer);
+    const seq = ++detectSeq;
+    const addr = v.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(addr)) {
+      setProvider(null);
+      return;
+    }
+    detectTimer = setTimeout(() => {
+      api.detectProvider(addr).then(
+        (p) => seq === detectSeq && setProvider(p),
+        () => {},
+      );
+    }, 400);
+  };
+  /** Microsoft accounts sign in on Microsoft's page (unless a server is set by hand). */
+  const microsoft = () => provider() === 'outlook' && !host().trim();
 
   const portNum = () => {
     const p = port().trim();
@@ -24,7 +47,8 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
     const n = Number(p);
     return Number.isInteger(n) && n > 0 && n < 65536 ? n : NaN;
   };
-  const canSubmit = () => !busy() && email().includes('@') && password().length > 0 && !Number.isNaN(portNum());
+  const canSubmit = () =>
+    !busy() && email().includes('@') && (microsoft() || password().length > 0) && !Number.isNaN(portNum());
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -32,6 +56,10 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
     setBusy(true);
     setError(null);
     try {
+      if (microsoft()) {
+        props.onAdded(await api.addMicrosoftAccount(email().trim(), displayName().trim() || null));
+        return;
+      }
       const acc = await api.addAccount({
         email: email().trim(),
         password: password(),
@@ -56,31 +84,42 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
           autocomplete="username"
           placeholder="you@example.com"
           value={email()}
-          onInput={(e) => setEmail(e.currentTarget.value)}
+          onInput={(e) => onEmail(e.currentTarget.value)}
           ref={(el) => props.autofocus && queueMicrotask(() => el.focus())}
           required
         />
       </label>
-      <label class="field">
-        <span class="field-label">Password</span>
-        <input
-          type="password"
-          autocomplete="current-password"
-          placeholder={isGmail(email()) ? 'App password' : 'Password'}
-          value={password()}
-          onInput={(e) => setPassword(e.currentTarget.value)}
-          required
-        />
-        <Show when={isGmail(email())}>
-          <span class="field-help">
-            Gmail needs an app password. Create one at{' '}
-            <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">
-              myaccount.google.com/apppasswords
-            </a>
-            .
-          </span>
-        </Show>
-      </label>
+      {/* Microsoft: the same slot says where the sign-in happens (nothing moves) */}
+      <Show
+        when={!microsoft()}
+        fallback={
+          <div class="field">
+            <span class="field-label">Sign-in</span>
+            <div class="field-note">You’ll sign in on Microsoft’s page, in your browser.</div>
+          </div>
+        }
+      >
+        <label class="field">
+          <span class="field-label">Password</span>
+          <input
+            type="password"
+            autocomplete="current-password"
+            placeholder={isGmail(email()) ? 'App password' : 'Password'}
+            value={password()}
+            onInput={(e) => setPassword(e.currentTarget.value)}
+            required
+          />
+          <Show when={isGmail(email())}>
+            <span class="field-help">
+              Gmail needs an app password. Create one at{' '}
+              <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">
+                myaccount.google.com/apppasswords
+              </a>
+              .
+            </span>
+          </Show>
+        </label>
+      </Show>
       <label class="field">
         <span class="field-label">
           Display name <span class="optional">optional</span>
@@ -135,14 +174,20 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
       </Show>
 
       <div class="form-actions">
-        <Show when={props.onCancel}>
-          <button type="button" class="btn secondary" onClick={() => props.onCancel?.()} disabled={busy()}>
+        {/* while the browser sign-in is open, Cancel stops waiting for it */}
+        <Show when={props.onCancel || (busy() && microsoft())}>
+          <button
+            type="button"
+            class="btn secondary"
+            onClick={() => (busy() && microsoft() ? void api.cancelSignIn() : props.onCancel?.())}
+            disabled={busy() && !microsoft()}
+          >
             Cancel
           </button>
         </Show>
         <button type="submit" class="btn primary" disabled={!canSubmit()}>
-          <Show when={busy()} fallback="Add Account">
-            <span class="spinner small on-accent" /> Connecting…
+          <Show when={busy()} fallback={microsoft() ? 'Continue with Microsoft' : 'Add Account'}>
+            <span class="spinner small on-accent" /> {microsoft() ? 'Finish in your browser…' : 'Connecting…'}
           </Show>
         </button>
       </div>
@@ -159,7 +204,7 @@ export function Onboarding(props: { onAdded: (a: Account) => void }) {
             <MailIcon size={28} />
           </div>
           <h1>Welcome to Email</h1>
-          <p>Add an IMAP account to get started. Your mail is synced and stored on this device.</p>
+          <p>Add your email account to get started. Your mail is synced and stored on this device.</p>
         </div>
         <AddAccountForm onAdded={props.onAdded} autofocus />
       </div>

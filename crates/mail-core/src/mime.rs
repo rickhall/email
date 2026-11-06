@@ -15,6 +15,8 @@ pub struct ParsedHeader {
     pub to_addrs: String,
     pub date: Option<i64>,
     pub message_id: Option<String>,
+    /// X-Microsoft-Original-Message-ID: the sender's Message-ID where Exchange replaced it.
+    pub original_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub refs: Option<String>,
     pub likely_attachments: bool,
@@ -154,6 +156,9 @@ pub fn parse_header_block(raw: &[u8]) -> ParsedHeader {
             .header_raw("Message-ID")
             .and_then(|r| parse_msg_ids(r, &HashSet::new()).into_iter().next())
             .or_else(|| msg.message_id().map(str::to_string)),
+        original_message_id: msg
+            .header_raw("X-Microsoft-Original-Message-ID")
+            .and_then(|r| parse_msg_ids(r, &HashSet::new()).into_iter().next()),
         in_reply_to: msg.header_raw("In-Reply-To").and_then(|r| join_ids(parse_msg_ids(r, &own_addrs))),
         refs: msg.header_raw("References").and_then(|r| join_ids(parse_msg_ids(r, &own_addrs))),
         likely_attachments,

@@ -5,6 +5,7 @@ pub mod actions;
 pub mod compose;
 pub mod contacts;
 pub mod mime;
+pub mod oauth;
 pub mod model;
 pub mod partial;
 pub mod search;
@@ -94,7 +95,7 @@ pub const SEND_DELAY_MS: i64 = 10_000;
 pub struct Core {
     pub store: Arc<Store>,
     events: broadcast::Sender<CoreEvent>,
-    secrets: Secrets,
+    secrets: Arc<Secrets>,
     strategy: Arc<dyn HeaderSync>,
     options: SyncOptions,
     running: Mutex<HashMap<i64, AccountSync>>,
@@ -102,6 +103,18 @@ pub struct Core {
     needs_password: Mutex<std::collections::HashSet<i64>>,
     /// Address suggestions (see `contacts`): built from the stored mail, kept current.
     contacts: Arc<Mutex<Contacts>>,
+    /// Stops a browser sign-in that's waiting (`cancel_sign_in`).
+    sign_in_cancel: tokio::sync::Notify,
+}
+
+/// A Microsoft account's refresh token lives in the keychain entry a password would use.
+impl oauth::TokenStore for Secrets {
+    fn refresh_token(&self, email: &str) -> Result<String> {
+        self.get(email).map_err(|e| anyhow!(oauth::SignInNeeded(format!("no saved sign-in ({e:#})"))))
+    }
+    fn save_refresh_token(&self, email: &str, token: &str) -> Result<()> {
+        self.set(email, token)
+    }
 }
 
 #[derive(Default)]
@@ -132,12 +145,13 @@ impl Core {
         Ok(Core {
             store: Arc::new(store),
             events,
-            secrets,
+            secrets: Arc::new(secrets),
             strategy,
             options,
             running: Mutex::new(HashMap::new()),
             needs_password: Mutex::new(Default::default()),
             contacts: Default::default(),
+            sign_in_cancel: tokio::sync::Notify::new(),
         })
     }
 
@@ -145,13 +159,20 @@ impl Core {
         self.events.subscribe()
     }
 
-    fn server_config(&self, account: &Account) -> Result<ServerConfig> {
-        Ok(ServerConfig {
-            host: account.imap_host.clone(),
-            port: account.imap_port,
-            user: account.email.clone(),
-            credentials: Credentials::Password(self.secrets.get(&account.email)?),
-        })
+    /// Where and how an account signs in: its password, or (Microsoft) a session that supplies
+    /// current access tokens.
+    fn server_config(&self, account: &Account) -> Result<(ServerConfig, Option<Arc<oauth::MicrosoftSession>>)> {
+        let (credentials, session) = match account.auth {
+            AuthKind::Password => (Credentials::Password(self.secrets.get(&account.email)?), None),
+            AuthKind::Microsoft => {
+                // The token itself must be there; it's read again at each renewal.
+                self.secrets.get(&account.email)?;
+                let store: Arc<dyn oauth::TokenStore> = self.secrets.clone();
+                // Placeholder until the session supplies a token for each connection.
+                (Credentials::OAuth2 { access_token: String::new() }, Some(Arc::new(oauth::MicrosoftSession::new(&account.email, store))))
+            }
+        };
+        Ok((ServerConfig { host: account.imap_host.clone(), port: account.imap_port, user: account.email.clone(), credentials }, session))
     }
 
     /// Start syncing every stored account. Accounts whose secret is missing are skipped.
@@ -168,11 +189,12 @@ impl Core {
     }
 
     fn start_account(&self, account: Account) -> Result<()> {
-        let server = self.server_config(&account)?;
+        let (server, microsoft) = self.server_config(&account)?;
         let sync = AccountSync::start(
             self.store.clone(),
             account.clone(),
             server,
+            microsoft,
             self.strategy.clone(),
             self.events.clone(),
             self.options.clone(),
@@ -252,6 +274,93 @@ impl Core {
         self.needs_password.lock().unwrap().remove(&account_id);
         self.start_account(account)?;
         Ok(())
+    }
+
+    /// Add a Microsoft account (outlook.com or Microsoft 365) by signing in in the browser:
+    /// `open` shows Microsoft's sign-in page (`login_hint`: the address typed, filled in there).
+    /// Waits for the browser (up to 5 minutes, or `cancel_sign_in`), checks the account against
+    /// Microsoft's IMAP server, then saves it and starts syncing.
+    pub async fn add_microsoft_account(&self, login_hint: Option<String>, display_name: Option<String>, open: impl FnOnce(String)) -> Result<Account> {
+        let (email, refresh) = self.microsoft_sign_in(login_hint.as_deref(), open).await?;
+        let host = "outlook.office365.com";
+        self.secrets.set(&email, &refresh)?;
+        let display_name = display_name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| email.clone());
+        let account = self.store.insert_account(&email, &display_name, Provider::Outlook, host, 993)?;
+        self.store.set_account_auth(account.id, AuthKind::Microsoft)?;
+        self.store.set_smtp_server(account.id, Some(oauth::microsoft_smtp(&email)))?;
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == account.id).ok_or_else(|| anyhow!("account vanished"))?;
+        if let Some(old) = self.running.lock().unwrap().remove(&account.id) {
+            old.stop();
+        }
+        self.needs_password.lock().unwrap().remove(&account.id);
+        self.start_account(account.clone())?;
+        let _ = self.events.send(CoreEvent::FoldersChanged { account_id: account.id });
+        Ok(account)
+    }
+
+    /// A Microsoft account's sign-in expired or was revoked: sign in again (as the same address)
+    /// and restart its sync.
+    pub async fn microsoft_sign_in_again(&self, account_id: i64, open: impl FnOnce(String)) -> Result<()> {
+        let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
+        let (email, refresh) = self.microsoft_sign_in(Some(&account.email), open).await?;
+        if !email.eq_ignore_ascii_case(&account.email) {
+            bail!("You signed in as {email}, not {}. Sign in with that account instead.", account.email);
+        }
+        self.secrets.set(&account.email, &refresh)?;
+        if let Some(old) = self.running.lock().unwrap().remove(&account_id) {
+            old.stop();
+        }
+        self.needs_password.lock().unwrap().remove(&account_id);
+        self.start_account(account)?;
+        Ok(())
+    }
+
+    /// Whose mail service an address is on (known domains, else its MX records), for the
+    /// add-account form: Microsoft accounts sign in in the browser instead of with a password.
+    pub async fn detect_provider(&self, email: &str) -> Option<Provider> {
+        imap::discover_server(email.trim()).await.map(|k| k.2)
+    }
+
+    /// Stop waiting for a browser sign-in.
+    pub fn cancel_sign_in(&self) {
+        self.sign_in_cancel.notify_waiters();
+    }
+
+    /// The browser sign-in: (address, refresh token), checked by signing in to IMAP with it.
+    async fn microsoft_sign_in(&self, login_hint: Option<&str>, open: impl FnOnce(String)) -> Result<(String, String)> {
+        let redirect = oauth::Redirect::listen().await?;
+        let pkce = oauth::Pkce::new();
+        let uri = redirect.uri.clone();
+        open(oauth::microsoft_authorize_url(&uri, redirect.state(), &pkce.challenge, login_hint.map(str::trim).filter(|h| !h.is_empty())));
+        let code = tokio::select! {
+            code = redirect.code() => code?,
+            _ = self.sign_in_cancel.notified() => bail!("Sign-in cancelled."),
+        };
+        let tokens = oauth::microsoft_exchange(&code, &pkce.verifier, &uri).await?;
+        let email = tokens
+            .id_token
+            .as_deref()
+            .and_then(oauth::email_from_id_token)
+            .ok_or_else(|| anyhow!("Microsoft didn't say which address you signed in with."))?;
+        let refresh = tokens
+            .refresh_token
+            .clone()
+            .ok_or_else(|| anyhow!("Microsoft didn't allow staying signed in (no refresh token)."))?;
+        let cfg = ServerConfig {
+            host: "outlook.office365.com".into(),
+            port: 993,
+            user: email.clone(),
+            credentials: Credentials::OAuth2 { access_token: tokens.access_token },
+        };
+        match imap::connect(&cfg).await {
+            Ok(conn) => conn.logout().await,
+            Err(e) if imap::is_auth_error(&e) => bail!(
+                "You're signed in, but Microsoft's mail server refused this account ({e:#}). For a work or \
+                 school account, IMAP may be turned off for your mailbox; your administrator can turn it on."
+            ),
+            Err(e) => return Err(e),
+        }
+        Ok((email, refresh))
     }
 
     pub fn remove_account(&self, account_id: i64) -> Result<()> {

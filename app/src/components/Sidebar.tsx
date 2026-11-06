@@ -123,7 +123,7 @@ function syncLabel(s: SyncStatus): string {
     case 'error':
       return 'Sync error';
     case 'auth':
-      return 'Password needed';
+      return accounts()?.find((a) => a.id === s.accountId)?.auth === 'microsoft' ? 'Sign-in needed' : 'Password needed';
     case 'limited':
       return 'Connection limit · retrying';
     default:

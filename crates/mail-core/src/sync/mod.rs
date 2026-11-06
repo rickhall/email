@@ -151,6 +151,8 @@ struct Shared {
     store: Arc<Store>,
     account: Account,
     server: ServerConfig,
+    /// A Microsoft (OAuth) account's access tokens; None: `server` has the password.
+    microsoft: Option<Arc<crate::oauth::MicrosoftSession>>,
     strategy: Arc<dyn HeaderSync>,
     events: broadcast::Sender<CoreEvent>,
     focus: watch::Receiver<Option<i64>>,
@@ -215,13 +217,33 @@ impl Shared {
         }
     }
 
+    /// What to sign in with now: the password, or a current access token (renewed when it's
+    /// about to expire).
+    async fn credentials(&self) -> Result<imap::Credentials> {
+        match &self.microsoft {
+            Some(session) => Ok(imap::Credentials::OAuth2 { access_token: session.access_token().await? }),
+            None => Ok(self.server.credentials.clone()),
+        }
+    }
+
     async fn connect(&self) -> Result<Connection> {
         use std::sync::atomic::Ordering;
         if self.auth_failed.load(Ordering::SeqCst) {
             // Park: AccountSync is replaced once the user supplies a new password.
             std::future::pending::<()>().await;
         }
-        match imap::connect(&self.server).await {
+        let credentials = match self.credentials().await {
+            Ok(c) => c,
+            Err(e) => {
+                if e.is::<crate::oauth::SignInNeeded>() && !self.auth_failed.swap(true, Ordering::SeqCst) {
+                    tracing::warn!(account = self.account.email, "sign-in no longer valid; pausing sync: {e:#}");
+                    self.set_status(SyncPhase::Auth, None, 0, 0, Some(format!("{e:#}")));
+                }
+                return Err(e);
+            }
+        };
+        let cfg = ServerConfig { credentials, ..self.server.clone() };
+        match imap::connect(&cfg).await {
             Ok(conn) => {
                 *self.gmail.lock().unwrap() = conn.caps.gmail;
                 Ok(conn)
@@ -270,6 +292,7 @@ impl AccountSync {
         store: Arc<Store>,
         account: Account,
         server: ServerConfig,
+        microsoft: Option<Arc<crate::oauth::MicrosoftSession>>,
         strategy: Arc<dyn HeaderSync>,
         events: broadcast::Sender<CoreEvent>,
         options: SyncOptions,
@@ -278,6 +301,7 @@ impl AccountSync {
         let (urgent_tx, urgent_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             store,
+            microsoft,
             header: Mutex::new(initial_status(account.id)),
             status: Mutex::new(initial_status(account.id)),
             account,
@@ -684,6 +708,14 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
         }
     }
     shared.emit(CoreEvent::FoldersChanged { account_id: shared.account.id });
+    // Every full sweep: local copies of sent mail the server's copy didn't take over.
+    if only.is_none() {
+        match shared.store.drop_matched_local_copies(Some(shared.account.id)) {
+            Ok(changed) if !changed.is_empty() => shared.emit(CoreEvent::MessagesChanged { folder_ids: changed }),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("dropping matched local copies: {e:#}"),
+        }
+    }
     if !behind.is_empty() {
         shared.dirty.lock().unwrap().extend(behind);
         shared.refresh.notify_one();
@@ -1142,7 +1174,7 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
 /// queued as failed (with its draft) and is reported; connection trouble retries with backoff.
 async fn send_task(shared: Arc<Shared>) {
     // Built on first use; its pool keeps the signed-in connection between messages.
-    let mut mailer: Option<crate::smtp::Mailer> = None;
+    let mut mailer: Option<(crate::smtp::Mailer, Option<String>)> = None;
     let mut warmed_for: Option<i64> = None;
     loop {
         let now = now_ms();
@@ -1158,7 +1190,7 @@ async fn send_task(shared: Arc<Shared>) {
         // A message is in its undo window: connect and sign in now, so it leaves on time.
         if let Some(t) = due.filter(|&t| t - now <= WARM_AHEAD_MS && warmed_for != Some(t)) {
             warmed_for = Some(t);
-            if let Some(m) = mailer_for(&shared, &mut mailer) {
+            if let Ok(Some(m)) = mailer_for(&shared, &mut mailer).await {
                 let m = m.clone();
                 tokio::spawn(async move { m.warm().await });
             }
@@ -1176,19 +1208,27 @@ const MAX_SEND_ATTEMPTS: i64 = 5;
 /// Open the SMTP connection this long before a message is due (covers the 10 s undo window).
 const WARM_AHEAD_MS: i64 = 15_000;
 
-fn mailer_for<'a>(shared: &Shared, mailer: &'a mut Option<crate::smtp::Mailer>) -> Option<&'a crate::smtp::Mailer> {
-    if mailer.is_none() {
-        let (host, port) = shared.account.smtp()?;
-        let cfg = crate::smtp::SmtpConfig { host, port, user: shared.server.user.clone(), credentials: shared.server.credentials.clone() };
+/// The account's mailer, built on first use and kept (its pool holds the signed-in connection),
+/// rebuilt when an access token is renewed. `Err`: no credentials to sign in with.
+async fn mailer_for<'a>(shared: &Shared, mailer: &'a mut Option<(crate::smtp::Mailer, Option<String>)>) -> Result<Option<&'a crate::smtp::Mailer>> {
+    let credentials = shared.credentials().await?;
+    let token = match &credentials {
+        imap::Credentials::OAuth2 { access_token } => Some(access_token.clone()),
+        imap::Credentials::Password(_) => None,
+    };
+    if mailer.as_ref().is_none_or(|(_, t)| *t != token) {
+        *mailer = None;
+        let Some((host, port)) = shared.account.smtp() else { return Ok(None) };
+        let cfg = crate::smtp::SmtpConfig { host, port, user: shared.server.user.clone(), credentials };
         match crate::smtp::Mailer::new(&cfg) {
-            Ok(m) => *mailer = Some(m),
+            Ok(m) => *mailer = Some((m, token)),
             Err(e) => tracing::warn!("SMTP setup: {e}"),
         }
     }
-    mailer.as_ref()
+    Ok(mailer.as_ref().map(|(m, _)| m))
 }
 
-async fn send_one(shared: &Shared, mailer: &mut Option<crate::smtp::Mailer>, o: crate::store::OutgoingRow) {
+async fn send_one(shared: &Shared, mailer: &mut Option<(crate::smtp::Mailer, Option<String>)>, o: crate::store::OutgoingRow) {
     let account_id = shared.account.id;
     // Rows showing the local copy ("Sending…", then "Not sent" or a plain message) refresh.
     let copy = shared.store.local_copy_of(o.id).ok().flatten();
@@ -1203,8 +1243,17 @@ async fn send_one(shared: &Shared, mailer: &mut Option<crate::smtp::Mailer>, o: 
         copy_changed();
         shared.emit(CoreEvent::SendFailed { account_id, id: o.id, message });
     };
-    let Some(m) = mailer_for(shared, mailer).cloned() else {
-        return fail("No outgoing (SMTP) server is set for this account.".into());
+    let m = match mailer_for(shared, mailer).await {
+        Ok(Some(m)) => m.clone(),
+        Ok(None) => return fail("No outgoing (SMTP) server is set for this account.".into()),
+        Err(e) if e.is::<crate::oauth::SignInNeeded>() => return fail(format!("{e:#}")),
+        Err(e) => {
+            // Couldn't renew the sign-in (offline?): try again later, like a failed send.
+            let backoff = 5_000i64 << o.attempts.min(6);
+            tracing::info!(id = o.id, "send waiting for a sign-in token: {e:#}");
+            let _ = shared.store.retry_outgoing(o.id, now_ms() + backoff);
+            return;
+        }
     };
     let started = std::time::Instant::now();
     match m.send(&o.envelope_from, &o.recipients, &o.raw).await {

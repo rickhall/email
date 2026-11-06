@@ -180,6 +180,43 @@ async fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep:
     core.set_keep_attachments(account_id, keep).map_err(err)
 }
 
+/// Whose mail service an address is on (`gmail`, `outlook`, `imap`), or null if unknown.
+#[tauri::command]
+async fn detect_provider(core: State<'_, Arc<Core>>, email: String) -> Res<Option<Provider>> {
+    Ok(core.detect_provider(&email).await)
+}
+
+/// Add a Microsoft account: sign in in the system browser (waits up to 5 minutes).
+#[tauri::command]
+async fn add_microsoft_account(
+    app: tauri::AppHandle,
+    core: State<'_, Arc<Core>>,
+    login_hint: Option<String>,
+    display_name: Option<String>,
+) -> Res<Account> {
+    let core = core.inner().clone();
+    core.add_microsoft_account(login_hint, display_name, |url| open_sign_in(&app, &url)).await.map_err(err)
+}
+
+/// Sign a Microsoft account in again (its sign-in expired or was revoked).
+#[tauri::command]
+async fn microsoft_sign_in_again(app: tauri::AppHandle, core: State<'_, Arc<Core>>, account_id: i64) -> Res<()> {
+    let core = core.inner().clone();
+    core.microsoft_sign_in_again(account_id, |url| open_sign_in(&app, &url)).await.map_err(err)
+}
+
+/// Stop waiting for a browser sign-in.
+#[tauri::command]
+fn cancel_sign_in(core: State<'_, Arc<Core>>) {
+    core.cancel_sign_in();
+}
+
+fn open_sign_in(app: &tauri::AppHandle, url: &str) {
+    if let Err(e) = app.opener().open_url(url, None::<&str>) {
+        tracing::warn!("opening the sign-in page: {e}");
+    }
+}
+
 #[tauri::command]
 async fn search_messages(
     core: State<'_, Arc<Core>>,
@@ -829,6 +866,10 @@ pub fn run() {
             get_thread,
             update_password,
             set_keep_attachments,
+            detect_provider,
+            add_microsoft_account,
+            microsoft_sign_in_again,
+            cancel_sign_in,
             account_storage,
             attachment_counts,
             ui_log,

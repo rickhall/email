@@ -8,6 +8,85 @@ import { AlertIcon, CloseIcon, LockIcon } from './Icons';
  * Saving verifies with the server, stores it in the keychain and restarts sync.
  */
 export function PasswordDialog(props: { account: Account; onClose: () => void }) {
+  return (
+    <Show
+      when={props.account.auth === 'microsoft'}
+      fallback={<PasswordForm account={props.account} onClose={props.onClose} />}
+    >
+      <SignInAgain account={props.account} onClose={props.onClose} />
+    </Show>
+  );
+}
+
+/**
+ * A Microsoft account whose sign-in expired or was revoked: sign in again in the browser (the
+ * address is filled in there). Cancel stops waiting for the browser.
+ */
+function SignInAgain(props: { account: Account; onClose: () => void }) {
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  async function signIn() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.microsoftSignInAgain(props.account.id);
+      props.onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const close = () => (busy() ? void api.cancelSignIn() : props.onClose());
+
+  return (
+    <div
+      class="modal-backdrop"
+      onMouseDown={(e) => e.target === e.currentTarget && !busy() && props.onClose()}
+      onKeyDown={(e) => e.key === 'Escape' && close()}
+    >
+      <div class="card modal pw-dialog" role="dialog" aria-modal="true" aria-label="Sign-in needed">
+        <div class="modal-head">
+          <h2 class="pw-dialog-title">
+            <LockIcon size={15} />
+            Sign-in needed
+          </h2>
+          <button class="icon-btn" onClick={close} aria-label="Close">
+            <CloseIcon />
+          </button>
+        </div>
+        <p class="pw-dialog-text">
+          Microsoft needs you to sign in again for <strong>{props.account.email}</strong>. Sync is paused until you do.
+        </p>
+        <Show when={error()}>
+          <div class="form-error" role="alert">
+            <AlertIcon size={14} />
+            <span>{error()}</span>
+          </div>
+        </Show>
+        <div class="form-actions">
+          <button type="button" class="btn secondary" onClick={close}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn primary"
+            onClick={() => void signIn()}
+            disabled={busy()}
+            ref={(el) => queueMicrotask(() => el.focus())}
+          >
+            <Show when={busy()} fallback="Sign in with Microsoft">
+              <span class="spinner small on-accent" /> Finish in your browser…
+            </Show>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PasswordForm(props: { account: Account; onClose: () => void }) {
   const [password, setPassword] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);

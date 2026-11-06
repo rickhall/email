@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     imap_port    INTEGER NOT NULL,
     smtp_host    TEXT,
     smtp_port    INTEGER,
-    keep_attachments INTEGER NOT NULL DEFAULT 0 -- download whole messages (offline attachments)
+    keep_attachments INTEGER NOT NULL DEFAULT 0, -- download whole messages (offline attachments)
+    auth         TEXT NOT NULL DEFAULT 'password' -- how it signs in: password | microsoft (OAuth)
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -84,6 +85,8 @@ CREATE INDEX IF NOT EXISTS messages_nobody ON messages(account_id, has_body, dat
 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
 CREATE INDEX IF NOT EXISTS messages_msgid ON messages(account_id, message_id);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_identity ON messages(account_id, identity) WHERE identity IS NOT NULL;
+-- Our own local copies (sent mail, drafts): few, looked over without a scan.
+CREATE INDEX IF NOT EXISTS messages_local ON messages(account_id) WHERE local_copy = 1;
 -- Messages stored without their attachments (counted for download progress without a scan).
 CREATE INDEX IF NOT EXISTS messages_omitted ON messages(account_id) WHERE omitted IS NOT NULL;
 
@@ -211,6 +214,8 @@ const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
                AND account_id IN (SELECT id FROM accounts WHERE keep_attachments=0);",
         )?)
     },
+    // 8: accounts can sign in with Microsoft (OAuth) instead of a password
+    |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN auth TEXT NOT NULL DEFAULT 'password';")?),
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
@@ -308,6 +313,9 @@ pub struct HeaderRecord {
     /// IMAP keywords (tags), lowercase.
     pub keywords: Vec<String>,
     pub message_id: Option<String>,
+    /// The Message-ID the sender gave it, where the server replaced it (Exchange keeps it in
+    /// X-Microsoft-Original-Message-ID): how our own sent copy is recognised there.
+    pub original_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub refs: Option<String>,
     pub subject: String,
@@ -623,6 +631,7 @@ impl Store {
         };
         store.mark_stored_attachments()?;
         store.strip_unwanted_attachments()?;
+        store.drop_matched_local_copies(None)?;
         Ok(store)
     }
 
@@ -693,10 +702,10 @@ impl Store {
             params![email, display_name, provider.as_str(), host, port],
         )?;
         let id: i64 = db.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))?;
-        let (smtp_host, smtp_port) = db.query_row(
-            "SELECT smtp_host, smtp_port FROM accounts WHERE id=?1",
+        let (smtp_host, smtp_port, auth) = db.query_row(
+            "SELECT smtp_host, smtp_port, auth FROM accounts WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?))),
         )?;
         Ok(Account {
             id,
@@ -707,13 +716,14 @@ impl Store {
             imap_port: port,
             smtp_host,
             smtp_port,
+            auth,
         })
     }
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port
+            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth
              FROM accounts ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -726,6 +736,7 @@ impl Store {
                 imap_port: r.get(5)?,
                 smtp_host: r.get(6)?,
                 smtp_port: r.get(7)?,
+                auth: AuthKind::parse(&r.get::<_, String>(8)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1018,10 +1029,20 @@ impl Store {
                         },
                     },
                 };
-                // Not known yet: maybe it's our local copy of a message we sent (on any server).
-                let existing = match (existing, &rec.message_id) {
-                    (None, Some(mid)) => by_local.query_row(params![account_id, mid], |r| r.get(0)).optional()?,
-                    (found, _) => found,
+                // Not known yet: maybe it's our local copy of a message we sent (on any server), by
+                // its Message-ID or, where the server replaced that, the original.
+                let existing = match existing {
+                    Some(id) => Some(id),
+                    None => {
+                        let mut found = None;
+                        for mid in [&rec.message_id, &rec.original_message_id].into_iter().flatten() {
+                            found = by_local.query_row(params![account_id, mid], |r| r.get(0)).optional()?;
+                            if found.is_some() {
+                                break;
+                            }
+                        }
+                        found
+                    }
                 };
                 let id = match existing {
                     Some(id) => {
@@ -1664,6 +1685,12 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// How the account signs in.
+    pub fn set_account_auth(&self, account_id: i64, auth: AuthKind) -> Result<()> {
+        self.db().execute("UPDATE accounts SET auth=?2 WHERE id=?1", params![account_id, auth.as_str()])?;
+        Ok(())
     }
 
     /// The account's own SMTP server; `None` falls back to the default for its IMAP server.
@@ -2339,6 +2366,7 @@ impl Store {
         let parsed = crate::mime::parse_header_block(raw);
         let date = parsed.date.unwrap_or_else(|| chrono::Utc::now().timestamp());
         let rec = HeaderRecord {
+            original_message_id: None,
             uid: 0,
             gm_msgid: None,
             email_id: None,
@@ -2502,6 +2530,67 @@ impl Store {
         Ok(())
     }
 
+    /// A safety net behind the takeover by Message-ID (`upsert_headers_since`): a local copy of
+    /// sent mail still there a day later, while its folder holds the server's copy of the same
+    /// message (subject, sender, the same recipients, sent within 10 minutes), is dropped. A
+    /// server that changed the Message-ID in a way we don't recognise would otherwise leave it
+    /// beside the real one for good; one that never filed it keeps it (the only record).
+    /// `account`: one account (None: all). Returns the folders that changed.
+    pub fn drop_matched_local_copies(&self, account: Option<i64>) -> Result<Vec<i64>> {
+        let day_ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64 - 86_400;
+        // Two index lookups instead of one join (left to the planner, that took minutes on a
+        // large mailbox): the few old local copies, then each one's folder around its date.
+        let pairs: Vec<(i64, String, String)> = {
+            let db = self.rdb();
+            let locals: Vec<(i64, i64, i64, String, String, String)> = db
+                .prepare_cached(
+                    "SELECT l.id, e.folder_id, e.date, l.subject, lower(l.from_addr), l.to_addrs
+                     FROM messages l INDEXED BY messages_local JOIN entries e ON e.message_id = l.id
+                     WHERE l.local_copy = 1 AND l.pending_send IS NULL AND l.draft_id IS NULL AND l.date < ?1
+                       AND (?2 IS NULL OR l.account_id = ?2)",
+                )?
+                .query_map(params![day_ago, account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut near = db.prepare_cached(
+                "SELECT m.to_addrs FROM entries e INDEXED BY entries_list JOIN messages m ON m.id = e.message_id
+                 WHERE e.folder_id = ?1 AND e.date BETWEEN ?2 - 600 AND ?2 + 600 AND e.uid IS NOT NULL
+                   AND m.local_copy = 0 AND m.subject = ?3 AND lower(m.from_addr) = ?4",
+            )?;
+            let mut out = Vec::new();
+            for (id, folder, date, subject, from, to) in locals {
+                for theirs in near.query_map(params![folder, date, subject, from], |r| r.get::<_, String>(0))? {
+                    out.push((id, to.clone(), theirs?));
+                }
+            }
+            out
+        };
+        let addrs = |list: &str| {
+            let mut v: Vec<String> = crate::contacts::parse_list(list).into_iter().map(|a| a.addr.to_ascii_lowercase()).collect();
+            v.sort();
+            v
+        };
+        let mut drop: Vec<i64> = pairs.iter().filter(|(_, l, s)| addrs(l) == addrs(s)).map(|p| p.0).collect();
+        drop.sort_unstable();
+        drop.dedup();
+        let mut changed = Vec::new();
+        for id in drop {
+            let folders = self.message_folder_ids(id)?;
+            {
+                let mut db = self.db();
+                let tx = db.transaction()?;
+                tx.execute("DELETE FROM entries WHERE message_id=?1", [id])?;
+                tx.execute("DELETE FROM messages WHERE id=?1 AND local_copy=1", [id])?;
+                tx.commit()?;
+            }
+            self.bodies.lock().unwrap_or_else(|e| e.into_inner()).execute("DELETE FROM bodies WHERE message_id=?1", [id])?;
+            tracing::info!(id, "dropped a local copy of sent mail: the server's copy is there");
+            changed.extend(folders);
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        Ok(changed)
+    }
+
     /// Taken back (undo, edit after a failure): the local copy goes. Returns its folders.
     pub fn drop_local_copy(&self, outgoing_id: i64) -> Result<Vec<i64>> {
         let Some(id) = self.local_copy_of(outgoing_id)? else { return Ok(vec![]) };
@@ -2651,6 +2740,7 @@ mod tests {
 
     fn rec(uid: u32, gm: u64, labels: &[&str]) -> HeaderRecord {
         HeaderRecord {
+            original_message_id: None,
             uid,
             gm_msgid: Some(gm),
             email_id: None,
@@ -2767,6 +2857,46 @@ mod tests {
         assert!(String::from_utf8_lossy(&store.body(id).unwrap().unwrap()).contains("See attached."));
         let flag: i64 = store.rdb().query_row("SELECT attachments_stored FROM messages WHERE id=?1", [id], |r| r.get(0)).unwrap();
         assert_eq!(flag, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftover_local_copies_of_sent_mail_go() {
+        let dir = std::env::temp_dir().join(format!("mail-core-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acct = store.insert_account("john@example.com", "John", Provider::Outlook, "h", 993).unwrap();
+        let lf = |name: &str, role| ListedFolder { raw_name: name.into(), path: vec![name.into()], role, selectable: true };
+        store.sync_folder_list(acct.id, &[lf("Sent", Some(FolderRole::Sent))]).unwrap();
+        let sent = store.folders(acct.id).unwrap()[0].id;
+        let raw = b"From: John <john@example.com>\r\nTo: Jane Doe <jane@example.org>\r\nSubject: Plans\r\nMessage-ID: <ours@example.com>\r\nDate: Fri, 6 Nov 2026 23:03:51 +0000\r\n\r\nHi\r\n";
+        let copy = store.insert_local_copy(acct.id, sent, raw, 7).unwrap();
+        store.local_copy_sent(7).unwrap();
+        // The server's copy: another Message-ID, nothing pointing back at ours.
+        let date: i64 = store.rdb().query_row("SELECT date FROM messages WHERE id=?1", [copy], |r| r.get(0)).unwrap();
+        let server = HeaderRecord {
+            gm_msgid: None,
+            gm_labels: None,
+            message_id: Some("theirs@prod.example".into()),
+            subject: "Plans".into(),
+            from_addr: "John@Example.com".into(),
+            to_addrs: "jane@example.org".into(),
+            date: date + 12,
+            ..rec(41, 0, &[])
+        };
+        store.upsert_headers(acct.id, sent, &[server], &HashMap::new()).unwrap();
+        let count = || store.list_messages(sent, 0, 10).unwrap().messages.len();
+        assert_eq!(count(), 2);
+        // Not yet: only copies a day old are looked at (the server's may still be on its way).
+        assert!(store.drop_matched_local_copies(None).unwrap().is_empty());
+        store.db().execute("UPDATE messages SET date=date-2*86400", []).unwrap();
+        // Another recipient: not the same message.
+        store.db().execute("UPDATE messages SET to_addrs='bob@example.org' WHERE id<>?1", [copy]).unwrap();
+        assert!(store.drop_matched_local_copies(None).unwrap().is_empty());
+        store.db().execute("UPDATE messages SET to_addrs='Jane <JANE@example.org>' WHERE id<>?1", [copy]).unwrap();
+        assert_eq!(store.drop_matched_local_copies(None).unwrap(), vec![sent]);
+        assert_eq!(count(), 1);
+        assert!(store.body(copy).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3071,7 +3201,8 @@ mod tests {
         {
             let db = Connection::open(dir.join("mail.db")).unwrap();
             db.execute_batch(&format!(
-                "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE messages DROP COLUMN attachments_stored;
+                "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE accounts DROP COLUMN auth;
+                 ALTER TABLE messages DROP COLUMN attachments_stored;
                  PRAGMA user_version={BASE_VERSION};"
             ))
             .unwrap();

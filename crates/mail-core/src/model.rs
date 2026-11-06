@@ -44,6 +44,33 @@ pub struct Account {
     pub smtp_host: Option<String>,
     #[serde(skip)]
     pub smtp_port: Option<u16>,
+    /// How it signs in (the window offers "Sign in again" or a password field accordingly).
+    pub auth: AuthKind,
+}
+
+/// How an account signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    /// A password (or app password), kept in the keychain.
+    Password,
+    /// Microsoft OAuth: the keychain keeps the refresh token.
+    Microsoft,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::Password => "password",
+            AuthKind::Microsoft => "microsoft",
+        }
+    }
+    pub fn parse(s: &str) -> AuthKind {
+        match s {
+            "microsoft" => AuthKind::Microsoft,
+            _ => AuthKind::Password,
+        }
+    }
 }
 
 impl Account {

@@ -7,6 +7,8 @@ export interface Account {
   email: string;
   displayName: string;
   provider: Provider;
+  /** how it signs in: a password (kept in the keychain) or Microsoft's sign-in page */
+  auth: 'password' | 'microsoft';
 }
 
 export type FolderRole =
@@ -339,6 +341,10 @@ export interface EventMap {
 export interface CommandMap {
   list_accounts: { args: undefined; ret: Account[] };
   add_account: { args: AddAccountArgs; ret: Account };
+  detect_provider: { args: { email: string }; ret: Provider | null };
+  add_microsoft_account: { args: { loginHint: string | null; displayName: string | null }; ret: Account };
+  microsoft_sign_in_again: { args: { accountId: number }; ret: void };
+  cancel_sign_in: { args: undefined; ret: void };
   list_folders: { args: { accountId: number }; ret: Folder[] };
   open_folder: { args: { folderId: number }; ret: void };
   list_messages: { args: { folderId: number; offset: number; limit: number }; ret: MessagePage };

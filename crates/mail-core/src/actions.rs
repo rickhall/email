@@ -384,6 +384,7 @@ mod tests {
 
     fn rec(uid: u32, gm: Option<u64>, labels: Option<&[&str]>, mid: &str, flags: i64) -> HeaderRecord {
         HeaderRecord {
+            original_message_id: None,
             uid,
             gm_msgid: gm,
             email_id: None,
@@ -642,6 +643,20 @@ mod tests {
         assert_eq!(rows[0].id, copy);
         assert_eq!(env.folder_names(copy), ["[Gmail]/All Mail", "[Gmail]/Sent Mail"]);
         assert_eq!(s.local_copy_of(q).unwrap(), None);
+
+        // A server that gave it a new Message-ID (Exchange) keeps ours in its own header: that
+        // copy takes over the local one too.
+        let raw = reply("mine3@example.com");
+        let q = queue(&raw);
+        let copy = s.insert_local_copy(env.acct, sent, &raw, q).unwrap();
+        s.local_copy_sent(q).unwrap();
+        s.finish_outgoing(q).unwrap();
+        let mut server = rec(42, Some(78), Some(&["\\Sent"]), "ABC123@prod.outlook.example", flags::SEEN);
+        server.original_message_id = Some("mine3@example.com".into());
+        s.upsert_headers(env.acct, sent, &[server], &labels).unwrap();
+        let rows = in_sent();
+        assert_eq!(rows.len(), 2, "no duplicate: {rows:?}");
+        assert!(rows.iter().any(|m| m.id == copy));
     }
 
     #[test]
