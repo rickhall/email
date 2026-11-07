@@ -33,11 +33,20 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
     }
     detectTimer = setTimeout(() => {
       api.detectProvider(addr).then(
-        (p) => seq === detectSeq && setProvider(p),
+        (p) => {
+          if (seq !== detectSeq) return;
+          // Detection lands after a pause, often once Tab has moved on to the password field:
+          // if that field gives way to the Microsoft note, the cursor goes on to the next field.
+          const inPassword = passwordEl != null && document.activeElement === passwordEl;
+          setProvider(p);
+          if (inPassword && microsoft()) displayNameEl.focus();
+        },
         () => {},
       );
     }, 400);
   };
+  let passwordEl: HTMLInputElement | undefined;
+  let displayNameEl!: HTMLInputElement;
   /** Microsoft accounts sign in on Microsoft's page (unless a server is set by hand). */
   const microsoft = () => provider() === 'outlook' && !host().trim();
 
@@ -102,6 +111,7 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
         <label class="field">
           <span class="field-label">Password</span>
           <input
+            ref={passwordEl}
             type="password"
             autocomplete="current-password"
             placeholder={isGmail(email()) ? 'App password' : 'Password'}
@@ -125,6 +135,7 @@ export function AddAccountForm(props: { onAdded: (a: Account) => void; onCancel?
           Display name <span class="optional">optional</span>
         </span>
         <input
+          ref={displayNameEl}
           type="text"
           autocomplete="name"
           placeholder="Jane Appleseed"

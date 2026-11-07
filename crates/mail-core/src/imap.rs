@@ -131,10 +131,10 @@ pub async fn stall_timeout<T>(
     loop {
         tokio::select! {
             r = &mut fut => return Ok(r),
-            _ = woke.changed() => return Err(anyhow!("the computer slept while {what}; reconnecting")),
+            _ = woke.changed() => return Err(disconnected(format!("the computer slept while {what}; reconnecting"))),
             _ = tick.tick() => {
                 if activity.idle_for() > limit {
-                    return Err(anyhow!("no data from the server for {}s while {what}; connection stalled", limit.as_secs()));
+                    return Err(disconnected(format!("no data from the server for {}s while {what}; connection stalled", limit.as_secs())));
                 }
             }
         }
@@ -155,6 +155,36 @@ impl std::error::Error for AuthFailed {}
 
 pub fn is_auth_error(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<AuthFailed>())
+}
+
+/// The connection broke or couldn't be made (no network, a reset, a stall, the computer slept):
+/// a reconnect fixes it, so it isn't shown as an error.
+#[derive(Debug)]
+pub struct Disconnected(pub String);
+
+impl std::fmt::Display for Disconnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Disconnected {}
+
+pub fn disconnected(message: String) -> anyhow::Error {
+    Disconnected(message).into()
+}
+
+/// A network failure rather than something the server or the settings got wrong: retry
+/// quietly. I/O errors count, except the ones that mean bad data or a refused certificate
+/// (TLS reports those as `InvalidData`).
+pub fn is_network_error(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind;
+    e.chain().any(|c| {
+        c.is::<Disconnected>()
+            || c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                !matches!(io.kind(), ErrorKind::InvalidData | ErrorKind::InvalidInput | ErrorKind::PermissionDenied | ErrorKind::Unsupported)
+            })
+    })
 }
 
 /// The server refused the sign-in for a temporary reason (too many simultaneous connections,
@@ -306,7 +336,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub async fn connect(cfg: &ServerConfig) -> Result<Connection> {
     tokio::time::timeout(CONNECT_TIMEOUT, connect_inner(cfg))
         .await
-        .map_err(|_| anyhow!("connecting to {} timed out after {}s", cfg.host, CONNECT_TIMEOUT.as_secs()))?
+        .map_err(|_| disconnected(format!("connecting to {} timed out after {}s", cfg.host, CONNECT_TIMEOUT.as_secs())))?
 }
 
 async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
@@ -324,7 +354,7 @@ async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
     let activity = Activity::default();
     activity.touch();
     let mut client = async_imap::Client::new(Tracked { inner: tls, activity: activity.clone() });
-    client.read_response().await?.ok_or_else(|| anyhow!("server closed before greeting"))?;
+    client.read_response().await?.ok_or_else(|| disconnected("server closed before greeting".into()))?;
 
     let mut session = match &cfg.credentials {
         Credentials::Password(pw) => client.login(&cfg.user, pw).await.map_err(|(e, _)| auth_error(e))?,
@@ -363,7 +393,7 @@ impl Connection {
         }
         .with_context(|| format!("selecting {raw_name}"))?;
         if mb.uid_validity.is_none() {
-            return Err(anyhow!("selecting {raw_name}: the connection closed before the server answered"));
+            return Err(disconnected(format!("selecting {raw_name}: the connection closed before the server answered")));
         }
         if mb.exists == 0 {
             self.session.noop().await.with_context(|| format!("selecting {raw_name}: confirming it's empty"))?;
@@ -445,7 +475,7 @@ impl Connection {
     pub async fn status(&mut self, raw_name: &str) -> Result<(u32, u32)> {
         let mb = self.session.status(raw_name, "(MESSAGES UNSEEN UIDVALIDITY)").await?;
         if mb.uid_validity.is_none() {
-            return Err(anyhow!("status of {raw_name}: the connection closed before the server answered"));
+            return Err(disconnected(format!("status of {raw_name}: the connection closed before the server answered")));
         }
         Ok((mb.exists, mb.unseen.unwrap_or(0)))
     }
@@ -493,7 +523,7 @@ impl Connection {
         let tag = self.session.run_command(format!("UID FETCH {} (UID EMAILID)", uid_set(uids))).await?;
         let mut out = HashMap::new();
         loop {
-            let resp = self.session.read_response().await?.ok_or_else(|| anyhow!("connection closed during FETCH"))?;
+            let resp = self.session.read_response().await?.ok_or_else(|| disconnected("connection closed during FETCH".into()))?;
             match resp.parsed() {
                 Response::Fetch(_, attrs) => {
                     let mut uid = None;
@@ -941,6 +971,19 @@ mod tests {
         assert!(auth("[ALERT] Application-specific password required"));
         assert!(auth("LOGIN failed."));
         assert!(!limit("[AUTHENTICATIONFAILED] Invalid credentials (Failure)"));
+    }
+
+    #[test]
+    fn network_errors() {
+        use std::io::{Error, ErrorKind};
+        let io = |kind| anyhow::Error::from(Error::new(kind, "x")).context("connecting to imap.example.com:993");
+        assert!(is_network_error(&io(ErrorKind::ConnectionReset)));
+        assert!(is_network_error(&io(ErrorKind::TimedOut)));
+        assert!(is_network_error(&io(ErrorKind::Other)), "a failed DNS lookup");
+        assert!(is_network_error(&disconnected("the computer slept".into()).context("syncing")));
+        assert!(!is_network_error(&io(ErrorKind::InvalidData)), "a refused certificate");
+        assert!(!is_network_error(&classify_sign_in_refusal("AUTHENTICATE failed.")));
+        assert!(!is_network_error(&anyhow!("unexpected answer")));
     }
 
     #[test]

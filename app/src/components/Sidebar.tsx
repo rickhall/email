@@ -105,7 +105,9 @@ export function badgeFor(f: Folder): number {
   return f.unread;
 }
 
-const ACTIVE_PHASES = new Set(['connecting', 'folders', 'headers', 'bodies']);
+// 'offline': the connection broke (no network, after sleep); it reconnects on its own, so it
+// reads as work in progress, not a problem.
+const ACTIVE_PHASES = new Set(['connecting', 'folders', 'headers', 'bodies', 'offline']);
 
 function syncLabel(s: SyncStatus): string {
   switch (s.phase) {
@@ -126,6 +128,8 @@ function syncLabel(s: SyncStatus): string {
       return accounts()?.find((a) => a.id === s.accountId)?.auth === 'microsoft' ? 'Sign-in needed' : 'Password needed';
     case 'limited':
       return 'Connection limit · retrying';
+    case 'offline':
+      return 'Reconnecting…';
     default:
       return 'Up to date';
   }
@@ -231,8 +235,8 @@ function SyncPopoverRow(props: { account: Account; status: SyncStatus | undefine
         </span>
         <ProgressTrack active={active()} pct={pct()} />
       </div>
-      <Show when={(phase() === 'error' || phase() === 'limited') && props.status?.message}>
-        <div class="sp-error" classList={{ warn: phase() === 'limited' }}>{props.status?.message}</div>
+      <Show when={(phase() === 'error' || phase() === 'limited' || phase() === 'offline') && props.status?.message}>
+        <div class="sp-error" classList={{ warn: phase() !== 'error' }}>{props.status?.message}</div>
       </Show>
     </div>
   );
@@ -282,7 +286,9 @@ export function SyncFooter(props: { compact?: boolean }) {
     const total = counted.reduce((n, x) => n + x.status!.total, 0);
     const pct = total > 0 ? Math.max(0, Math.min(1, done / total)) : null;
     let text: string;
-    if (activeList.length === 1) {
+    if (activeList.every((x) => x.status!.phase === 'offline')) {
+      text = 'Reconnecting…';
+    } else if (activeList.length === 1) {
       const st = activeList[0]!.status!;
       text = st.phase === 'connecting' ? 'Updating…' : syncLabel(st);
     } else if (total > 0) {

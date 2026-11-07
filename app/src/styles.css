@@ -4386,12 +4386,8 @@ body.dragging-account * {
   font-size: 14px;
   font-weight: 650;
 }
-.st-acct-name,
 .st-muted {
   color: var(--text-3);
-}
-.st-acct-name {
-  font-size: 13px;
 }
 .st-field {
   display: grid;
@@ -4434,6 +4430,22 @@ body.dragging-account * {
   font-size: 12px;
   line-height: 1.45;
   color: var(--text-3);
+}
+/* A value that edits in place when clicked (Settings › Accounts › Your name): plain text, with a
+   hover tint that hints at it. Padding is offset by margin so the text lines up with the rows'. */
+.st-editable:not(.link-btn) {
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: text;
+}
+.st-editable:not(.link-btn):hover {
+  background: var(--bg-hover);
 }
 .st-field-action {
   margin-left: auto;

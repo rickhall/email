@@ -147,7 +147,7 @@ export interface ThreadPage {
   threads: ThreadSummary[];
 }
 
-export type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error' | 'auth' | 'limited';
+export type SyncPhase = 'idle' | 'connecting' | 'folders' | 'headers' | 'bodies' | 'error' | 'auth' | 'limited' | 'offline';
 
 export interface SyncStatus {
   accountId: number;
@@ -399,6 +399,7 @@ export interface CommandMap {
   set_allow_remote: { args: { id: number; allow: boolean }; ret: void };
   update_password: { args: { accountId: number; password: string }; ret: void };
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
+  set_display_name: { args: { accountId: number; name: string }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };
   ui_log: { args: { message: string }; ret: void };

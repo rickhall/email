@@ -1711,6 +1711,11 @@ impl Store {
             .unwrap_or(false))
     }
 
+    pub fn set_display_name(&self, account_id: i64, name: &str) -> Result<()> {
+        self.db().execute("UPDATE accounts SET display_name=?2 WHERE id=?1", params![account_id, name])?;
+        Ok(())
+    }
+
     pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {
         self.db().execute("UPDATE accounts SET keep_attachments=?2 WHERE id=?1", params![account_id, keep])?;
         Ok(())

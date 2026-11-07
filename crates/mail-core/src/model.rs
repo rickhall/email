@@ -306,6 +306,9 @@ pub enum SyncPhase {
     /// The server refused a connection for a temporary reason (connection limit reached by
     /// other apps/devices, bandwidth); sync retries on its own.
     Limited,
+    /// The network is down or the connection broke (after sleep, a network change); sync
+    /// reconnects on its own.
+    Offline,
 }
 
 #[derive(Debug, Clone, Serialize)]

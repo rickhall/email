@@ -190,6 +190,8 @@ export const api = {
   /** Download whole messages for the account (attachments for offline use), or stop. */
   setKeepAttachments: (accountId: number, keep: boolean): Promise<void> =>
     call('set_keep_attachments', { accountId, keep }),
+  /** The name mail from the account is sent under (empty: the address alone). */
+  setDisplayName: (accountId: number, name: string): Promise<void> => call('set_display_name', { accountId, name }),
 };
 
 async function on<K extends EventName>(event: K, cb: (p: EventMap[K]) => void): Promise<() => void> {

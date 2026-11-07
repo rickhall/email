@@ -17,7 +17,7 @@ import {
 } from '../lib/shortcuts';
 import { ChevronIcon, CloseIcon } from './Icons';
 import { api, errorMessage, events, type AccountDetails, type AccountStorage, type AttachmentCounts } from '../api';
-import { accounts } from '../state';
+import { accounts, reloadAccounts } from '../state';
 import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
 
@@ -343,15 +343,67 @@ function AccountCard(props: { d: AccountDetails }) {
       setBusy(false);
     }
   };
+  // The name mail is sent under; the address alone is stored as the address itself.
+  const [name, setName] = createSignal(props.d.displayName === props.d.email ? '' : props.d.displayName);
+  const [editingName, setEditingName] = createSignal(false);
+  const [nameDraft, setNameDraft] = createSignal('');
+  const saveName = async (e: Event) => {
+    e.preventDefault();
+    if (busy()) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.setDisplayName(props.d.id, nameDraft());
+      setName(nameDraft().trim());
+      setEditingName(false);
+      void reloadAccounts(); // the composer's From and the rail follow
+    } catch (err) {
+      setMsg({ text: errorMessage(err), error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <section class="st-acct">
       <div class="st-acct-head">
         <Show when={account()}>{(a) => <AccountDot account={a()} size={20} />}</Show>
         <span class="st-acct-email">{props.d.email}</span>
-        <Show when={props.d.displayName && props.d.displayName !== props.d.email}>
-          <span class="st-acct-name">{props.d.displayName}</span>
-        </Show>
       </div>
+      <Field label="Your name">
+        <Show
+          when={editingName()}
+          fallback={
+            // the name itself is the button (no separate "Change…")
+            <button
+              class="st-editable"
+              classList={{ 'link-btn': !name() }}
+              title="Click to change the name your mail is sent under"
+              onClick={() => (setNameDraft(name()), setEditingName(true), setMsg(null))}
+            >
+              {name() || 'Add your name'}
+            </button>
+          }
+        >
+          <form class="st-pw" onSubmit={saveName}>
+            <input
+              class="st-input"
+              type="text"
+              placeholder="Jane Appleseed"
+              autocomplete="name"
+              value={nameDraft()}
+              ref={(el) => queueMicrotask(() => (el.focus(), el.select()))}
+              onInput={(e) => setNameDraft(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === 'Escape' && (e.stopPropagation(), setEditingName(false))}
+            />
+            <button class="btn primary st-pw-save" type="submit" disabled={busy() || nameDraft().trim() === name()}>
+              Save
+            </button>
+            <button class="btn secondary" type="button" onClick={() => setEditingName(false)}>
+              Cancel
+            </button>
+          </form>
+        </Show>
+      </Field>
       <Field label="Type">{PROVIDER[props.d.provider] ?? props.d.provider}</Field>
       <Field label="Incoming (IMAP)">
         {props.d.imapHost}:{props.d.imapPort}
@@ -359,9 +411,6 @@ function AccountCard(props: { d: AccountDetails }) {
       <Field label="Outgoing (SMTP)">
         <Show when={props.d.smtpHost} fallback={<span class="st-muted">not set</span>}>
           {props.d.smtpHost}:{props.d.smtpPort}
-          <Show when={props.d.smtpDefault}>
-            <span class="st-muted"> · the standard server for {props.d.imapHost}</span>
-          </Show>
         </Show>
       </Field>
       <Field label="Password">

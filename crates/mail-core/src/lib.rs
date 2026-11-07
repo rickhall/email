@@ -784,6 +784,15 @@ impl Core {
         self.store.account_storage()
     }
 
+    /// The name mail from `account_id` is sent under. Empty means none: the address alone (as
+    /// when an account is added without a name).
+    pub fn set_display_name(&self, account_id: i64, name: &str) -> Result<()> {
+        let account = self.account(account_id)?;
+        let name = name.trim();
+        self.store.set_display_name(account_id, if name.is_empty() { &account.email } else { name })?;
+        Ok(())
+    }
+
     /// Download whole messages for `account_id` (attachments for offline use), or stop doing so.
     /// Turning it on also fetches, in the background, the messages already stored without them.
     pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {

@@ -232,28 +232,42 @@ impl Shared {
             // Park: AccountSync is replaced once the user supplies a new password.
             std::future::pending::<()>().await;
         }
-        let credentials = match self.credentials().await {
-            Ok(c) => c,
-            Err(e) => {
-                if e.is::<crate::oauth::SignInNeeded>() && !self.auth_failed.swap(true, Ordering::SeqCst) {
-                    tracing::warn!(account = self.account.email, "sign-in no longer valid; pausing sync: {e:#}");
-                    self.set_status(SyncPhase::Auth, None, 0, 0, Some(format!("{e:#}")));
+        let mut renewed = false;
+        loop {
+            let credentials = match self.credentials().await {
+                Ok(c) => c,
+                Err(e) => {
+                    if e.is::<crate::oauth::SignInNeeded>() && !self.auth_failed.swap(true, Ordering::SeqCst) {
+                        tracing::warn!(account = self.account.email, "sign-in no longer valid; pausing sync: {e:#}");
+                        self.set_status(SyncPhase::Auth, None, 0, 0, Some(format!("{e:#}")));
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
-        let cfg = ServerConfig { credentials, ..self.server.clone() };
-        match imap::connect(&cfg).await {
-            Ok(conn) => {
-                *self.gmail.lock().unwrap() = conn.caps.gmail;
-                Ok(conn)
-            }
-            Err(e) => {
-                if imap::is_auth_error(&e) && !self.auth_failed.swap(true, Ordering::SeqCst) {
-                    tracing::warn!(account = self.account.email, "credentials rejected; pausing sync: {e:#}");
-                    self.set_status(SyncPhase::Auth, None, 0, 0, Some(format!("{e:#}")));
+            };
+            let cfg = ServerConfig { credentials, ..self.server.clone() };
+            match imap::connect(&cfg).await {
+                Ok(conn) => {
+                    *self.gmail.lock().unwrap() = conn.caps.gmail;
+                    return Ok(conn);
                 }
-                Err(e)
+                Err(e) => {
+                    // A turned-down access token may just have expired (or been revoked by a
+                    // password change elsewhere): renew it and try once more before asking
+                    // for a new sign-in.
+                    if let (Some(session), imap::Credentials::OAuth2 { access_token }) = (&self.microsoft, &cfg.credentials) {
+                        if imap::is_auth_error(&e) && !renewed {
+                            tracing::info!(account = self.account.email, "access token turned down; renewing: {e:#}");
+                            session.forget(access_token).await;
+                            renewed = true;
+                            continue;
+                        }
+                    }
+                    if imap::is_auth_error(&e) && !self.auth_failed.swap(true, Ordering::SeqCst) {
+                        tracing::warn!(account = self.account.email, "credentials rejected; pausing sync: {e:#}");
+                        self.set_status(SyncPhase::Auth, None, 0, 0, Some(format!("{e:#}")));
+                    }
+                    return Err(e);
+                }
             }
         }
     }
@@ -469,7 +483,13 @@ where
                 tracing::warn!(account = shared.account.email, task = name, "sync error: {e:#}");
                 let limited = imap::is_limit_error(&e);
                 if name == "headers" && !imap::is_auth_error(&e) {
-                    let phase = if limited { SyncPhase::Limited } else { SyncPhase::Error };
+                    let phase = if limited {
+                        SyncPhase::Limited
+                    } else if imap::is_network_error(&e) {
+                        SyncPhase::Offline
+                    } else {
+                        SyncPhase::Error
+                    };
                     shared.set_status(phase, None, 0, 0, Some(format!("{e:#}")));
                 }
                 if limited {
@@ -786,7 +806,7 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             r = wait => matches!(r?, async_imap::extensions::idle::IdleResponse::NewData(_)),
             r = focus.changed(), if follow_focus => { r?; false }
             // IDLE is silent by design, so it has no stall timeout: after sleep, start over.
-            _ = woke.changed() => anyhow::bail!("woke from sleep while watching {raw}; reconnecting"),
+            _ = woke.changed() => return Err(imap::disconnected(format!("woke from sleep while watching {raw}; reconnecting"))),
         };
         drop(stop);
         let session = imap::stall_timeout(&activity, STALL_TIMEOUT, "ending IDLE", handle.done()).await??;

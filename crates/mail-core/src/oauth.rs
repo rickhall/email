@@ -8,7 +8,7 @@
 //! one (XOAUTH2 for IMAP and SMTP).
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -314,7 +314,10 @@ pub trait TokenStore: Send + Sync {
 pub struct MicrosoftSession {
     email: String,
     store: Arc<dyn TokenStore>,
-    current: tokio::sync::Mutex<Option<(String, Instant)>>,
+    /// The access token and when it expires, by the wall clock: the monotonic clock stops
+    /// while the computer sleeps, so after a night asleep a token would look fresh when it
+    /// expired hours ago.
+    current: tokio::sync::Mutex<Option<(String, SystemTime)>>,
     /// The last renewal failed for good: don't hammer Microsoft until a new sign-in.
     refused: Mutex<Option<String>>,
 }
@@ -331,7 +334,7 @@ impl MicrosoftSession {
         }
         let mut current = self.current.lock().await;
         if let Some((token, until)) = current.as_ref() {
-            if Instant::now() + RENEW_EARLY < *until {
+            if SystemTime::now() + RENEW_EARLY < *until {
                 return Ok(token.clone());
             }
         }
@@ -350,14 +353,18 @@ impl MicrosoftSession {
                 tracing::warn!("saving the renewed sign-in: {e:#}");
             }
         }
-        let until = Instant::now() + Duration::from_secs(tokens.expires_in);
+        let until = SystemTime::now() + Duration::from_secs(tokens.expires_in);
         *current = Some((tokens.access_token.clone(), until));
         Ok(tokens.access_token)
     }
 
-    /// The server turned the current token down: get a new one next time.
-    pub async fn forget(&self) {
-        *self.current.lock().await = None;
+    /// The server turned `token` down: get a new one next time (unless another connection
+    /// already has).
+    pub async fn forget(&self, token: &str) {
+        let mut current = self.current.lock().await;
+        if current.as_ref().is_some_and(|(t, _)| t == token) {
+            *current = None;
+        }
     }
 }
 
