@@ -14,17 +14,15 @@ use crate::imap::Connection;
 pub struct ChunkedNewestFirst {
     pub chunk: u32,
     /// When each folder last had a full UID comparison (this session), by the wall clock (the
-    /// monotonic one stops while the computer sleeps), and the wake generation it was in.
-    verified: std::sync::Mutex<std::collections::HashMap<i64, (std::time::SystemTime, u64)>>,
+    /// monotonic one stops while the computer sleeps).
+    verified: std::sync::Mutex<std::collections::HashMap<i64, std::time::SystemTime>>,
 }
 
-/// After the computer wakes, folders up to this size get a full UID comparison on their next
-/// sync (the Inbox is a few hundred; a SEARCH of 10k UIDs is ~70 KB): whatever changed while
-/// asleep is then certain to be seen, even changes that cancel out in the counts.
-const VERIFY_AFTER_WAKE_MAX: u32 = 10_000;
-
-/// How often a folder gets a full UID comparison, which also catches errors that cancel out
-/// in counts (a stale message plus a missing one) that `reconcile_walk` can't see.
+/// How often a folder gets a full UID comparison. Changes on the server always show in the
+/// counts (new mail gets UIDs above ours and is fetched first; a removal leaves us one over),
+/// so `reconcile_walk` finds them. This is a safety net for our own errors: a message we
+/// failed to store plus a stale one cancel out in the counts, and only a full comparison
+/// sees them.
 const FULL_VERIFY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 impl ChunkedNewestFirst {
@@ -32,11 +30,12 @@ impl ChunkedNewestFirst {
         ChunkedNewestFirst { chunk, verified: Default::default() }
     }
 
-    fn full_verify_due(&self, folder_id: i64, stored: u32) -> bool {
-        self.verified.lock().unwrap().get(&folder_id).is_none_or(|&(at, wake)| {
-            at.elapsed().unwrap_or_default() >= FULL_VERIFY_INTERVAL
-                || (wake != crate::imap::wake_generation() && stored <= VERIFY_AFTER_WAKE_MAX)
-        })
+    fn full_verify_due(&self, folder_id: i64) -> bool {
+        self.verified
+            .lock()
+            .unwrap()
+            .get(&folder_id)
+            .is_none_or(|at| at.elapsed().unwrap_or_default() >= FULL_VERIFY_INTERVAL)
     }
 }
 
@@ -130,7 +129,7 @@ impl ChunkedNewestFirst {
             //    and then by walking newest-first until our view and the server's line up
             //    (see `reconcile_walk`).
             let stored = store.local_uid_count(folder.id)?;
-            let full = state.complete && self.full_verify_due(folder.id, stored);
+            let full = state.complete && self.full_verify_due(folder.id);
             if full || (state.complete && stored != exists) {
                 let local = store.local_uids(folder.id)?;
                 let (gone, missing) = if full {
@@ -139,7 +138,7 @@ impl ChunkedNewestFirst {
                     self.verified
                         .lock()
                         .unwrap()
-                        .insert(folder.id, (std::time::SystemTime::now(), crate::imap::wake_generation()));
+                        .insert(folder.id, std::time::SystemTime::now());
                     (mine.difference(&server).copied().collect(), server.difference(&mine).copied().collect())
                 } else {
                     match reconcile_walk(conn, &local, exists, self.chunk, MAX_WALK_STEPS).await? {
