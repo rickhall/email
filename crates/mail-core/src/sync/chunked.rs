@@ -62,6 +62,11 @@ impl ChunkedNewestFirst {
         let mut state = store.folder_sync_state(folder.id)?;
 
         let mb = conn.select(&folder.raw_name).await?;
+        if folder.role == Some(crate::model::FolderRole::Inbox) {
+            // Also noted by the Inbox watcher (with an event); this covers servers without IDLE.
+            let keywords = mb.permanent_flags.iter().any(|f| matches!(f, async_imap::types::Flag::MayCreate));
+            store.set_keywords_supported(ctx.account.id, keywords)?;
+        }
         let uidvalidity = mb.uid_validity.unwrap_or(0);
         if state.uidvalidity != 0 && state.uidvalidity != uidvalidity {
             tracing::info!(folder = folder.raw_name, "UIDVALIDITY changed; resyncing folder");

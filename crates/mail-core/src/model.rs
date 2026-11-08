@@ -46,6 +46,9 @@ pub struct Account {
     pub smtp_port: Option<u16>,
     /// How it signs in (the window offers "Sign in again" or a password field accordingly).
     pub auth: AuthKind,
+    /// Whether its server keeps keywords we make up (tags, snooze times): `\*` in the Inbox's
+    /// PERMANENTFLAGS. None until the first sync has seen it. Exchange (Outlook) doesn't.
+    pub keywords: Option<bool>,
 }
 
 /// How an account signs in.
@@ -186,6 +189,8 @@ pub struct MessageSummary {
     pub send_failed: bool,
     /// A draft being written here (open it with `open_draft`).
     pub draft_id: Option<i64>,
+    /// Snoozed (or woken) until then, Unix seconds (see `tags::snooze_keyword`).
+    pub snoozed_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +239,8 @@ pub struct ThreadSummary {
     /// The newest message is ours, waiting to be sent / refused by the server.
     pub sending: bool,
     pub send_failed: bool,
+    /// The latest snooze time among its messages (see `MessageSummary::snoozed_until`).
+    pub snoozed_until: Option<i64>,
 }
 
 /// A conversation as shown in the reader, plus how many of its messages the scope hid.

@@ -452,42 +452,23 @@ impl Core {
     /// the outbox (moves after the undo window). Returns the op id to pass to `undo_action`.
     pub fn apply_action(&self, action: actions::Action, message_ids: &[i64], folder_id: i64) -> Result<ActionResult> {
         let (account_id, _) = self.store.folder(folder_id)?.ok_or_else(|| anyhow!("unknown folder"))?;
-        let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
-        let gmail = account.provider == Provider::Gmail;
-        let planned = actions::plan(&self.store, account_id, gmail, action, message_ids, folder_id)?;
-        let snapshot = self.store.snapshot(message_ids)?;
-        let mut changed = self.store.apply_local(&planned.change)?;
-        // Rows show flags and tags, so every folder holding these messages refreshes, not only
-        // those whose counts changed (a tag or a non-Gmail star changes no count).
-        for id in message_ids {
-            changed.extend(self.store.message_folder_ids(*id)?);
+        let result = queue_action(&self.store, &self.events, action, message_ids, folder_id)?;
+        if result.op_id.is_some() {
+            if let Some(s) = self.running.lock().unwrap().get(&account_id) {
+                s.wake_outbox();
+            }
         }
-        changed.sort_unstable();
-        changed.dedup();
-        let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: changed });
-        let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
-        if planned.ops.is_empty() {
-            return Ok(ActionResult { op_id: None, undoable: false });
+        Ok(result)
+    }
+
+    /// The account's Snoozed folder, created on the server first if it has none.
+    pub async fn ensure_snooze_folder(&self, account_id: i64) -> Result<i64> {
+        if let Some(f) = actions::snooze_folder(&self.store.folders(account_id)?) {
+            return Ok(f.id);
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-        // Ops run in queue order among those due, so an op that looks its message up (a copy an
-        // earlier queued move put there) waits until everything queued before it is due too:
-        // a star right after a move otherwise reaches the server before the move does.
-        let mut not_before = now + planned.delay_ms;
-        if planned.ops.iter().any(|op| op.is_lookup()) {
-            not_before = not_before.max(self.store.last_op_due(account_id)?.unwrap_or(0));
-        }
-        let op_id = self.store.enqueue_ops(
-            account_id,
-            &serde_json::to_string(&planned.ops)?,
-            &serde_json::to_string(&snapshot)?,
-            &serde_json::to_string(&planned.folders)?,
-            not_before,
-        )?;
-        if let Some(s) = self.running.lock().unwrap().get(&account_id) {
-            s.wake_outbox();
-        }
-        Ok(ActionResult { op_id: Some(op_id), undoable: planned.delay_ms > 0 })
+        let sync = self.running.lock().unwrap().get(&account_id).map(|s| s.handle());
+        let sync = sync.ok_or_else(|| anyhow!("This account isn't connected."))?;
+        sync.create_snooze_folder().await
     }
 
     /// Undo an action that hasn't been sent yet (within the undo window).
@@ -996,4 +977,59 @@ impl Core {
         }
         out
     }
+}
+
+/// Apply an action locally and queue its server commands (the caller wakes the outbox). Shared
+/// by `Core::apply_action` and the sync's snooze waker.
+pub(crate) fn queue_action(
+    store: &Store,
+    events: &broadcast::Sender<CoreEvent>,
+    action: actions::Action,
+    message_ids: &[i64],
+    folder_id: i64,
+) -> Result<ActionResult> {
+    let (account_id, _) = store.folder(folder_id)?.ok_or_else(|| anyhow!("unknown folder"))?;
+    let account = store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
+    if action.needs_keywords() && account.keywords == Some(false) {
+        bail!("This account's mail server doesn't keep tags or snooze times.");
+    }
+    let gmail = account.provider == Provider::Gmail;
+    let woken = matches!(action, actions::Action::Wake | actions::Action::Unsnooze);
+    let planned = actions::plan(store, account_id, gmail, action, message_ids, folder_id)?;
+    let snapshot = store.snapshot(message_ids)?;
+    let mut changed = store.apply_local(&planned.change)?;
+    if woken {
+        // Back at the top of the Inbox, as if it had just arrived.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        let added: Vec<(i64, i64)> = planned.change.add.clone();
+        store.raise_entry_dates(&added, now)?;
+    }
+    // Rows show flags and tags, so every folder holding these messages refreshes, not only
+    // those whose counts changed (a tag or a non-Gmail star changes no count).
+    for id in message_ids {
+        changed.extend(store.message_folder_ids(*id)?);
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    let _ = events.send(CoreEvent::MessagesChanged { folder_ids: changed });
+    let _ = events.send(CoreEvent::FoldersChanged { account_id });
+    if planned.ops.is_empty() {
+        return Ok(ActionResult { op_id: None, undoable: false });
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    // Ops run in queue order among those due, so an op that looks its message up (a copy an
+    // earlier queued move put there) waits until everything queued before it is due too:
+    // a star right after a move otherwise reaches the server before the move does.
+    let mut not_before = now + planned.delay_ms;
+    if planned.ops.iter().any(|op| op.is_lookup()) {
+        not_before = not_before.max(store.last_op_due(account_id)?.unwrap_or(0));
+    }
+    let op_id = store.enqueue_ops(
+        account_id,
+        &serde_json::to_string(&planned.ops)?,
+        &serde_json::to_string(&snapshot)?,
+        &serde_json::to_string(&planned.folders)?,
+        not_before,
+    )?;
+    Ok(ActionResult { op_id: Some(op_id), undoable: planned.delay_ms > 0 })
 }

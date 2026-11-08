@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     smtp_host    TEXT,
     smtp_port    INTEGER,
     keep_attachments INTEGER NOT NULL DEFAULT 0, -- download whole messages (offline attachments)
-    auth         TEXT NOT NULL DEFAULT 'password' -- how it signs in: password | microsoft (OAuth)
+    auth         TEXT NOT NULL DEFAULT 'password', -- how it signs in: password | microsoft (OAuth)
+    keywords     INTEGER                -- server keeps custom keywords (\* in PERMANENTFLAGS); NULL: not seen yet
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -218,6 +219,8 @@ const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
     },
     // 8: accounts can sign in with Microsoft (OAuth) instead of a password
     |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN auth TEXT NOT NULL DEFAULT 'password';")?),
+    // 9: whether the server keeps custom keywords (tags, snooze)
+    |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN keywords INTEGER;")?),
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
@@ -705,10 +708,10 @@ impl Store {
             params![email, display_name, provider.as_str(), host, port],
         )?;
         let id: i64 = db.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))?;
-        let (smtp_host, smtp_port, auth) = db.query_row(
-            "SELECT smtp_host, smtp_port, auth FROM accounts WHERE id=?1",
+        let (smtp_host, smtp_port, auth, keywords) = db.query_row(
+            "SELECT smtp_host, smtp_port, auth, keywords FROM accounts WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?))),
+            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?), r.get(3)?)),
         )?;
         Ok(Account {
             id,
@@ -720,13 +723,22 @@ impl Store {
             smtp_host,
             smtp_port,
             auth,
+            keywords,
         })
+    }
+
+    /// Record whether the account's server keeps custom keywords; true if that changed.
+    pub fn set_keywords_supported(&self, account_id: i64, yes: bool) -> Result<bool> {
+        Ok(self.db().execute(
+            "UPDATE accounts SET keywords=?2 WHERE id=?1 AND keywords IS NOT ?2",
+            params![account_id, yes],
+        )? > 0)
     }
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth
+            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth, keywords
              FROM accounts ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -740,6 +752,7 @@ impl Store {
                 smtp_host: r.get(6)?,
                 smtp_port: r.get(7)?,
                 auth: AuthKind::parse(&r.get::<_, String>(8)?),
+                keywords: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -961,6 +974,7 @@ impl Store {
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
         // New rows whose body may be waiting in the stash (moved between folders).
         let mut restore: Vec<(i64, String)> = Vec::new();
         let mut db = self.db_for_sync(epoch)?;
@@ -1113,10 +1127,13 @@ impl Store {
                         id
                     }
                 };
-                entry.execute(params![folder_id, id, rec.uid, rec.date])?;
+                // A message woken from snooze sorts by when it came back, on every client.
+                let woken = crate::tags::snoozed_until(&crate::tags::join(&rec.keywords)).filter(|&t| t <= now);
+                let date = woken.map_or(rec.date, |t| rec.date.max(t));
+                entry.execute(params![folder_id, id, rec.uid, date])?;
 
                 if let Some(labels) = &rec.gm_labels {
-                    apply_gmail_labels(&tx, id, folder_id, rec.date, labels, label_folders, &mut changed)?;
+                    apply_gmail_labels(&tx, id, folder_id, date, labels, label_folders, &mut changed)?;
                 }
             }
         }
@@ -1321,6 +1338,7 @@ impl Store {
                 tags: crate::tags::visible(&r.get::<_, String>(9)?),
                 answered: flags & flags::ANSWERED != 0,
                 forwarded: crate::tags::is_forwarded(&r.get::<_, String>(9)?),
+                snoozed_until: crate::tags::snoozed_until(&r.get::<_, String>(9)?),
                 sending: r.get::<_, Option<bool>>(10)? == Some(false),
                 send_failed: r.get::<_, Option<bool>>(10)? == Some(true),
                 draft_id: r.get(11)?,
@@ -1410,6 +1428,7 @@ impl Store {
                 forwarded,
                 sending: latest.9 == Some(false),
                 send_failed: latest.9 == Some(true),
+                snoozed_until: rows.iter().filter_map(|r| crate::tags::snoozed_until(&r.8)).max(),
             });
         }
         Ok(ThreadPage { total, threads })
@@ -1459,6 +1478,7 @@ impl Store {
                     tags: crate::tags::visible(&r.get::<_, String>(14)?),
                     answered: flags & flags::ANSWERED != 0,
                     forwarded: crate::tags::is_forwarded(&r.get::<_, String>(14)?),
+                snoozed_until: crate::tags::snoozed_until(&r.get::<_, String>(14)?),
                     sending: r.get::<_, Option<bool>>(15)? == Some(false),
                     send_failed: r.get::<_, Option<bool>>(15)? == Some(true),
                     draft_id: r.get(16)?,
@@ -1556,6 +1576,7 @@ impl Store {
                 tags: crate::tags::visible(&r.get::<_, String>(10)?),
                 answered: flags & flags::ANSWERED != 0,
                 forwarded: crate::tags::is_forwarded(&r.get::<_, String>(10)?),
+                snoozed_until: crate::tags::snoozed_until(&r.get::<_, String>(10)?),
                 sending: r.get::<_, Option<bool>>(11)? == Some(false),
                 send_failed: r.get::<_, Option<bool>>(11)? == Some(true),
                 draft_id: r.get(12)?,
@@ -2846,6 +2867,41 @@ impl Store {
         Ok(found.unwrap_or_else(|| crate::tags::normalize(term)))
     }
 
+    /// Woken messages sort by when they came back: their new entries no earlier than `at`.
+    pub fn raise_entry_dates(&self, entries: &[(i64, i64)], at: i64) -> Result<()> {
+        let db = self.db();
+        let mut stmt = db.prepare_cached("UPDATE entries SET date=max(date, ?3) WHERE folder_id=?1 AND message_id=?2")?;
+        for (folder, id) in entries {
+            stmt.execute(params![folder, id, at])?;
+        }
+        Ok(())
+    }
+
+    /// Messages in the Snoozed folder whose wake time is at or before `now` (only copies the
+    /// server has: one still being moved in waits for its UID).
+    pub fn snoozed_due(&self, folder_id: i64, now: i64) -> Result<Vec<i64>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached(
+            "SELECT m.id, m.keywords FROM entries e JOIN messages m ON m.id = e.message_id
+             WHERE e.folder_id=?1 AND e.uid IS NOT NULL AND m.keywords LIKE '%$snooze-%'",
+        )?;
+        let rows = stmt.query_map([folder_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut due = Vec::new();
+        for row in rows {
+            let (id, keywords) = row?;
+            if crate::tags::snoozed_until(&keywords).is_some_and(|t| t <= now) {
+                due.push(id);
+            }
+        }
+        Ok(due)
+    }
+
+    /// The message's stored keywords (space-separated, normalised).
+    pub fn message_keywords(&self, id: i64) -> Result<String> {
+        let k: Option<String> = self.rdb().query_row("SELECT keywords FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(k.unwrap_or_default())
+    }
+
     pub fn message_tags(&self, id: i64) -> Result<Vec<String>> {
         let k: Option<String> = self.rdb().query_row("SELECT keywords FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
         Ok(k.map(|k| crate::tags::visible(&k)).unwrap_or_default())
@@ -3329,6 +3385,7 @@ mod tests {
             let db = Connection::open(dir.join("mail.db")).unwrap();
             db.execute_batch(&format!(
                 "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE accounts DROP COLUMN auth;
+                 ALTER TABLE accounts DROP COLUMN keywords;
                  ALTER TABLE messages DROP COLUMN attachments_stored;
                  PRAGMA user_version={BASE_VERSION};"
             ))

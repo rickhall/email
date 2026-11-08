@@ -6,7 +6,11 @@ All JSON is camelCase. Timestamps are unix seconds. IDs are numbers.
 
 ```ts
 type Provider = 'gmail' | 'outlook' | 'imap';
-interface Account { id: number; email: string; displayName: string; provider: Provider }
+interface Account {
+  id: number; email: string; displayName: string; provider: Provider;
+  auth: 'password' | 'microsoft';
+  keywords: boolean | null;  // server keeps keywords of our own (tags, snooze); null until its first sync. Outlook: false
+}
 
 type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive'
                 | 'all' | 'flagged' | 'important' | null;
@@ -27,6 +31,7 @@ interface MessageSummary {
   unread: boolean; flagged: boolean; hasAttachments: boolean;
   hasBody: boolean;        // full message downloaded locally
   tags: string[];          // tag keywords, e.g. ["$label2"] (see TagDef)
+  snoozedUntil?: number | null; // snoozed until (or woken at), Unix seconds: `$snooze-YYYYMMDDHHMM` (UTC) keyword
 }
 
 interface Addr { name: string | null; addr: string }
@@ -86,7 +91,10 @@ type Action =
   | { kind: 'move'; targetFolderId: number }
   | { kind: 'spam' } | { kind: 'notSpam' }
   | { kind: 'read' } | { kind: 'unread' } | { kind: 'flag' } | { kind: 'unflag' }
-  | { kind: 'tag'; keyword: string; on: boolean };  // add/remove a tag (IMAP keyword), sent at once
+  | { kind: 'tag'; keyword: string; on: boolean }  // add/remove a tag (IMAP keyword), sent at once
+  | { kind: 'snooze'; until: number }  // keyword with the time, then into the Snoozed folder (undoable); call ensure_snooze_folder first
+  | { kind: 'unsnooze' };  // back to the Inbox, unread (undoable). The core wakes due mail by itself the same way
+// Tags and snooze are refused for accounts whose server doesn't keep keywords (keywords: false).
 
 /** Tag definition. Tags are IMAP keywords on messages (Thunderbird-compatible: $label1..$label5
  *  are Important/Work/Personal/To Do/Later); names/colours are local. `defined: false` = a keyword
@@ -130,6 +138,7 @@ interface SyncStatus {
 | `delete_draft` | `{ id }` | — discards the draft and its copy in Drafts |
 | `open_compose` | `{ draftId }` | — opens (or focuses) the compose window `compose-<draftId>`, at the size the last compose window was left at |
 | `suggest_addresses` | `{ query, limit: number \| null }` | `Addr[]` — people from the stored mail (senders, and everyone the user wrote to) matching the start of an address, an address part or a name word; people written to rank first, then by how much and how recently. No-reply senders and the user's own addresses are left out |
+| `ensure_snooze_folder` | `{ accountId }` | `number` — the account's Snoozed folder ("Snoozed", or "Snoozed mail" where the server refuses that), created on the server and listed if missing |
 | `list_tags` | – | `TagDef[]` — definitions (by position) then undefined keywords seen on messages |
 | `set_tag` | `{ keyword: string \| null, name, color }` | `string` keyword — create (keyword null → Thunderbird-style keyword from the name) or rename/recolour |
 | `delete_tag` | `{ keyword }` | `void` — forgets the definition only (messages keep the keyword) |

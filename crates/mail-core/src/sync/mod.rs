@@ -199,6 +199,20 @@ impl Shared {
         let _ = self.events.send(e);
     }
 
+    /// The Inbox was selected: note whether the server keeps custom keywords (`\*` among its
+    /// permanent flags), which tags and snooze depend on.
+    pub(crate) fn note_keywords(&self, mb: &async_imap::types::Mailbox) {
+        let yes = mb.permanent_flags.iter().any(|f| matches!(f, async_imap::types::Flag::MayCreate));
+        match self.store.set_keywords_supported(self.account.id, yes) {
+            Ok(true) => {
+                tracing::info!(keywords = yes, "server keyword support");
+                self.emit(CoreEvent::FoldersChanged { account_id: self.account.id });
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("recording keyword support: {e:#}"),
+        }
+    }
+
     /// New mail arrived: download it now, and announce the unread messages.
     fn new_mail(&self, folder_id: i64, uids: &[u32]) {
         let Ok(ids) = self.store.message_ids_for_uids(folder_id, uids) else { return };
@@ -361,6 +375,7 @@ impl AccountSync {
             tokio::spawn(send_task(shared.clone())),
             tokio::spawn(supervise("idle-inbox", shared.clone(), |s| Box::pin(idle_task(s, false)))),
             tokio::spawn(supervise("idle-focus", shared.clone(), |s| Box::pin(idle_task(s, true)))),
+            tokio::spawn(snooze_task(shared.clone())),
         ];
         if shared.options.download_bodies {
             for i in 0..shared.options.body_workers {
@@ -381,6 +396,11 @@ impl AccountSync {
     /// Fetch this message's body ahead of everything else.
     pub fn request_body(&self, message_id: i64) {
         let _ = self.urgent_tx.send(Job::Body(message_id));
+    }
+
+    /// For work that outlives the lock on the running accounts (see `SyncHandle`).
+    pub fn handle(&self) -> SyncHandle {
+        SyncHandle(self.shared.clone())
     }
 
     /// A user action was queued: send it when due.
@@ -755,6 +775,88 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
     Ok(())
 }
 
+/// A running account's sync, for async requests that use its connection settings.
+pub struct SyncHandle(Arc<Shared>);
+
+impl SyncHandle {
+    /// Create the Snoozed folder on the server (the first of `SNOOZE_FOLDER_NAMES` it accepts)
+    /// and list it here; its id. One that exists already is just listed.
+    pub async fn create_snooze_folder(&self) -> Result<i64> {
+        use crate::actions::{SNOOZE_FOLDER_NAMES, snooze_folder};
+        let shared = &self.0;
+        let account_id = shared.account.id;
+        let folders = shared.store.folders(account_id)?;
+        if let Some(f) = snooze_folder(&folders) {
+            return Ok(f.id);
+        }
+        // Servers that keep every folder under INBOX (INBOX.Sent) want new ones there too.
+        let prefix = folders
+            .iter()
+            .filter(|f| f.role.is_some_and(|r| r != FolderRole::Inbox))
+            .find_map(|f| ["INBOX.", "INBOX/"].into_iter().find(|p| f.raw_name.starts_with(p)))
+            .unwrap_or("");
+        let mut conn = shared.connect().await?;
+        let mut refused = None;
+        for name in SNOOZE_FOLDER_NAMES {
+            let raw = format!("{prefix}{name}");
+            match conn.session.create(&raw).await {
+                Ok(()) => {
+                    let _ = conn.session.subscribe(&raw).await;
+                    tracing::info!(folder = raw, "created the Snoozed folder");
+                    refused = None;
+                    break;
+                }
+                Err(e) => {
+                    tracing::info!(folder = raw, "the server refused the Snoozed folder: {e}");
+                    refused = Some(e.to_string());
+                }
+            }
+        }
+        // The listing settles it (one refused as existing is there too).
+        let listed = conn.list_folders().await?;
+        conn.logout().await;
+        shared.store.sync_folder_list(account_id, &listed)?;
+        shared.emit(CoreEvent::FoldersChanged { account_id });
+        match snooze_folder(&shared.store.folders(account_id)?) {
+            Some(f) => Ok(f.id),
+            None => Err(anyhow::anyhow!("The server wouldn't create a Snoozed folder ({}).", refused.unwrap_or_default())),
+        }
+    }
+}
+
+/// Snoozed mail whose time has come goes back to the Inbox. Checked every 30 s by the wall clock,
+/// at once after the computer wakes (a time that passed while asleep comes right after), and
+/// whenever headers arrive (a message that reaches Snoozed already due).
+/// Several clients may wake the same message: their commands address it by UID, and a second
+/// MOVE or STORE of a message that already left does nothing.
+async fn snooze_task(shared: Arc<Shared>) {
+    let mut woke = imap::wake_watch();
+    loop {
+        if let Err(e) = wake_snoozed(&shared) {
+            tracing::warn!("waking snoozed mail: {e:#}");
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+            _ = woke.changed() => {}
+            _ = shared.new_headers.notified() => {}
+        }
+    }
+}
+
+fn wake_snoozed(shared: &Shared) -> Result<()> {
+    let folders = shared.store.folders(shared.account.id)?;
+    let Some(folder) = crate::actions::snooze_folder(&folders) else { return Ok(()) };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let due = shared.store.snoozed_due(folder.id, now)?;
+    if due.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(n = due.len(), "waking snoozed mail");
+    crate::queue_action(&shared.store, &shared.events, crate::actions::Action::Wake, &due, folder.id)?;
+    shared.outbox.notify_one();
+    Ok(())
+}
+
 /// IMAP IDLE on one folder: the Inbox (`follow_focus == false`) or the folder on screen.
 /// A push is handled right here (see `sync_pushed_folder`). IDLE is restarted every 25
 /// minutes, under the 29-minute limit servers enforce. The focus watcher holds a connection
@@ -800,6 +902,9 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
             unreachable!();
         }
         let mb = guarded!(c, "selecting the watched folder", c.select(&raw))?;
+        if !follow_focus {
+            shared.note_keywords(&mb);
+        }
         // IDLE only reports what changes after it starts: whatever happened since the folder was
         // last synced (before the first watch, or while a push was being handled) would wait for
         // the next poll. Catch up first when the server has moved on: another message count, or

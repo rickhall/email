@@ -265,6 +265,13 @@ export const ComposeIcon = (p: P) => (
   </Svg>
 );
 
+export const ClockIcon = (p: P) => (
+  <Svg {...p}>
+    <circle cx="8" cy="8" r="5.8" />
+    <path d="M8 4.8V8l2.2 1.4" />
+  </Svg>
+);
+
 export const SlidersIcon = (p: P) => (
   <Svg {...p}>
     <path d="M2.5 5h5.75M11.75 5h1.75M2.5 11h1.75M7.75 11h5.75" />

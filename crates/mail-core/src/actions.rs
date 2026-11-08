@@ -49,15 +49,106 @@ pub enum Action {
     MarkReplied,
     /// After forwarding: `$Forwarded` on the original (Thunderbird's keyword).
     MarkForwarded,
+    /// Out of the Inbox (or wherever) into the Snoozed folder until `until` (Unix seconds),
+    /// with the time as a keyword on the message (see `tags::snooze_keyword`).
+    Snooze { until: i64 },
+    /// Back to the Inbox now, unread (the user asked; can be undone).
+    Unsnooze,
+    /// Back to the Inbox, unread: the time came (sent at once).
+    Wake,
+    /// A bookkeeping keyword (not a tag) on or off.
+    #[serde(skip)]
+    SetKeyword { keyword: String, on: bool },
 }
 
 impl Action {
     fn is_flags(&self) -> bool {
         matches!(
             self,
-            Action::Read | Action::Unread | Action::Flag | Action::Unflag | Action::Tag { .. } | Action::MarkReplied | Action::MarkForwarded
+            Action::Read
+                | Action::Unread
+                | Action::Flag
+                | Action::Unflag
+                | Action::Tag { .. }
+                | Action::MarkReplied
+                | Action::MarkForwarded
+                | Action::Wake
+                | Action::SetKeyword { .. }
         )
     }
+
+    /// It needs a server that keeps keywords we make up (`Account::keywords`).
+    pub fn needs_keywords(&self) -> bool {
+        matches!(self, Action::Tag { on: true, .. } | Action::Snooze { .. })
+    }
+}
+
+/// Names the Snoozed folder may have (the second where the server refuses the first, e.g. as
+/// one of its own).
+pub const SNOOZE_FOLDER_NAMES: [&str; 2] = ["Snoozed", "Snoozed mail"];
+
+/// The account's Snoozed folder: one of `SNOOZE_FOLDER_NAMES` at the top (or under INBOX, on
+/// servers that keep every folder there).
+pub fn snooze_folder(folders: &[Folder]) -> Option<&Folder> {
+    SNOOZE_FOLDER_NAMES.iter().find_map(|name| {
+        folders.iter().find(|f| {
+            f.selectable
+                && f.role.is_none()
+                && f.path.last().is_some_and(|l| l == name)
+                && (f.path.len() == 1 || (f.path.len() == 2 && f.path[0].eq_ignore_ascii_case("INBOX")))
+        })
+    })
+}
+
+/// Several plans as one (their commands in order).
+fn merge(parts: Vec<Planned>, delay_ms: i64) -> Planned {
+    let mut out = Planned { change: LocalChange::default(), ops: vec![], folders: vec![], delay_ms };
+    for p in parts {
+        out.change.message_ids.extend(p.change.message_ids);
+        out.change.remove.extend(p.change.remove);
+        out.change.add.extend(p.change.add);
+        out.change.flags.extend(p.change.flags);
+        out.change.tags.extend(p.change.tags);
+        out.ops.extend(p.ops);
+        out.folders.extend(p.folders);
+    }
+    out.change.message_ids.sort_unstable();
+    out.change.message_ids.dedup();
+    out.folders.sort_unstable();
+    out.folders.dedup();
+    out
+}
+
+/// Snooze: the wake time as a keyword (replacing an earlier one), then into the Snoozed folder.
+/// The keyword goes first, so on servers where keywords belong to a folder's copy it moves along.
+fn plan_snooze(store: &Store, account_id: i64, gmail: bool, until: i64, ids: &[i64], context: i64) -> Result<Planned> {
+    let folders = store.folders(account_id)?;
+    let target = snooze_folder(&folders).ok_or_else(|| anyhow!("This account has no Snoozed folder."))?;
+    let keyword = crate::tags::snooze_keyword(until);
+    let mut parts = Vec::new();
+    for &id in ids {
+        for old in crate::tags::parse(&store.message_keywords(id)?) {
+            if crate::tags::snooze_time(&old).is_some() && old != keyword {
+                parts.push(plan(store, account_id, gmail, Action::SetKeyword { keyword: old, on: false }, &[id], context)?);
+            }
+        }
+    }
+    parts.push(plan(store, account_id, gmail, Action::SetKeyword { keyword, on: true }, ids, context)?);
+    if target.id != context {
+        parts.push(plan(store, account_id, gmail, Action::Move { target_folder_id: target.id }, ids, context)?);
+    }
+    Ok(merge(parts, UNDO_WINDOW_MS))
+}
+
+/// Back to the Inbox, unread (the keyword stays: it's when the message came back).
+fn plan_wake(store: &Store, account_id: i64, gmail: bool, now: bool, ids: &[i64], context: i64) -> Result<Planned> {
+    let folders = store.folders(account_id)?;
+    let inbox = find_role(&folders, FolderRole::Inbox, gmail).ok_or_else(|| anyhow!("This account has no Inbox."))?;
+    let mut parts = vec![plan(store, account_id, gmail, Action::Unread, ids, context)?];
+    if inbox.id != context {
+        parts.push(plan(store, account_id, gmail, Action::Move { target_folder_id: inbox.id }, ids, context)?);
+    }
+    Ok(merge(parts, if now { 0 } else { UNDO_WINDOW_MS }))
 }
 
 /// One server command, addressed by folder raw name and UID.
@@ -167,6 +258,12 @@ pub fn plan(
     message_ids: &[i64],
     context: i64,
 ) -> Result<Planned> {
+    match action {
+        Action::Snooze { until } => return plan_snooze(store, account_id, gmail, until, message_ids, context),
+        Action::Unsnooze => return plan_wake(store, account_id, gmail, false, message_ids, context),
+        Action::Wake => return plan_wake(store, account_id, gmail, true, message_ids, context),
+        _ => {}
+    }
     let folders = store.folders(account_id)?;
     let by_id: HashMap<i64, &Folder> = folders.iter().map(|f| (f.id, f)).collect();
     let ctx = *by_id.get(&context).ok_or_else(|| anyhow!("unknown folder"))?;
@@ -352,14 +449,14 @@ pub fn plan(
                     touched.insert(inbox.id);
                 }
             }
-            Action::Tag { .. } | Action::MarkForwarded => {
+            Action::Tag { .. } | Action::MarkForwarded | Action::SetKeyword { .. } => {
                 let (keyword, on) = match &action {
-                    Action::Tag { keyword, on } => (keyword.clone(), *on),
+                    Action::Tag { keyword, on } | Action::SetKeyword { keyword, on } => (keyword.clone(), *on),
                     _ => ("$Forwarded".to_string(), true),
                 };
                 let keyword = &keyword;
                 let k = crate::tags::normalize(keyword);
-                let is_marker = matches!(action, Action::MarkForwarded);
+                let is_marker = matches!(action, Action::MarkForwarded | Action::SetKeyword { .. });
                 if !is_marker && (!crate::tags::is_tag(&k) || k.chars().any(|c| !c.is_ascii_graphic() || "(){%*\"\\]".contains(c))) {
                     bail!("\"{keyword}\" can't be used as a tag.");
                 }
@@ -403,6 +500,8 @@ pub fn plan(
                     }
                 }
             }
+            // Planned above, from the actions here.
+            Action::Snooze { .. } | Action::Unsnooze | Action::Wake => unreachable!(),
         }
     }
 
@@ -898,6 +997,111 @@ mod tests {
         none_archive.store.upsert_headers(none_archive.acct, none_archive.id("INBOX"), &[rec(1, None, None, "c@x", 0)], &none).unwrap();
         let m = none_archive.store.message_ids_for_uids(none_archive.id("INBOX"), &[1]).unwrap()[0];
         assert!(plan(&none_archive.store, none_archive.acct, false, Action::Archive, &[m], none_archive.id("INBOX")).is_err());
+    }
+
+    #[test]
+    fn snooze_moves_with_the_time_and_wakes_back_unread() {
+        let env = Env::new(
+            "snooze",
+            Provider::Imap,
+            &[lf("INBOX", Some(FolderRole::Inbox)), lf("Snoozed", None), lf("Trash", Some(FolderRole::Trash))],
+        );
+        let none = HashMap::new();
+        let (inbox, snoozed) = (env.id("INBOX"), env.id("Snoozed"));
+        env.store.upsert_headers(env.acct, inbox, &[rec(7, None, None, "s@x", flags::SEEN)], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(inbox, &[7]).unwrap()[0];
+        let until = 1_794_236_400; // 2026-11-09 15:00 UTC
+        let kw = "$snooze-202611091500".to_string();
+
+        let p = plan(&env.store, env.acct, false, Action::Snooze { until }, &[msg], inbox).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Flags { folder: "INBOX".into(), uid: 7, flag: kw.clone(), on: true },
+                ServerOp::Move { folder: "INBOX".into(), uid: 7, target: "Snoozed".into() },
+            ]
+        );
+        assert_eq!(p.delay_ms, UNDO_WINDOW_MS);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["Snoozed"]);
+        let page = env.store.list_messages(snoozed, 0, 10).unwrap();
+        assert_eq!(page.messages[0].snoozed_until, Some(until));
+        assert!(page.messages[0].tags.is_empty(), "the time isn't a tag");
+
+        // Only once the server has it there (a UID), and only when due.
+        assert!(env.store.snoozed_due(snoozed, until).unwrap().is_empty());
+        let there = HeaderRecord { uid: 3, keywords: vec![kw.clone()], ..rec(7, None, None, "s@x", flags::SEEN) };
+        env.store.upsert_headers(env.acct, snoozed, &[there], &none).unwrap();
+        assert!(env.store.snoozed_due(snoozed, until - 60).unwrap().is_empty());
+        assert_eq!(env.store.snoozed_due(snoozed, until).unwrap(), vec![msg]);
+
+        // Snoozed again from there: the old time goes, the new one comes, no move.
+        let p = plan(&env.store, env.acct, false, Action::Snooze { until: until + 3600 }, &[msg], snoozed).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Flags { folder: "Snoozed".into(), uid: 3, flag: kw.clone(), on: false },
+                ServerOp::Flags { folder: "Snoozed".into(), uid: 3, flag: "$snooze-202611091600".into(), on: true },
+            ]
+        );
+
+        // Waking: unread first (the flag moves along), then back to the Inbox; sent at once.
+        let p = plan(&env.store, env.acct, false, Action::Wake, &[msg], snoozed).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Flags { folder: "Snoozed".into(), uid: 3, flag: "\\Seen".into(), on: false },
+                ServerOp::Move { folder: "Snoozed".into(), uid: 3, target: "INBOX".into() },
+            ]
+        );
+        assert_eq!(p.delay_ms, 0);
+        assert_eq!(plan(&env.store, env.acct, false, Action::Unsnooze, &[msg], snoozed).unwrap().delay_ms, UNDO_WINDOW_MS);
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["INBOX"]);
+
+        // No Snoozed folder: an error, not a guess.
+        let bare = Env::new("nosnooze", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        bare.store.upsert_headers(bare.acct, bare.id("INBOX"), &[rec(1, None, None, "t@x", 0)], &none).unwrap();
+        let m = bare.store.message_ids_for_uids(bare.id("INBOX"), &[1]).unwrap()[0];
+        assert!(plan(&bare.store, bare.acct, false, Action::Snooze { until }, &[m], bare.id("INBOX")).is_err());
+    }
+
+    #[test]
+    fn gmail_snooze_is_a_label_change() {
+        let env = Env::new(
+            "gsnooze",
+            Provider::Gmail,
+            &[
+                lf("INBOX", Some(FolderRole::Inbox)),
+                lf("[Gmail]/All Mail", Some(FolderRole::All)),
+                lf("[Gmail]/Trash", Some(FolderRole::Trash)),
+                lf("Snoozed", None),
+            ],
+        );
+        let folders = env.store.folders(env.acct).unwrap();
+        let labels = crate::sync::gmail_label_map(&folders);
+        let r = rec(900, Some(1), Some(&["\\Inbox"]), "g@x", 0);
+        env.store.upsert_headers(env.acct, env.id("[Gmail]/All Mail"), &[r.clone()], &labels).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("[Gmail]/All Mail"), &[900]).unwrap()[0];
+        let p = plan(&env.store, env.acct, true, Action::Snooze { until: 1_794_236_400 }, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Flags { folder: "[Gmail]/All Mail".into(), uid: 900, flag: "$snooze-202611091500".into(), on: true },
+                ServerOp::Labels { folder: "[Gmail]/All Mail".into(), uid: 900, add: vec!["Snoozed".into()], remove: vec!["\\Inbox".into()] },
+            ]
+        );
+    }
+
+    #[test]
+    fn woken_mail_sorts_by_when_it_came_back() {
+        let env = Env::new("woken", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
+        let none = HashMap::new();
+        // Another client woke it on 1 Nov 2026 (in the past); it was sent long before.
+        let r = HeaderRecord { keywords: vec!["$snooze-202611010900".into()], ..rec(5, None, None, "w@x", 0) };
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[r, rec(6, None, None, "v@x", 0)], &none).unwrap();
+        let page = env.store.list_messages(env.id("INBOX"), 0, 10).unwrap();
+        assert_eq!(page.messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["m5", "m6"]);
     }
 
     #[test]

@@ -177,6 +177,11 @@ async fn remove_attachments(core: State<'_, Arc<Core>>, account_id: i64) -> Res<
 }
 
 #[tauri::command]
+async fn ensure_snooze_folder(core: State<'_, Arc<Core>>, account_id: i64) -> Res<i64> {
+    core.ensure_snooze_folder(account_id).await.map_err(err)
+}
+
+#[tauri::command]
 async fn set_display_name(core: State<'_, Arc<Core>>, account_id: i64, name: String) -> Res<()> {
     core.set_display_name(account_id, &name).map_err(err)
 }
@@ -913,6 +918,7 @@ pub fn run() {
             set_tag,
             delete_tag,
             notify::set_notifications,
+            ensure_snooze_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

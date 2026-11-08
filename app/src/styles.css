@@ -3277,6 +3277,51 @@ html.macos .app.rail-mode .search-bar {
   margin-right: 2px;
 }
 
+/* snooze menu */
+.snooze-menu .vm-section {
+  padding-left: 8px;
+}
+.snooze-when {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.vm-item:hover .snooze-when,
+.vm-item:focus-visible .snooze-when {
+  color: var(--on-accent);
+}
+.snooze-custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 2px 8px;
+}
+.snooze-custom input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font: inherit;
+  font-size: 12px;
+}
+.snooze-custom .btn {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+}
+/* list rows of snoozed mail: when it comes back, in the date's place */
+.row-date.snoozed {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+}
+.act-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: none;
+}
+
 /* tag menu */
 .tag-menu .vm-item {
   gap: 7px;

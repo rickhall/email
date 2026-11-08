@@ -9,6 +9,8 @@ export interface Account {
   provider: Provider;
   /** how it signs in: a password (kept in the keychain) or Microsoft's sign-in page */
   auth: 'password' | 'microsoft';
+  /** its server keeps keywords we make up (tags, snooze); null until the first sync tells */
+  keywords: boolean | null;
 }
 
 export type FolderRole =
@@ -59,6 +61,8 @@ export interface MessageSummary {
   sendFailed: boolean;
   /** a draft being written here (open it in a compose window) */
   draftId: number | null;
+  /** snoozed until (or woken at), Unix seconds */
+  snoozedUntil?: number | null;
 }
 
 export interface Addr {
@@ -131,6 +135,8 @@ export interface ThreadSummary {
   /** the newest message is ours, waiting to be sent / refused by the server */
   sending: boolean;
   sendFailed: boolean;
+  /** the latest snooze time among its messages, Unix seconds */
+  snoozedUntil?: number | null;
 }
 
 /** get_thread result: the selected messages plus how many the scope hid. */
@@ -193,7 +199,11 @@ export type Action =
   | { kind: 'unread' }
   | { kind: 'flag' }
   | { kind: 'unflag' }
-  | { kind: 'tag'; keyword: string; on: boolean };
+  | { kind: 'tag'; keyword: string; on: boolean }
+  /** into the Snoozed folder until `until` (Unix seconds); see ensure_snooze_folder */
+  | { kind: 'snooze'; until: number }
+  /** back to the Inbox now, unread */
+  | { kind: 'unsnooze' };
 export type ActionKind = Action['kind'];
 
 /** Tag definition. Tags are IMAP keywords on messages (Thunderbird-compatible: $label1..$label5).
@@ -408,6 +418,7 @@ export interface CommandMap {
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   set_display_name: { args: { accountId: number; name: string }; ret: void };
   set_notifications: { args: { enabled: boolean }; ret: void };
+  ensure_snooze_folder: { args: { accountId: number }; ret: number };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };
   ui_log: { args: { message: string }; ret: void };

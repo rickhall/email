@@ -1,11 +1,13 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { hint } from '../lib/shortcuts';
 import { Portal } from 'solid-js/web';
-import type { Folder, FolderRole } from '../api';
+import { api, errorMessage, type Folder, type FolderRole } from '../api';
 import { definedTags, TagMenu } from './Tags';
+import { SnoozeMenu } from './Snooze';
+import { showToast } from './Toast';
 import { clearHeaderHandler, runAction, setHeaderHandler, type BarCommand } from '../lib/actions';
-import { foldersByAccount, folderById } from '../state';
-import { ArchiveIcon, DeleteForeverIcon, ForwardIcon, InboxIcon, JunkIcon, MoreIcon, MoveIcon, ReadIcon, ReplyAllIcon, ReplyIcon, RoleIcon, StarFilledIcon, StarIcon, TagIcon, TrashIcon, UnreadIcon } from './Icons';
+import { foldersByAccount, folderById, isSnoozeFolder, keywordsOk } from '../state';
+import { ArchiveIcon, ClockIcon, DeleteForeverIcon, ForwardIcon, InboxIcon, JunkIcon, MoreIcon, MoveIcon, ReadIcon, ReplyAllIcon, ReplyIcon, RoleIcon, StarFilledIcon, StarIcon, TagIcon, TrashIcon, UnreadIcon } from './Icons';
 import { startReply } from '../lib/compose';
 
 // ------------------------------------------------------------- popover placement
@@ -223,7 +225,18 @@ function useActions(t: () => ActionTarget | null) {
   };
   const inTrash = () => role() === 'trash' || role() === 'junk';
   const inSpam = () => role() === 'junk';
+  /** Tags and snooze need a server that keeps keywords of our own (not Outlook's). */
+  const canKeywords = () => {
+    const x = t();
+    return !!x && keywordsOk(x.folderId);
+  };
+  const inSnoozed = () => {
+    const x = t();
+    return !!x && isSnoozeFolder(folderById(x.folderId));
+  };
+  const noKeywords = () => showToast({ kind: 'error', text: NO_KEYWORDS });
   const [picker, setPicker] = createSignal<HTMLElement | null>(null);
+  const [snoozeMenu, setSnoozeMenu] = createSignal<HTMLElement | null>(null);
 
   async function command(c: BarCommand, anchor?: HTMLElement) {
     const x = t();
@@ -252,10 +265,17 @@ function useActions(t: () => ActionTarget | null) {
         if (anchor) setPicker(picker() ? null : anchor);
         return;
       case 'tag-menu':
+        if (!canKeywords()) return noKeywords();
         if (anchor) setTagMenu(tagMenu() ? null : anchor);
         return;
       case 'tag-clear':
+        if (!canKeywords()) return noKeywords();
         return clearTags();
+      case 'snooze':
+        if (inSnoozed()) return runAction({ kind: 'unsnooze' }, base);
+        if (!canKeywords()) return noKeywords();
+        if (anchor) setSnoozeMenu(snoozeMenu() ? null : anchor);
+        return;
       case 'reply':
       case 'replyAll':
       case 'forward':
@@ -263,6 +283,7 @@ function useActions(t: () => ActionTarget | null) {
         return;
       default: {
         // tag-N: toggle the Nth defined tag
+        if (!canKeywords()) return noKeywords();
         const t = definedTags()[Number(c.slice(4)) - 1];
         if (t) toggleTag(t.keyword, !x.tagSets.every((s) => s.includes(t.keyword)));
         return;
@@ -303,6 +324,32 @@ function useActions(t: () => ActionTarget | null) {
       />
     );
   };
+  const snoozeMenuEl = () => {
+    const a = snoozeMenu();
+    const x = t();
+    const f = x ? folderById(x.folderId) : undefined;
+    if (!a || !x || !f) return null;
+    return (
+      <SnoozeMenu
+        anchor={a}
+        onClose={(refocus) => {
+          setSnoozeMenu(null);
+          if (refocus) a.focus();
+        }}
+        onPick={async (until) => {
+          setSnoozeMenu(null);
+          try {
+            // Made on the server the first time (a moment's wait, once per account).
+            await api.ensureSnoozeFolder(f.accountId);
+          } catch (e) {
+            showToast({ kind: 'error', text: errorMessage(e) });
+            return;
+          }
+          void runAction({ kind: 'snooze', until }, { ids: x.ids, folderId: x.folderId, advance: x.advance });
+        }}
+      />
+    );
+  };
   const pickerEl = () => {
     const a = picker();
     const x = t();
@@ -324,10 +371,20 @@ function useActions(t: () => ActionTarget | null) {
       />
     );
   };
-  return { command, inTrash, inSpam, pickerEl, tagMenuEl, toggleTag };
+  return { command, inTrash, inSpam, canKeywords, inSnoozed, pickerEl, tagMenuEl, snoozeMenuEl, toggleTag };
 }
 
-function Btn(props: { label: string; key?: string; onClick: (el: HTMLButtonElement) => void; children: any; ref?: (el: HTMLButtonElement) => void; danger?: boolean }) {
+const NO_KEYWORDS = "This account's mail server doesn't keep tags or snooze times.";
+
+function Btn(props: {
+  label: string;
+  key?: string;
+  onClick: (el: HTMLButtonElement) => void;
+  children: any;
+  ref?: (el: HTMLButtonElement) => void;
+  danger?: boolean;
+  disabled?: boolean;
+}) {
   let el!: HTMLButtonElement;
   return (
     <button
@@ -337,6 +394,7 @@ function Btn(props: { label: string; key?: string; onClick: (el: HTMLButtonEleme
       }}
       class="act-btn"
       classList={{ danger: !!props.danger }}
+      disabled={props.disabled}
       aria-label={props.label}
       title={props.key ? `${props.label} (${props.key})` : props.label}
       onClick={(e) => {
@@ -354,7 +412,8 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
   const a = useActions(() => props.target);
   let moveBtn!: HTMLButtonElement;
   let tagBtn!: HTMLButtonElement;
-  const handler = (c: BarCommand) => void a.command(c, c === 'tag-menu' ? tagBtn : moveBtn);
+  let snoozeBtn!: HTMLButtonElement;
+  const handler = (c: BarCommand) => void a.command(c, c === 'tag-menu' ? tagBtn : c === 'snooze' ? snoozeBtn : moveBtn);
   setHeaderHandler(handler);
   onCleanup(() => clearHeaderHandler(handler));
   const x = () => props.target;
@@ -410,11 +469,28 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
           <StarFilledIcon class="icon starred" />
         </Show>
       </Btn>
-      <Btn label="Tag" key={`${hint('tag-n')}, ${hint('tag-clear')}`} ref={(e) => (tagBtn = e)} onClick={(el) => void a.command('tag-menu', el)}>
+      {/* Same place either way: Unsnooze in the Snoozed folder; off where the server can't keep the time. */}
+      <Btn
+        label={a.inSnoozed() ? 'Unsnooze' : a.canKeywords() ? 'Snooze…' : `Snooze: ${NO_KEYWORDS}`}
+        key={a.canKeywords() || a.inSnoozed() ? hint('snooze') : undefined}
+        disabled={!!x() && !a.inSnoozed() && !a.canKeywords()}
+        ref={(e) => (snoozeBtn = e)}
+        onClick={(el) => void a.command('snooze', el)}
+      >
+        <ClockIcon />
+      </Btn>
+      <Btn
+        label={a.canKeywords() ? 'Tag' : `Tags: ${NO_KEYWORDS}`}
+        key={a.canKeywords() ? `${hint('tag-n')}, ${hint('tag-clear')}` : undefined}
+        disabled={!!x() && !a.canKeywords()}
+        ref={(e) => (tagBtn = e)}
+        onClick={(el) => void a.command('tag-menu', el)}
+      >
         <TagIcon />
       </Btn>
       {a.pickerEl()}
       {a.tagMenuEl()}
+      {a.snoozeMenuEl()}
     </div>
   );
 }
@@ -446,6 +522,8 @@ export function CardActions(props: { target: ActionTarget }) {
             anchor={anchor()}
             target={props.target}
             inSpam={a.inSpam()}
+            canKeywords={a.canKeywords()}
+            inSnoozed={a.inSnoozed()}
             onClose={(refocus) => {
               setMenu(null);
               if (refocus) moreBtn.focus();
@@ -459,12 +537,21 @@ export function CardActions(props: { target: ActionTarget }) {
       </Show>
       {a.pickerEl()}
       {a.tagMenuEl()}
+      {a.snoozeMenuEl()}
     </span>
   );
 }
 
 const MENU_W = 190;
-function CardMenu(props: { anchor: HTMLElement; target: ActionTarget; inSpam: boolean; onClose: (refocus: boolean) => void; onCommand: (c: BarCommand) => void }) {
+function CardMenu(props: {
+  anchor: HTMLElement;
+  target: ActionTarget;
+  inSpam: boolean;
+  canKeywords: boolean;
+  inSnoozed: boolean;
+  onClose: (refocus: boolean) => void;
+  onCommand: (c: BarCommand) => void;
+}) {
   let el: HTMLDivElement | undefined;
   const [pos, setPos] = createSignal(placeNear(props.anchor, MENU_W, 140));
   const reposition = () => setPos(placeNear(props.anchor, MENU_W, el?.offsetHeight || 140));
@@ -475,15 +562,18 @@ function CardMenu(props: { anchor: HTMLElement; target: ActionTarget; inSpam: bo
       el?.querySelector<HTMLElement>('.vm-item')?.focus();
     }),
   );
-  const items: [BarCommand, () => string][] = [
+  const all: [BarCommand, () => string][] = [
     ['replyAll', () => 'Reply all'],
     ['forward', () => 'Forward'],
     ['move', () => 'Move to…'],
     ['tag-menu', () => 'Tag…'],
+    ['snooze', () => (props.inSnoozed ? 'Unsnooze' : 'Snooze…')],
     ['spam', () => (props.inSpam ? 'Not spam' : 'Spam')],
     ['unread', () => (props.target.anyUnread ? 'Mark as read' : 'Mark as unread')],
     ['star', () => (props.target.starred ? 'Unstar' : 'Star')],
   ];
+  // Tags and snooze only where the server keeps them (Unsnooze always, in Snoozed).
+  const items = all.filter(([c]) => props.canKeywords || (c === 'snooze' ? props.inSnoozed : c !== 'tag-menu'));
   return (
     <Portal>
       <div

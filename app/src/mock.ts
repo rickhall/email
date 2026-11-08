@@ -681,7 +681,15 @@ export function createMockBackend(): Backend {
   }
 
   function createAccount(email: string, displayName: string, provider: Provider, specs: FolderSpec[]): Account {
-    const acc: Account = { id: nextAccountId++, email, displayName, provider, auth: provider === 'outlook' ? 'microsoft' : 'password' };
+    const acc: Account = {
+      id: nextAccountId++,
+      email,
+      displayName,
+      provider,
+      auth: provider === 'outlook' ? 'microsoft' : 'password',
+      // Exchange doesn't keep keywords of our own (no tags or snooze there).
+      keywords: provider !== 'outlook',
+    };
     accounts.push(acc);
     const me: Person = { name: displayName, addr: email };
     const rnd = mulberry32(acc.id * 7919);
@@ -858,6 +866,7 @@ export function createMockBackend(): Backend {
       forwarded: newestInFolder.forwarded,
       sending: newestInFolder.sending,
       sendFailed: newestInFolder.sendFailed,
+      snoozedUntil: Math.max(0, ...all.map((m) => m.snoozedUntil ?? 0)) || null,
     };
   }
 
@@ -1220,6 +1229,10 @@ export function createMockBackend(): Backend {
     return undefined;
   }
   /** Move (or with `to` null, delete) messages; returns a rollback. Emits once. */
+  function snoozeFolder(accountId: number): Folder | undefined {
+    return [...folders.values()].find((f) => f.accountId === accountId && f.role === null && f.path.length === 1 && f.path[0] === 'Snoozed');
+  }
+
   function relocate(ms: MessageSummary[], to: Folder | null): () => void {
     const moved: { m: MessageSummary; from: Folder }[] = [];
     const touched = new Set<number>();
@@ -1300,6 +1313,15 @@ export function createMockBackend(): Backend {
         return flagChange((m) => (m.flagged = true));
       case 'unflag':
         return flagChange((m) => (m.flagged = false));
+      case 'snooze':
+        target = snoozeFolder(ctx.accountId);
+        if (!target) throw 'This account has no Snoozed folder';
+        for (const m of ms) m.snoozedUntil = action.until;
+        break;
+      case 'unsnooze':
+        target = roleFolder(ctx.accountId, 'inbox');
+        for (const m of ms) m.unread = true;
+        break;
       case 'tag': {
         const k = action.keyword;
         const on = action.on;
@@ -1769,6 +1791,26 @@ export function createMockBackend(): Backend {
       return { messages: kept, freedBytes: kept * 458_000 };
     },
     async set_notifications() {},
+    async ensure_snooze_folder({ accountId }) {
+      await sleep(200);
+      const have = snoozeFolder(accountId);
+      if (have) return have.id;
+      const f: Folder = {
+        id: nextFolderId++,
+        accountId,
+        path: ['Snoozed'],
+        displayName: 'Snoozed',
+        role: null,
+        selectable: true,
+        total: 0,
+        unread: 0,
+        syncedCount: 0,
+      };
+      folders.set(f.id, f);
+      folderMsgs.set(f.id, []);
+      emit('folders-changed', { accountId });
+      return f.id;
+    },
     async set_display_name({ accountId, name }) {
       await sleep(3);
       const acc = accounts.find((x) => x.id === accountId);

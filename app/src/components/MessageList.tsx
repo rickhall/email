@@ -30,7 +30,21 @@ import {
   takeReveal,
   revealRequest,
 } from '../state';
-import { CheckIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
+import { CheckIcon, ClockIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
+import { fmtWake } from './Snooze';
+
+/** The row's date; for mail that's snoozed, when it comes back instead. */
+function RowDate(props: { date: number; snoozedUntil?: number | null }) {
+  const away = () => (props.snoozedUntil ?? 0) > Date.now() / 1000;
+  return (
+    <Show when={away()} fallback={<span class="row-date">{smartDate(props.date)}</span>}>
+      <span class="row-date snoozed" title={`Snoozed until ${new Date(props.snoozedUntil! * 1000).toLocaleString()}`}>
+        <ClockIcon size={11} />
+        {fmtWake(props.snoozedUntil!)}
+      </span>
+    </Show>
+  );
+}
 import { ViewMenuButton } from './ViewMenu';
 import { TagDots, tintStyle } from './Tags';
 import { climbToParent, FolderCrumbs, folderPathLabel } from './FolderSwitcher';
@@ -113,7 +127,7 @@ function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: Reg
             <FlagIcon size={12} class="icon flag" />
           </Show>
         </span>
-        <SendState m={props.m} fallback={<span class="row-date">{smartDate(props.m.date)}</span>} />
+        <SendState m={props.m} fallback={<RowDate date={props.m.date} snoozedUntil={props.m.snoozedUntil} />} />
       </div>
       <div class="row-line2">
         <span class="row-subject">
@@ -168,7 +182,7 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
             <FlagIcon size={12} class="icon flag" />
           </Show>
         </span>
-        <SendState m={props.t} fallback={<span class="row-date">{smartDate(props.t.date)}</span>} />
+        <SendState m={props.t} fallback={<RowDate date={props.t.date} snoozedUntil={props.t.snoozedUntil} />} />
       </div>
       <div class="row-line2">
         <span class="row-subject">{props.t.subject || '(no subject)'}</span>

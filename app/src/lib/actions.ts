@@ -211,6 +211,7 @@ export type BarCommand =
   | 'forward'
   | 'tag-menu'
   | 'tag-clear'
+  | 'snooze'
   | `tag-${number}`;
 let headerHandler: ((c: BarCommand) => void) | null = null;
 /** The reader header's action bar registers itself; shortcuts drive it. */
@@ -233,6 +234,7 @@ const BAR_COMMANDS: Record<string, BarCommand> = {
   'reply-all': 'replyAll',
   forward: 'forward',
   'tag-menu': 'tag-menu',
+  snooze: 'snooze',
 };
 
 /** Archive, delete, move, spam, read/unread, star, undo and the tag digits (keys from the

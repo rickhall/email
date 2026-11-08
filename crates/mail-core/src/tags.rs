@@ -47,7 +47,33 @@ pub fn normalize(k: &str) -> String {
 /// Whether a message keyword should be shown as a tag.
 pub fn is_tag(keyword: &str) -> bool {
     let k = normalize(keyword);
-    !k.is_empty() && !k.starts_with('\\') && !NOT_TAGS.contains(&k.as_str())
+    !k.is_empty() && !k.starts_with('\\') && !NOT_TAGS.contains(&k.as_str()) && !k.starts_with(SNOOZE_PREFIX)
+}
+
+// ------------------------------------------------------------- snooze
+
+/// A snoozed message carries `$snooze-YYYYMMDDHHMM` (UTC): when it comes back to the Inbox. It
+/// stays after waking, so every client sorts the message by when it came back (see
+/// `store::upsert_headers_since`); snoozing again replaces it.
+pub const SNOOZE_PREFIX: &str = "$snooze-";
+
+/// The keyword for waking at `until` (Unix seconds, rounded down to the minute).
+pub fn snooze_keyword(until: i64) -> String {
+    let t = chrono::DateTime::from_timestamp(until, 0).unwrap_or_default();
+    format!("{SNOOZE_PREFIX}{}", t.format("%Y%m%d%H%M"))
+}
+
+/// When a snooze keyword says to wake (Unix seconds); None for any other keyword.
+pub fn snooze_time(keyword: &str) -> Option<i64> {
+    let k = normalize(keyword);
+    let digits = k.strip_prefix(SNOOZE_PREFIX)?;
+    let t = chrono::NaiveDateTime::parse_from_str(digits, "%Y%m%d%H%M").ok()?;
+    Some(t.and_utc().timestamp())
+}
+
+/// The wake time among stored keywords (the latest, should there be several).
+pub fn snoozed_until(stored: &str) -> Option<i64> {
+    stored.split_whitespace().filter_map(snooze_time).max()
 }
 
 /// Parse the stored space-separated keyword list.
@@ -96,6 +122,19 @@ pub fn generated_color(keyword: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snooze_keywords() {
+        let t = 1_794_236_400; // 2026-11-09 15:00 UTC
+        assert_eq!(snooze_keyword(t), "$snooze-202611091500");
+        assert_eq!(snooze_keyword(t + 59), "$snooze-202611091500");
+        assert_eq!(snooze_time("$Snooze-202611091500"), Some(t));
+        assert_eq!(snooze_time("$snooze-junk"), None);
+        assert_eq!(snooze_time("$label1"), None);
+        assert_eq!(snoozed_until("$label1 $snooze-202611091500 $forwarded"), Some(t));
+        assert!(!is_tag("$snooze-202611091500"));
+        assert_eq!(visible("$label1 $snooze-202611091500"), vec!["$label1"]);
+    }
 
     #[test]
     fn keywords() {
