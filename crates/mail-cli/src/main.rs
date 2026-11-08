@@ -116,6 +116,22 @@ enum Cmd {
         #[arg(long)]
         show: bool,
     },
+    /// Which flags and keywords a server keeps on messages (EXAMINE, or --select). Signs in with
+    /// what the app stored in the keychain: the password, or (--microsoft) the refresh token,
+    /// which is used for one access token and never saved back.
+    Flags {
+        email: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value = "INBOX")]
+        folder: String,
+        #[arg(long)]
+        microsoft: bool,
+        /// SELECT instead of EXAMINE: servers only report PERMANENTFLAGS for a writable
+        /// selection. Nothing is changed either way.
+        #[arg(long)]
+        select: bool,
+    },
     /// Uses the password the app stored in the system keychain.
     Probe {
         email: String,
@@ -135,6 +151,39 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::Flags { email, host, folder, microsoft, select } => {
+            let secret = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let credentials = if microsoft {
+                let tokens = mail_core::oauth::microsoft_refresh(&secret).await?;
+                mail_core::imap::Credentials::OAuth2 { access_token: tokens.access_token }
+            } else {
+                mail_core::imap::Credentials::Password(secret)
+            };
+            let cfg = mail_core::imap::ServerConfig { host, port: 993, user: email.clone(), credentials };
+            let mut conn = mail_core::imap::connect(&cfg).await?;
+            let mb = if select { conn.session.select(&folder).await? } else { conn.session.examine(&folder).await? };
+            println!("{folder}: {} messages", mb.exists);
+            println!("FLAGS: {:?}", mb.flags);
+            println!("PERMANENTFLAGS: {:?}", mb.permanent_flags);
+            if mb.exists > 0 {
+                let fetches = conn.fetch_flags("1:*", None).await?;
+                let tagged: Vec<String> = fetches
+                    .iter()
+                    .filter(|f| !f.keywords.is_empty())
+                    .map(|f| format!("{}: {}", f.uid, f.keywords.join(" ")))
+                    .collect();
+                println!("messages with keywords: {} of {}", tagged.len(), fetches.len());
+                for t in tagged.iter().take(20) {
+                    println!("  uid {t}");
+                }
+            }
+            let caps = conn.session.capabilities().await?;
+            let mut names: Vec<String> = caps.iter().map(|c| format!("{c:?}")).collect();
+            names.sort();
+            println!("CAPABILITIES: {}", names.join(" "));
+            conn.logout().await;
+            Ok(())
+        }
         Cmd::Probe { email, folder, uid, host } => probe::run(&email, &folder, uid, &host).await,
         Cmd::ReconcileCheck { data_dir, email, folder, chunk } => {
             use std::collections::HashSet;
