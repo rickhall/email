@@ -251,6 +251,35 @@ export function takeUnreadOnArrival(folderId: number): { back: boolean } | null 
   return u?.folderId === folderId ? { back: u.back } : null;
 }
 
+// A notification was clicked: the folder's list opens this message once it's up (or, already
+// showing that folder, right away). A new object each time, so the same message works twice.
+const [revealRequest, setRevealRequest] = createSignal<{ folderId: number; id: number } | null>(null);
+
+/** For the folder's list: the message to open, if one was asked for there (taken once). */
+export function takeReveal(folderId: number): number | null {
+  const r = untrack(revealRequest);
+  if (r?.folderId !== folderId) return null;
+  setRevealRequest(null);
+  return r.id;
+}
+export { revealRequest };
+
+/** Show the folder and, if given, select this message in it. */
+export function revealMessage(folderId: number, id: number | null): void {
+  if (searchActive()) setSearchQuery('');
+  if (id != null) setRevealRequest({ folderId, id });
+  selectFolder(folderId);
+}
+
+// New-mail notifications (Settings › Notifications); the core is told at startup and on change.
+const [notifyNewMail, setNotifyNewMailSig] = createSignal<boolean>(loadPref<boolean>('notify.newMail', true) !== false);
+export { notifyNewMail };
+export function setNotifyNewMail(on: boolean): void {
+  setNotifyNewMailSig(on);
+  savePref('notify.newMail', on);
+  api.setNotifications(on).catch((e) => console.warn('set_notifications failed', e));
+}
+
 export function selectFolder(id: number): void {
   if (selectedFolderId() === id) return;
   batch(() => {
@@ -358,7 +387,9 @@ export async function initApp(): Promise<void> {
     events.onSyncStatus((s) => {
       setSyncByAccount(s.accountId, s);
     }),
+    events.onOpenMessage(({ folderId, id }) => revealMessage(folderId, id)),
   ];
+  api.setNotifications(notifyNewMail()).catch((e) => console.warn('set_notifications failed', e));
   await Promise.all(listening).catch((e) => console.warn('subscribing to core events', e));
 
   try {

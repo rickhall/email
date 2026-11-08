@@ -321,6 +321,12 @@ export interface ActionFailedPayload {
   message: string;
 }
 
+/** A new-mail notification was clicked: show the message (or, for several, the folder). */
+export interface OpenMessagePayload {
+  folderId: number;
+  id: number | null;
+}
+
 /** Native macOS menu bar commands. */
 export type MenuActionId = 'search' | 'toggle-threaded' | 'toggle-scope' | 'add-account' | 'shortcuts' | 'settings' | 'show-log' | 'new-message';
 export interface MenuActionPayload {
@@ -336,6 +342,7 @@ export interface EventMap {
   'message-sent': SendEventPayload;
   'send-failed': SendEventPayload;
   'action-failed': ActionFailedPayload;
+  'open-message': OpenMessagePayload;
 }
 
 export interface CommandMap {
@@ -400,6 +407,7 @@ export interface CommandMap {
   update_password: { args: { accountId: number; password: string }; ret: void };
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   set_display_name: { args: { accountId: number; name: string }; ret: void };
+  set_notifications: { args: { enabled: boolean }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };
   ui_log: { args: { message: string }; ret: void };

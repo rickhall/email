@@ -1768,6 +1768,7 @@ export function createMockBackend(): Backend {
       attachmentsMissing.set(accountId, total);
       return { messages: kept, freedBytes: kept * 458_000 };
     },
+    async set_notifications() {},
     async set_display_name({ accountId, name }) {
       await sleep(3);
       const acc = accounts.find((x) => x.id === accountId);

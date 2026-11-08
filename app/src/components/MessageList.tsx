@@ -27,6 +27,8 @@ import {
   setThreaded,
   selectFolderAtUnread,
   takeUnreadOnArrival,
+  takeReveal,
+  revealRequest,
 } from '../state';
 import { CheckIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
@@ -499,59 +501,75 @@ export function MessageList(props: {
     e.preventDefault();
   }
 
-  // Thunderbird-style: re-open this folder's remembered item (per view mode) when entering it.
-  if (!search) {
-    const remembered = rememberedSelection(folderId, threaded);
-    if (remembered != null && untrack(selectedId) == null) {
-      let disposed = false;
-      onCleanup(() => {
-        disposed = true;
-        setRestorePending(false);
+  // Open a message by id once its row is here: the folder's remembered item (per view mode,
+  // Thunderbird-style) when entering it, or one asked for by a notification (`force`: it
+  // replaces whatever is selected).
+  function openById(target: number, force: boolean) {
+    let disposed = false;
+    onCleanup(() => {
+      disposed = true;
+      setRestorePending(false);
+    });
+    setRestorePending(true);
+    // The empty reader stays quiet at most this long, then shows its hint as usual.
+    const quietTimer = setTimeout(() => setRestorePending(false), 150);
+    // index_of answers both questions at once: still in this folder, and where (any depth).
+    void api
+      .indexOf(folderId, target, threaded)
+      .catch(() => null)
+      .then(async (idx) => {
+        if (disposed) return;
+        if (idx == null) {
+          if (!force) rememberSelection(folderId, threaded, null);
+          return;
+        }
+        // The user may have picked something meanwhile: never override that.
+        if (!force && untrack(selectedId) != null) return;
+        // Scroll only if the row isn't on screen, then centred. (Before the first page lands the
+        // list may not be that long yet, so this is repeated once the row is here.)
+        const reveal = (i: number) => {
+          const top = LIST_PAD + i * ROW_HEIGHT;
+          if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
+            virt.scrollToIndex(i, { align: 'center' });
+          }
+        };
+        setSelIndex(idx);
+        if (idx < count()) reveal(idx);
+        // Open it as soon as its row (one page, fetched directly) is here.
+        let m = await model.rowAt(idx);
+        let k = idx;
+        if (disposed || (!force && untrack(selectedId) != null)) return;
+        if (m?.id !== target) {
+          // List shifted between index_of and the page fetch: find it nearby.
+          k = model.indexOfId(target);
+          m = k >= 0 ? model.row(k) : undefined;
+        }
+        if (!m) return;
+        setSelIndex(k);
+        select(m);
+        queueMicrotask(() => reveal(k));
+      })
+      .finally(() => {
+        clearTimeout(quietTimer);
+        if (!disposed) setRestorePending(false);
       });
-      setRestorePending(true);
-      // The empty reader stays quiet at most this long, then shows its hint as usual.
-      const quietTimer = setTimeout(() => setRestorePending(false), 150);
-      // index_of answers both questions at once: still in this folder, and where (any depth).
-      void api
-        .indexOf(folderId, remembered, threaded)
-        .catch(() => null)
-        .then(async (idx) => {
-          if (disposed) return;
-          if (idx == null) {
-            rememberSelection(folderId, threaded, null);
-            return;
-          }
-          // The user may have picked something meanwhile: never override that.
-          if (untrack(selectedId) != null) return;
-          // Scroll only if the row isn't on screen, then centred. (Before the first page lands the
-          // list may not be that long yet, so this is repeated once the row is here.)
-          const reveal = (i: number) => {
-            const top = LIST_PAD + i * ROW_HEIGHT;
-            if (top < scrollEl.scrollTop || top + ROW_HEIGHT > scrollEl.scrollTop + scrollEl.clientHeight) {
-              virt.scrollToIndex(i, { align: 'center' });
-            }
-          };
-          setSelIndex(idx);
-          if (idx < count()) reveal(idx);
-          // Open it as soon as its row (one page, fetched directly) is here.
-          let m = await model.rowAt(idx);
-          let k = idx;
-          if (disposed || untrack(selectedId) != null) return;
-          if (m?.id !== remembered) {
-            // List shifted between index_of and the page fetch: find it nearby.
-            k = model.indexOfId(remembered);
-            m = k >= 0 ? model.row(k) : undefined;
-          }
-          if (!m) return;
-          setSelIndex(k);
-          select(m);
-          queueMicrotask(() => reveal(k));
-        })
-        .finally(() => {
-          clearTimeout(quietTimer);
-          if (!disposed) setRestorePending(false);
-        });
-    }
+  }
+
+  if (!search) {
+    const revealed = takeReveal(folderId);
+    const target = revealed ?? rememberedSelection(folderId, threaded);
+    if (target != null && (revealed != null || untrack(selectedId) == null)) openById(target, revealed != null);
+    // Asked for while this folder is already showing.
+    createEffect(
+      on(
+        revealRequest,
+        () => {
+          const id = takeReveal(folderId);
+          if (id != null) openById(id, true);
+        },
+        { defer: true },
+      ),
+    );
   }
 
   // Lets message actions open the next older row (own actions) and re-sync after undo.

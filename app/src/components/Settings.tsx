@@ -17,16 +17,17 @@ import {
 } from '../lib/shortcuts';
 import { ChevronIcon, CloseIcon } from './Icons';
 import { api, errorMessage, events, type AccountDetails, type AccountStorage, type AttachmentCounts } from '../api';
-import { accounts, reloadAccounts } from '../state';
+import { accounts, notifyNewMail, reloadAccounts, setNotifyNewMail } from '../state';
 import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
 
 // Settings: sections on the left, the chosen one on the right (each with its own heading,
 // scrolling and buttons). Fixed size, so switching sections never moves the dialog.
 
-export type SettingsSection = 'accounts' | 'keyboard' | 'troubleshooting';
+export type SettingsSection = 'accounts' | 'notifications' | 'keyboard' | 'troubleshooting';
 const SECTIONS: { id: SettingsSection; title: string }[] = [
   { id: 'accounts', title: 'Accounts' },
+  { id: 'notifications', title: 'Notifications' },
   { id: 'keyboard', title: 'Keyboard' },
   { id: 'troubleshooting', title: 'Troubleshooting' },
 ];
@@ -522,6 +523,22 @@ function AccountsSection() {
 
 // ------------------------------------------------------------- troubleshooting
 
+function NotificationsSection() {
+  return (
+    <div class="st-body">
+      <Field label="New mail">
+        <label class="st-check">
+          <input type="checkbox" checked={notifyNewMail()} onChange={(e) => setNotifyNewMail(e.currentTarget.checked)} />
+          Show a notification when mail arrives in an Inbox
+        </label>
+      </Field>
+      <Field label="">
+        <span class="st-muted">Only while Email isn’t the window you’re using. Click one to open the message.</span>
+      </Field>
+    </div>
+  );
+}
+
 function TroubleshootingSection() {
   const [version] = createResource(() => api.appVersion().catch(() => ''));
   const [msg, setMsg] = createSignal<string | null>(null);
@@ -617,6 +634,9 @@ function Panel() {
           <Switch>
             <Match when={section() === 'accounts'}>
               <AccountsSection />
+            </Match>
+            <Match when={section() === 'notifications'}>
+              <NotificationsSection />
             </Match>
             <Match when={section() === 'keyboard'}>
               <KeyboardSection />

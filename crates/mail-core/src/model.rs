@@ -471,6 +471,18 @@ pub enum CoreEvent {
     /// A queued message couldn't be sent; it stays queued (with its draft) as failed.
     SendFailed { account_id: i64, id: i64, message: String },
     Sync(SyncStatus),
+    /// New unread mail arrived in a folder (not backfill), for notifications.
+    NewMail { account_id: i64, folder_id: i64, messages: Vec<NewMessage> },
+}
+
+/// A message that just arrived, as far as a notification needs it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMessage {
+    pub id: i64,
+    pub from_name: String,
+    pub from_addr: String,
+    pub subject: String,
 }
 
 /// Message flag bits stored in `messages.flags`.

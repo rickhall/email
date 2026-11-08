@@ -199,6 +199,21 @@ impl Shared {
         let _ = self.events.send(e);
     }
 
+    /// New mail arrived: download it now, and announce the unread messages.
+    fn new_mail(&self, folder_id: i64, uids: &[u32]) {
+        let Ok(ids) = self.store.message_ids_for_uids(folder_id, uids) else { return };
+        for &id in &ids {
+            let _ = self.urgent.send(Job::Body(id));
+        }
+        match self.store.unread_new_messages(&ids) {
+            Ok(messages) if !messages.is_empty() => {
+                self.emit(CoreEvent::NewMail { account_id: self.account.id, folder_id, messages })
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("reading new mail for notifications: {e:#}"),
+        }
+    }
+
     fn set_status(&self, phase: SyncPhase, folder_id: Option<i64>, done: u64, total: u64, message: Option<String>) {
         // Once credentials are rejected, nothing but that is reported until the restart.
         if phase != SyncPhase::Auth && self.auth_failed.load(std::sync::atomic::Ordering::SeqCst) {
@@ -627,13 +642,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 Progress::Headers { folder_id, done, total } => {
                     shared.set_status(SyncPhase::Headers, Some(folder_id), done, total, None);
                 }
-                Progress::NewMail { folder_id, uids } => {
-                    if let Ok(ids) = shared.store.message_ids_for_uids(folder_id, &uids) {
-                        for id in ids {
-                            let _ = shared.urgent.send(Job::Body(id));
-                        }
-                    }
-                }
+                Progress::NewMail { folder_id, uids } => shared.new_mail(folder_id, &uids),
             };
             let ctx = FolderCtx {
                 store: &shared.store,
@@ -859,13 +868,7 @@ async fn sync_pushed_folder(shared: &Shared, conn: &mut Connection, folder_id: i
             shared.counts_dirty.lock().unwrap().extend(ids.iter().copied().filter(|&id| id != folder_id));
             shared.emit(CoreEvent::MessagesChanged { folder_ids: ids });
         }
-        Progress::NewMail { folder_id, uids } => {
-            if let Ok(ids) = shared.store.message_ids_for_uids(folder_id, &uids) {
-                for id in ids {
-                    let _ = shared.urgent.send(Job::Body(id));
-                }
-            }
-        }
+        Progress::NewMail { folder_id, uids } => shared.new_mail(folder_id, &uids),
         Progress::Headers { .. } => {}
     };
     let ctx = FolderCtx {

@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
+mod notify;
 mod window_state;
 
 type Res<T> = Result<T, String>;
@@ -454,6 +455,9 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
                 Ok(CoreEvent::SendFailed { account_id, id, message }) => {
                     let _ = app.emit("send-failed", SendPayload { account_id, id, message: Some(message) });
                 }
+                Ok(CoreEvent::NewMail { account_id, folder_id, messages }) => {
+                    notify::new_mail(&app, &core, account_id, folder_id, messages);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     // Changes were dropped: say everything changed, so nothing on screen stays stale.
                     tracing::warn!("event forwarder lagged by {n}; refreshing everything");
@@ -833,6 +837,7 @@ pub fn run() {
             init_logging(app.path().app_log_dir().ok());
             tracing::info!(version = version_label(), "starting");
             create_main_window(app)?;
+            notify::init();
             if let Ok(dir) = opened_attachments_dir(app.handle()) {
                 let _ = std::fs::remove_dir_all(dir);
             }
@@ -907,6 +912,7 @@ pub fn run() {
             list_tags,
             set_tag,
             delete_tag,
+            notify::set_notifications,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1646,6 +1646,25 @@ impl Store {
         Ok(out)
     }
 
+    /// Of these messages, the unread ones (in the order given), for new-mail notifications.
+    pub fn unread_new_messages(&self, ids: &[i64]) -> Result<Vec<NewMessage>> {
+        let db = self.rdb();
+        let mut stmt =
+            db.prepare_cached("SELECT from_name, from_addr, subject, flags FROM messages WHERE id=?1")?;
+        let mut out = Vec::new();
+        for &id in ids {
+            let row = stmt
+                .query_row([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))
+                .optional()?;
+            if let Some((from_name, from_addr, subject, f)) = row
+                && f & flags::SEEN == 0
+            {
+                out.push(NewMessage { id, from_name, from_addr, subject });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn message_account(&self, id: i64) -> Result<Option<i64>> {
         Ok(self
             .rdb()

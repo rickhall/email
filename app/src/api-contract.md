@@ -140,6 +140,7 @@ interface SyncStatus {
 | `set_allow_remote` | `{ id, allow }` | `void` — remembers the "Load images" choice per message |
 | `message_in_folder` | `{ id, folderId }` | `boolean` — whether message `id` is (still) in folder `folderId`; `folderId: null` = whether it still exists anywhere in its account. Used to drop a selection that was archived/deleted elsewhere |
 | `set_read` | `{ id, read }` | `void` — updates locally at once (emits `messages-changed` + `folders-changed`), then syncs `\Seen` to the server |
+| `set_notifications` | `{ enabled }` | `void` — desktop notifications for new unread mail in an Inbox, shown while the main window isn't the one in use (sent at startup and on change; default on) |
 
 ## Events (`listen(name, cb)`)
 
@@ -149,6 +150,7 @@ interface SyncStatus {
 | `messages-changed` | `{ folderIds: number[] }` (throttled ~250ms) |
 | `message-ready` | `{ id }` |
 | `action-failed` | `{ message }` — a queued action was rejected by the server and rolled back locally |
+| `open-message` | `{ folderId, id: number \| null }` — a new-mail notification was clicked (the window is already up): show the folder and select message `id` (null: several messages, just the folder) |
 | `sync-status` | `SyncStatus` |
 
 ## Quick search query syntax

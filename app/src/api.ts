@@ -192,6 +192,8 @@ export const api = {
     call('set_keep_attachments', { accountId, keep }),
   /** The name mail from the account is sent under (empty: the address alone). */
   setDisplayName: (accountId: number, name: string): Promise<void> => call('set_display_name', { accountId, name }),
+  /** Desktop notifications for new mail in an Inbox (while the window isn't in use). */
+  setNotifications: (enabled: boolean): Promise<void> => call('set_notifications', { enabled }),
 };
 
 async function on<K extends EventName>(event: K, cb: (p: EventMap[K]) => void): Promise<() => void> {
@@ -207,5 +209,6 @@ export const events = {
   onMessageSent: (cb: (p: EventMap['message-sent']) => void) => on('message-sent', cb),
   onSendFailed: (cb: (p: EventMap['send-failed']) => void) => on('send-failed', cb),
   onActionFailed: (cb: (p: EventMap['action-failed']) => void) => on('action-failed', cb),
+  onOpenMessage: (cb: (p: EventMap['open-message']) => void) => on('open-message', cb),
   onMenuAction: (cb: (p: EventMap['menu-action']) => void) => on('menu-action', cb),
 };
