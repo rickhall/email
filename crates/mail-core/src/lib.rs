@@ -470,12 +470,19 @@ impl Core {
             return Ok(ActionResult { op_id: None, undoable: false });
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        // Ops run in queue order among those due, so an op that looks its message up (a copy an
+        // earlier queued move put there) waits until everything queued before it is due too:
+        // a star right after a move otherwise reaches the server before the move does.
+        let mut not_before = now + planned.delay_ms;
+        if planned.ops.iter().any(|op| op.is_lookup()) {
+            not_before = not_before.max(self.store.last_op_due(account_id)?.unwrap_or(0));
+        }
         let op_id = self.store.enqueue_ops(
             account_id,
             &serde_json::to_string(&planned.ops)?,
             &serde_json::to_string(&snapshot)?,
             &serde_json::to_string(&planned.folders)?,
-            now + planned.delay_ms,
+            not_before,
         )?;
         if let Some(s) = self.running.lock().unwrap().get(&account_id) {
             s.wake_outbox();

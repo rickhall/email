@@ -638,9 +638,15 @@ impl Connection {
     /// Send one queued action command (see `actions::ServerOp`).
     pub async fn run_op(&mut self, op: &crate::actions::ServerOp) -> Result<()> {
         use crate::actions::ServerOp;
-        let ServerOp::Find { folder, gm_msgid, then } = op else { return self.run_addressed(op).await };
+        let (folder, query, then) = match op {
+            ServerOp::Find { folder, gm_msgid, then } => (folder.as_str(), format!("X-GM-MSGID {gm_msgid}"), then),
+            ServerOp::FindByMessageId { message_id, then } => {
+                (then.folder(), format!("HEADER Message-ID {}", crate::actions::quote(&format!("<{message_id}>"))), then)
+            }
+            _ => return self.run_addressed(op).await,
+        };
         self.ensure_selected(folder).await?;
-        let uid = self.session.uid_search(format!("X-GM-MSGID {gm_msgid}")).await?.into_iter().max();
+        let uid = self.session.uid_search(query).await?.into_iter().max();
         let Some(uid) = uid else {
             return Err(OpRejected(format!("the message is no longer in {folder}")).into());
         };
@@ -701,7 +707,7 @@ impl Connection {
                 let raw = base64::engine::general_purpose::STANDARD.decode(raw)?;
                 self.session.append(folder, Some("(\\Seen)"), None, &raw).await?;
             }
-            ServerOp::Find { .. } => return Err(anyhow!("nested Find")),
+            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } => return Err(anyhow!("nested Find")),
         }
         Ok(())
     }

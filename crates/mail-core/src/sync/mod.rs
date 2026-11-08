@@ -742,6 +742,11 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
             Ok(_) => {}
             Err(e) => tracing::warn!("dropping matched local copies: {e:#}"),
         }
+        match shared.store.drop_resolved_stand_ins(Some(shared.account.id)) {
+            Ok(changed) if !changed.is_empty() => shared.emit(CoreEvent::MessagesChanged { folder_ids: changed }),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("dropping replaced moved copies: {e:#}"),
+        }
     }
     if !behind.is_empty() {
         shared.dirty.lock().unwrap().extend(behind);

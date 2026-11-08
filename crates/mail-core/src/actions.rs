@@ -75,6 +75,10 @@ pub enum ServerOp {
     /// sent, because its UID there wasn't known yet. Label changes must go to All Mail: sent to
     /// the Inbox (or a label) copy, removing that folder's own label is ignored (`OK`, no change).
     Find { folder: String, gm_msgid: u64, then: Box<ServerOp> },
+    /// Other servers: run `then` (addressed to UID 0) on the message found in its folder by
+    /// Message-ID when sent: a copy we moved there whose UID wasn't known yet. It runs after the
+    /// queued commands that put it there (see `Core::apply_action`).
+    FindByMessageId { message_id: String, then: Box<ServerOp> },
     /// Store a message (base64 of the raw message) in `folder`, marked read: a copy of mail we
     /// sent, on servers that don't file it themselves.
     Append { folder: String, raw: String },
@@ -86,9 +90,35 @@ impl ServerOp {
         let mut op = self.clone();
         match &mut op {
             ServerOp::Labels { uid: u, .. } | ServerOp::Move { uid: u, .. } | ServerOp::Flags { uid: u, .. } | ServerOp::Expunge { uid: u, .. } => *u = uid,
-            ServerOp::Find { .. } | ServerOp::Append { .. } => {}
+            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } => {}
         }
         op
+    }
+
+    /// The UID it's addressed to (None: not addressed to one message).
+    fn uid(&self) -> Option<u32> {
+        match self {
+            ServerOp::Labels { uid, .. } | ServerOp::Move { uid, .. } | ServerOp::Flags { uid, .. } | ServerOp::Expunge { uid, .. } => Some(*uid),
+            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } => None,
+        }
+    }
+
+    /// The folder it's sent to.
+    pub fn folder(&self) -> &str {
+        match self {
+            ServerOp::Labels { folder, .. }
+            | ServerOp::Move { folder, .. }
+            | ServerOp::Flags { folder, .. }
+            | ServerOp::Expunge { folder, .. }
+            | ServerOp::Find { folder, .. }
+            | ServerOp::Append { folder, .. } => folder,
+            ServerOp::FindByMessageId { then, .. } => then.folder(),
+        }
+    }
+
+    /// It looks the message up when sent, so it depends on the commands queued before it.
+    pub fn is_lookup(&self) -> bool {
+        matches!(self, ServerOp::Find { .. } | ServerOp::FindByMessageId { .. })
     }
 }
 
@@ -149,7 +179,13 @@ pub fn plan(
 
     for &id in message_ids {
         let in_folders: Vec<i64> = store.message_folder_ids(id)?;
-        let copies = store.message_copies(id)?; // (folder id, raw, uid)
+        let mut copies = store.message_copies(id)?; // (folder id, raw, uid)
+        // Other servers: copies we moved that are waiting for their UID, addressed as UID 0 and
+        // looked up by Message-ID when sent (see `wrap`). Gmail finds them by X-GM-MSGID.
+        let header_id = if gmail { None } else { store.message_header_id(id)?.filter(|m| !m.is_empty()) };
+        if header_id.is_some() {
+            copies.extend(store.message_waiting_copies(id)?.into_iter().map(|(f, raw)| (f, raw, 0)));
+        }
         let copy_in = |fid: i64| copies.iter().find(|c| c.0 == fid).map(|c| (c.1.clone(), c.2));
         // A conversation's revealed messages may live outside the folder on screen: use the
         // copy in view when there is one, else the message's own copy (non-Trash first).
@@ -167,8 +203,9 @@ pub fn plan(
             _ => None,
         };
         // Server commands for a Find are built against All Mail with UID 0, then wrapped.
-        let wrap = |op: ServerOp| match (find, all_mail) {
-            (Some(gm_msgid), Some(a)) => ServerOp::Find { folder: a.raw_name.clone(), gm_msgid, then: Box::new(op) },
+        let wrap = |op: ServerOp| match (find, all_mail, &header_id) {
+            (Some(gm_msgid), Some(a), _) => ServerOp::Find { folder: a.raw_name.clone(), gm_msgid, then: Box::new(op) },
+            (None, _, Some(mid)) if op.uid() == Some(0) => ServerOp::FindByMessageId { message_id: mid.clone(), then: Box::new(op) },
             _ => op,
         };
         // The copy server commands address: (folder id, raw name, uid).
@@ -179,7 +216,16 @@ pub fn plan(
                 .or_else(|| copies.iter().find(|c| c.0 == context).map(|c| (c.0, c.1.clone(), c.2)))
                 .or_else(any_copy)
         } else {
-            copies.iter().find(|c| c.0 == context).map(|c| (c.0, c.1.clone(), c.2)).or_else(any_copy)
+            let real = |c: &&(i64, String, u32)| c.2 != 0;
+            copies
+                .iter()
+                .filter(real)
+                .find(|c| c.0 == context)
+                .or_else(|| copies.iter().find(|c| c.0 == context))
+                .or_else(|| copies.iter().filter(real).find(|c| !matches!(by_id.get(&c.0).and_then(|f| f.role), Some(FolderRole::Trash | FolderRole::Junk))))
+                .or_else(|| copies.iter().find(|c| c.2 != 0))
+                .or(copies.first())
+                .map(|c| (c.0, c.1.clone(), c.2))
         };
         let need_primary = || {
             primary
@@ -254,7 +300,7 @@ pub fn plan(
                 }
                 // Only the copy in this folder; revealed messages elsewhere are left alone.
                 if let Some((folder, uid)) = copy_in(context) {
-                    ops.push(ServerOp::Expunge { folder, uid });
+                    ops.push(wrap(ServerOp::Expunge { folder, uid }));
                     change.remove.push((context, id));
                 }
             }
@@ -300,7 +346,7 @@ pub fn plan(
                 }
                 // Revealed messages that aren't in Spam are left alone.
                 if let Some((folder, uid)) = copy_in(context) {
-                    ops.push(ServerOp::Move { folder, uid, target: inbox.raw_name.clone() });
+                    ops.push(wrap(ServerOp::Move { folder, uid, target: inbox.raw_name.clone() }));
                     change.remove.push((context, id));
                     change.add.push((inbox.id, id));
                     touched.insert(inbox.id);
@@ -325,7 +371,7 @@ pub fn plan(
                 } else {
                     // Each copy has its own keywords.
                     for (fid, folder, uid) in &copies {
-                        ops.push(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.clone(), on });
+                        ops.push(wrap(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.clone(), on }));
                         touched.insert(*fid);
                     }
                 }
@@ -345,7 +391,7 @@ pub fn plan(
                 } else {
                     // Each copy has its own flags.
                     for (fid, folder, uid) in &copies {
-                        ops.push(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.into(), on });
+                        ops.push(wrap(ServerOp::Flags { folder: folder.clone(), uid: *uid, flag: flag.into(), on }));
                         touched.insert(*fid);
                     }
                 }
@@ -836,13 +882,88 @@ mod tests {
         assert_eq!(env.folder_names(msg), ["Archive", "Projects"]);
 
         let p = plan(&env.store, env.acct, false, Action::Flag, &[msg], env.id("Projects")).unwrap();
-        // Archive's copy has no UID yet (arrives on its next sync); Projects' copy is flagged.
-        assert_eq!(p.ops, vec![ServerOp::Flags { folder: "Projects".into(), uid: 3, flag: "\\Flagged".into(), on: true }]);
+        // Projects' copy is flagged; Archive's has no UID yet, so it's found by Message-ID when sent.
+        assert_eq!(
+            p.ops,
+            vec![
+                ServerOp::Flags { folder: "Projects".into(), uid: 3, flag: "\\Flagged".into(), on: true },
+                ServerOp::FindByMessageId {
+                    message_id: "b@x".into(),
+                    then: Box::new(ServerOp::Flags { folder: "Archive".into(), uid: 0, flag: "\\Flagged".into(), on: true }),
+                },
+            ]
+        );
 
         let none_archive = Env::new("noarch", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox))]);
         none_archive.store.upsert_headers(none_archive.acct, none_archive.id("INBOX"), &[rec(1, None, None, "c@x", 0)], &none).unwrap();
         let m = none_archive.store.message_ids_for_uids(none_archive.id("INBOX"), &[1]).unwrap()[0];
         assert!(plan(&none_archive.store, none_archive.acct, false, Action::Archive, &[m], none_archive.id("INBOX")).is_err());
+    }
+
+    #[test]
+    fn moved_copy_is_taken_over_when_the_server_reports_another_size() {
+        // Exchange reports a different size for a message once it's moved, so the server's copy
+        // in the target folder doesn't match the stand-in by identity (Message-ID + size).
+        let env = Env::new("resized", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox)), lf("Deleted", Some(FolderRole::Trash))]);
+        let none = HashMap::new();
+        let r = rec(7, None, None, "d@x", 0);
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[r.clone()], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("INBOX"), &[7]).unwrap()[0];
+        let p = plan(&env.store, env.acct, false, Action::Move { target_folder_id: env.id("Deleted") }, &[msg], env.id("INBOX")).unwrap();
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.folder_names(msg), ["Deleted"]);
+
+        let moved = HeaderRecord { uid: 50, size: 32, ..r };
+        env.store.upsert_headers(env.acct, env.id("Deleted"), &[moved.clone()], &none).unwrap();
+        assert_eq!(env.store.message_ids_for_uids(env.id("Deleted"), &[50]).unwrap(), vec![msg]);
+        assert_eq!(env.store.list_messages(env.id("Deleted"), 0, 10).unwrap().total, 1);
+        // The identity follows the server's copy: a later full resync still finds the same row.
+        env.store.upsert_headers(env.acct, env.id("Deleted"), &[moved], &none).unwrap();
+        assert_eq!(env.store.list_messages(env.id("Deleted"), 0, 10).unwrap().total, 1);
+        assert!(env.store.drop_resolved_stand_ins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_moved_copy_without_a_uid_is_found_by_message_id() {
+        let env = Env::new("waiting", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox)), lf("Deleted", Some(FolderRole::Trash))]);
+        let none = HashMap::new();
+        env.store.upsert_headers(env.acct, env.id("Deleted"), &[rec(4, None, None, "f@x", 0)], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("Deleted"), &[4]).unwrap()[0];
+        let p = plan(&env.store, env.acct, false, Action::Move { target_folder_id: env.id("INBOX") }, &[msg], env.id("Deleted")).unwrap();
+        assert_eq!(p.ops, vec![ServerOp::Move { folder: "Deleted".into(), uid: 4, target: "INBOX".into() }]);
+        env.store.apply_local(&p.change).unwrap();
+
+        // Deleted again before the Inbox copy has a UID: found by Message-ID when sent.
+        let p = plan(&env.store, env.acct, false, Action::Trash, &[msg], env.id("INBOX")).unwrap();
+        let in_inbox = |then: ServerOp| ServerOp::FindByMessageId { message_id: "f@x".into(), then: Box::new(then) };
+        assert_eq!(p.ops, vec![in_inbox(ServerOp::Move { folder: "INBOX".into(), uid: 0, target: "Deleted".into() })]);
+        assert!(p.ops[0].is_lookup());
+        // A star there reaches the server too (it used to change only here).
+        let p = plan(&env.store, env.acct, false, Action::Flag, &[msg], env.id("INBOX")).unwrap();
+        assert_eq!(p.ops, vec![in_inbox(ServerOp::Flags { folder: "INBOX".into(), uid: 0, flag: "\\Flagged".into(), on: true })]);
+        assert_eq!(p.ops[0].folder(), "INBOX");
+    }
+
+    #[test]
+    fn stand_ins_left_beside_the_server_copy_go() {
+        // Before stand-ins were matched by Message-ID alone, the server's copy of a moved message
+        // could arrive as a message of its own, next to the stand-in: the stand-in goes.
+        let env = Env::new("leftover", Provider::Imap, &[lf("INBOX", Some(FolderRole::Inbox)), lf("Deleted", Some(FolderRole::Trash))]);
+        let none = HashMap::new();
+        let r = rec(7, None, None, "e@x", 0);
+        env.store.upsert_headers(env.acct, env.id("Deleted"), &[HeaderRecord { uid: 50, size: 32, ..r.clone() }], &none).unwrap();
+        let twin = env.store.message_ids_for_uids(env.id("Deleted"), &[50]).unwrap()[0];
+        env.store.upsert_headers(env.acct, env.id("INBOX"), &[r], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(env.id("INBOX"), &[7]).unwrap()[0];
+        assert_ne!(msg, twin);
+        let p = plan(&env.store, env.acct, false, Action::Move { target_folder_id: env.id("Deleted") }, &[msg], env.id("INBOX")).unwrap();
+        env.store.apply_local(&p.change).unwrap();
+        assert_eq!(env.store.list_messages(env.id("Deleted"), 0, 10).unwrap().total, 2);
+
+        assert_eq!(env.store.drop_resolved_stand_ins(None).unwrap(), vec![env.id("Deleted")]);
+        let page = env.store.list_messages(env.id("Deleted"), 0, 10).unwrap();
+        assert_eq!(page.messages.iter().map(|m| m.id).collect::<Vec<_>>(), vec![twin]);
+        assert!(env.folder_names(msg).is_empty());
     }
 
     #[test]

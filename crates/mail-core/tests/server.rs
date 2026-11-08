@@ -301,6 +301,46 @@ async fn actions_reach_the_server_and_undo_stops_them() {
     until("Delete me in Trash here", 20, || a.subjects(FolderRole::Trash).iter().any(|s| s == "Delete me")).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn acting_on_a_message_just_moved_reaches_the_server() {
+    // Out of Trash into the Inbox, then (before the move has even been sent) deleted again or
+    // starred there: the copy in the Inbox has no UID yet, so those find it by Message-ID.
+    let Some(s) = servers() else { return };
+    let user = new_user("chain");
+    let mut other = other_client(&s, &user).await;
+    for (n, subject) in [(1, "Bounce me"), (2, "Star me")] {
+        append(&mut other, "Trash", &raw_message("Jane Doe <jane@example.test>", &user, subject, n), None).await;
+    }
+    let a = app(&s, &user).await;
+    folders_listed(&a).await;
+    until("2 messages in Trash", 30, || a.messages(FolderRole::Trash).len() == 2).await;
+    let (inbox, trash) = (a.folder(FolderRole::Inbox), a.folder(FolderRole::Trash));
+    let ids: Vec<i64> = a.messages(FolderRole::Trash).iter().map(|m| m.id).collect();
+    a.core.apply_action(Action::Move { target_folder_id: inbox.id }, &ids, trash.id).unwrap();
+    let id = |subject: &str| a.messages(FolderRole::Inbox).into_iter().find(|m| m.subject == subject).unwrap().id;
+    a.core.apply_action(Action::Trash, &[id("Bounce me")], inbox.id).unwrap();
+    a.core.apply_action(Action::Flag, &[id("Star me")], inbox.id).unwrap();
+
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = on_server(&mut other, "Trash", "Bounce me").await.len() == 1
+            && on_server(&mut other, "INBOX", "Bounce me").await.is_empty()
+            && on_server(&mut other, "INBOX", "Star me").await.len() == 1;
+        if done {
+            break;
+        }
+        assert!(Instant::now() < end, "the moves never settled on the server");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let star = on_server(&mut other, "INBOX", "Star me").await[0];
+    assert!(flags_on_server(&mut other, "INBOX", star).await.iter().any(|f| f.contains("Flagged")), "\\Flagged on the server");
+    // One copy of each here too, where the server has it.
+    until("settled here", 20, || {
+        a.subjects(FolderRole::Trash) == ["Bounce me"] && a.subjects(FolderRole::Inbox) == ["Star me"]
+    })
+    .await;
+}
+
 /// Mailpit's messages, by subject (its HTTP API, without an HTTP client crate).
 async fn mailpit_subjects(base: &str) -> Vec<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

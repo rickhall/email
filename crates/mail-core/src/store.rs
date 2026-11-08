@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS entries_list ON entries(folder_id, date DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS entries_uid ON entries(folder_id, uid) WHERE uid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS entries_msg ON entries(message_id);
+-- Copies placed locally (a move, a Gmail label) that are waiting for their UID.
+CREATE INDEX IF NOT EXISTS entries_waiting ON entries(folder_id) WHERE uid IS NULL;
 -- entries.thread_id mirrors messages.thread_id so a folder's conversations can be listed from
 -- one covering index.
 CREATE INDEX IF NOT EXISTS entries_thread ON entries(folder_id, thread_id, date);
@@ -632,6 +634,7 @@ impl Store {
         store.mark_stored_attachments()?;
         store.strip_unwanted_attachments()?;
         store.drop_matched_local_copies(None)?;
+        store.drop_resolved_stand_ins(None)?;
         Ok(store)
     }
 
@@ -989,6 +992,17 @@ impl Store {
                     identity=coalesce(identity, ?3)
                  WHERE id=?1 AND local_copy=1",
             )?;
+            // A message we moved (or restored) here locally waits as an entry without a UID. Its
+            // server copy takes that row over by Message-ID alone: some servers (Exchange) report
+            // a different size after a move, so the identity (Message-ID + size) wouldn't match.
+            let mut stand_in = tx.prepare_cached(
+                "SELECT e.message_id FROM entries e JOIN messages m ON m.id = e.message_id
+                 WHERE e.folder_id=?1 AND e.uid IS NULL AND m.account_id=?2 AND m.message_id=?3
+                   AND m.gm_msgid IS NULL
+                 LIMIT 1",
+            )?;
+            let mut reidentify =
+                tx.prepare_cached("UPDATE messages SET identity=coalesce(?2, identity), size=?3 WHERE id=?1")?;
             let mut entry = tx.prepare_cached(
                 "INSERT INTO entries (folder_id, message_id, uid, date) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(folder_id, message_id) DO UPDATE SET uid=coalesce(excluded.uid, entries.uid)",
@@ -1028,6 +1042,22 @@ impl Store {
                             None => None,
                         },
                     },
+                };
+                // Not known yet: maybe a copy we moved here that's waiting for its UID.
+                let existing = match existing {
+                    Some(id) => Some(id),
+                    None if rec.gm_msgid.is_none() => match rec.message_id.as_deref().filter(|m| !m.is_empty()) {
+                        Some(mid) => {
+                            let found: Option<i64> =
+                                stand_in.query_row(params![folder_id, account_id, mid], |r| r.get(0)).optional()?;
+                            if let Some(id) = found {
+                                reidentify.execute(params![id, identity, rec.size])?;
+                            }
+                            found
+                        }
+                        None => None,
+                    },
+                    None => None,
                 };
                 // Not known yet: maybe it's our local copy of a message we sent (on any server), by
                 // its Message-ID or, where the server replaced that, the original.
@@ -2228,6 +2258,11 @@ impl Store {
         Ok(())
     }
 
+    /// When the last queued op for the account is due (None: nothing queued).
+    pub fn last_op_due(&self, account_id: i64) -> Result<Option<i64>> {
+        Ok(self.rdb().query_row("SELECT max(not_before) FROM pending_ops WHERE account_id=?1", [account_id], |r| r.get(0))?)
+    }
+
     pub fn next_op_due(&self, account_id: i64) -> Result<Option<i64>> {
         Ok(self.rdb().query_row("SELECT min(not_before) FROM pending_ops WHERE account_id=?1", [account_id], |r| r.get(0))?)
     }
@@ -2615,6 +2650,52 @@ impl Store {
         Ok(changed)
     }
 
+    /// Copies moved into a folder locally whose server copy arrived as a message of its own
+    /// (before stand-ins were matched by Message-ID alone; see `upsert_headers_since`): the
+    /// stand-in goes, the server's copy stays. Not while the account has actions queued, whose
+    /// copies are still on their way. Gmail's copies are matched exactly and never left over.
+    /// `account`: one account (None: all). Returns the folders that changed.
+    pub fn drop_resolved_stand_ins(&self, account: Option<i64>) -> Result<Vec<i64>> {
+        let pairs: Vec<(i64, i64)> = {
+            let db = self.rdb();
+            db.prepare_cached(
+                "SELECT p.folder_id, p.message_id FROM entries p INDEXED BY entries_waiting
+                 JOIN messages m ON m.id = p.message_id
+                 WHERE p.uid IS NULL AND m.gm_msgid IS NULL AND m.local_copy = 0
+                   AND m.pending_send IS NULL AND m.draft_id IS NULL AND m.message_id <> ''
+                   AND (?1 IS NULL OR m.account_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM pending_ops o WHERE o.account_id = m.account_id)
+                   AND EXISTS (
+                       SELECT 1 FROM messages t INDEXED BY messages_msgid JOIN entries te ON te.message_id = t.id
+                       WHERE t.account_id = m.account_id AND t.message_id = m.message_id AND t.id <> m.id
+                         AND te.folder_id = p.folder_id AND te.uid IS NOT NULL)",
+            )?
+            .query_map(params![account], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        {
+            let mut db = self.db();
+            let tx = db.transaction()?;
+            {
+                let mut del = tx.prepare_cached("DELETE FROM entries WHERE folder_id=?1 AND message_id=?2")?;
+                for (folder, id) in &pairs {
+                    del.execute(params![folder, id])?;
+                }
+            }
+            tx.commit()?;
+        }
+        let ids: Vec<i64> = pairs.iter().map(|p| p.1).collect();
+        self.drop_orphans(&ids)?;
+        tracing::info!(n = pairs.len(), "dropped moved copies the server's copy replaced");
+        let mut folders: Vec<i64> = pairs.into_iter().map(|p| p.0).collect();
+        folders.sort_unstable();
+        folders.dedup();
+        Ok(folders)
+    }
+
     /// Taken back (undo, edit after a failure): the local copy goes. Returns its folders.
     pub fn drop_local_copy(&self, outgoing_id: i64) -> Result<Vec<i64>> {
         let Some(id) = self.local_copy_of(outgoing_id)? else { return Ok(vec![]) };
@@ -2650,6 +2731,24 @@ impl Store {
     }
 
     /// Gmail's X-GM-MSGID for a message, if known.
+    /// The message's Message-ID header (without brackets).
+    pub fn message_header_id(&self, id: i64) -> Result<Option<String>> {
+        let v: Option<Option<String>> =
+            self.rdb().query_row("SELECT message_id FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(v.flatten())
+    }
+
+    /// Copies placed locally (a move) still waiting for their UID: (folder id, raw name).
+    pub fn message_waiting_copies(&self, id: i64) -> Result<Vec<(i64, String)>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached(
+            "SELECT f.id, f.raw_name FROM entries e JOIN folders f ON f.id=e.folder_id
+             WHERE e.message_id=?1 AND e.uid IS NULL",
+        )?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn message_gm_msgid(&self, id: i64) -> Result<Option<u64>> {
         let v: Option<Option<i64>> =
             self.rdb().query_row("SELECT gm_msgid FROM messages WHERE id=?1", [id], |r| r.get(0)).optional()?;
