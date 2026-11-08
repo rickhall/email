@@ -79,6 +79,24 @@ export function roleFolders(folders: Folder[]): Folder[] {
     });
 }
 
+/** Every selectable folder in the rail's order: accounts as arranged, each one's special folders,
+ *  then its tree depth first (collapsed or not). */
+export function railOrder(): Folder[] {
+  const out: Folder[] = [];
+  const walk = (nodes: TreeNode[]) => {
+    for (const n of nodes) {
+      if (n.folder?.selectable) out.push(n.folder);
+      walk(n.children);
+    }
+  };
+  for (const a of accounts() ?? []) {
+    const folders = foldersByAccount[a.id] ?? [];
+    out.push(...roleFolders(folders));
+    walk(buildTree(a.id, folders));
+  }
+  return out;
+}
+
 // Persisted expand/collapse state.
 const [ui, setUi] = createStore<{ collapsedAccounts: Record<number, boolean>; expanded: Record<string, boolean> }>({
   collapsedAccounts: loadPref('ui.collapsedAccounts', {}),

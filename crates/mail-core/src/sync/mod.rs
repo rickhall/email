@@ -520,6 +520,7 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
     let mut first_step_done = false;
     let mut first_pass = true;
     let mut last_full_sweep: Option<tokio::time::Instant> = None;
+    let mut woke = imap::wake_watch();
 
     loop {
         // Folder structure first, every pass, so new/renamed folders appear promptly. Only the
@@ -598,6 +599,9 @@ async fn header_task(shared: Arc<Shared>) -> Result<()> {
                 // Everything is in sync: wait for the user to switch folders or the refresh timer.
                 shared.set_status(SyncPhase::Idle, None, 0, 0, None);
                 tokio::select! {
+                    // The connection didn't survive the sleep, and the refresh timer's clock
+                    // stopped during it: start over now (a fresh pass also recounts everything).
+                    _ = woke.changed() => return Err(imap::disconnected("woke from sleep; reconnecting".into())),
                     r = focus.changed() => {
                         r?;
                         if let Some(f) = *focus.borrow() {
@@ -771,9 +775,9 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
         };
         let Some((_, raw)) = shared.store.folder(folder_id)? else { continue };
 
-        let mut c = match conn.take() {
-            Some(c) => c,
-            None => shared.connect().await?,
+        let (mut c, fresh) = match conn.take() {
+            Some(c) => (c, false),
+            None => (shared.connect().await?, true),
         };
         if !c.caps.idle {
             tracing::info!("server has no IDLE; relying on polling");
@@ -790,7 +794,9 @@ async fn idle_task(shared: Arc<Shared>, follow_focus: bool) -> Result<()> {
         let synced_modseq = shared.store.folder_sync_state(folder_id)?.highest_modseq;
         let moved = mb.exists != stored || mb.highest_modseq.is_some_and(|m| m != synced_modseq);
         tracing::debug!(folder = raw, server = mb.exists, stored, modseq = ?mb.highest_modseq, synced_modseq, "watching");
-        if moved && caught_up != Some((folder_id, mb.exists, mb.highest_modseq)) {
+        // On a new connection (after sleep, a dropped one), catch up regardless: the folder may
+        // have changed in ways the counters don't show (or don't have: no CONDSTORE).
+        if (fresh || moved) && caught_up != Some((folder_id, mb.exists, mb.highest_modseq)) {
             caught_up = Some((folder_id, mb.exists, mb.highest_modseq));
             sync_pushed_folder(&shared, &mut c, folder_id).await?;
             tracing::info!(folder = raw, "caught up before watching");
@@ -1020,6 +1026,7 @@ async fn download(
 async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Job>) {
     const KEEPALIVE: Duration = Duration::from_secs(4 * 60);
     let mut conn: Option<Connection> = None;
+    let mut woke = imap::wake_watch();
     loop {
         if conn.is_none() {
             match shared.connect().await {
@@ -1055,6 +1062,14 @@ async fn interactive_task(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<J
                 None => return,
             },
             _ = shared.outbox.notified() => continue,
+            // The connection didn't survive the sleep: a new one, ready before the first click.
+            _ = woke.changed() => {
+                conn = None;
+                continue;
+            }
+            // Couldn't connect (no network yet after waking): try again soon, so queued actions
+            // and the folder on screen don't wait for the keepalive.
+            _ = tokio::time::sleep(Duration::from_secs(5)), if conn.is_none() => continue,
             _ = tokio::time::sleep(until_due.min(KEEPALIVE)), if next_due.is_some() => continue,
             _ = tokio::time::sleep(KEEPALIVE) => {
                 if let Some(c) = conn.as_mut() {

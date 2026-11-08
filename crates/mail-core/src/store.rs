@@ -2877,6 +2877,10 @@ mod tests {
         let raw = b"From: John <john@example.com>\r\nTo: Jane Doe <jane@example.org>\r\nSubject: Plans\r\nMessage-ID: <ours@example.com>\r\nDate: Fri, 6 Nov 2026 23:03:51 +0000\r\n\r\nHi\r\n";
         let copy = store.insert_local_copy(acct.id, sent, raw, 7).unwrap();
         store.local_copy_sent(7).unwrap();
+        // Sent just now (the Date header above is fixed, and "a day old" is measured from now).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        store.db().execute("UPDATE messages SET date=?1 WHERE id=?2", params![now, copy]).unwrap();
+        store.db().execute("UPDATE entries SET date=?1 WHERE message_id=?2", params![now, copy]).unwrap();
         // The server's copy: another Message-ID, nothing pointing back at ours.
         let date: i64 = store.rdb().query_row("SELECT date FROM messages WHERE id=?1", [copy], |r| r.get(0)).unwrap();
         let server = HeaderRecord {

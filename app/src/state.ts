@@ -235,6 +235,22 @@ export function setThreaded(v: boolean): void {
   savePref('ui.threaded', v);
 }
 
+// N/P crossed into another folder: once its list is up, it selects the first (or, going back,
+// the last) unread message there.
+let unreadOnArrival: { folderId: number; back: boolean } | null = null;
+
+export function selectFolderAtUnread(id: number, back: boolean): void {
+  unreadOnArrival = { folderId: id, back };
+  selectFolder(id);
+}
+
+/** For the folder's list, once mounted: whether to select an unread message (and which way). */
+export function takeUnreadOnArrival(folderId: number): { back: boolean } | null {
+  const u = unreadOnArrival;
+  unreadOnArrival = null;
+  return u?.folderId === folderId ? { back: u.back } : null;
+}
+
 export function selectFolder(id: number): void {
   if (selectedFolderId() === id) return;
   batch(() => {

@@ -25,14 +25,17 @@ import {
   selectMessage,
   selectThread,
   setThreaded,
+  selectFolderAtUnread,
+  takeUnreadOnArrival,
 } from '../state';
 import { CheckIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { ViewMenuButton } from './ViewMenu';
 import { TagDots, tintStyle } from './Tags';
-import { climbToParent, FolderCrumbs } from './FolderSwitcher';
+import { climbToParent, FolderCrumbs, folderPathLabel } from './FolderSwitcher';
 import { registerListNav, runShortcut } from '../lib/actions';
-import { commandFor } from '../lib/shortcuts';
-import { showToast } from './Toast';
+import { commandFor, hint } from '../lib/shortcuts';
+import { hideToast, showToast } from './Toast';
+import { badgeFor, railOrder } from './Sidebar';
 
 import { DRAG } from '../lib/platform';
 
@@ -367,6 +370,10 @@ export function MessageList(props: {
     queueMicrotask(() => reveal(k));
   }
 
+  // A second N/P within this time confirms moving on to the next folder with unread mail.
+  const CROSS_CONFIRM_MS = 5000;
+  let crossing: { folderId: number; back: boolean; until: number; toast: number } | null = null;
+
   /** N: the next unread item below the selection, wrapping to the top; with `back` (P) the
    *  previous one above it, wrapping to the bottom (Thunderbird's N and P). */
   async function nextUnread(back = false) {
@@ -383,12 +390,48 @@ export function MessageList(props: {
       return;
     }
     const hit = await api.nextUnread(folderId, cur, threaded, back);
-    if (!hit) {
-      showToast({ kind: 'ok', text: 'No unread messages in this folder', ms: 2500 });
+    if (hit && hit.id !== cur) {
+      crossing = null;
+      await goTo(hit.index, hit.id);
       return;
     }
-    if (hit.id === cur) return;
-    await goTo(hit.index, hit.id);
+    // Nothing else unread here: on to the next folder with unread mail, in the rail's order
+    // (across accounts, wrapping), after a second press, like Thunderbird's "Advance to…?".
+    const order = railOrder();
+    const at = order.findIndex((f) => f.id === folderId);
+    let next: Folder | undefined;
+    for (let s = 1; s < order.length; s++) {
+      const f = order[(at + (back ? -s : s) + order.length * 2) % order.length]!;
+      if (f.id !== folderId && f.role !== 'drafts' && badgeFor(f) > 0) {
+        next = f;
+        break;
+      }
+    }
+    if (!next) {
+      crossing = null;
+      showToast({ kind: 'ok', text: 'No unread messages', ms: 2500 });
+      return;
+    }
+    const target = next;
+    const go = () => {
+      if (crossing) hideToast(crossing.toast);
+      crossing = null;
+      selectFolderAtUnread(target.id, back);
+    };
+    if (crossing && crossing.folderId === target.id && crossing.back === back && Date.now() < crossing.until) {
+      go();
+      return;
+    }
+    const otherAccount = target.accountId !== props.folder.accountId;
+    const where = `${otherAccount ? `${accounts()?.find((a) => a.id === target.accountId)?.email ?? ''} › ` : ''}${folderPathLabel(target)}`;
+    const key = hint(back ? 'prev-unread' : 'next-unread').split(' / ')[0] || (back ? 'P' : 'N');
+    const toast = showToast({
+      kind: 'ok',
+      text: `No more unread here. ${key} again for ${where} (${fmtNum(target.unread)})`,
+      action: { label: 'Go', run: go },
+      ms: CROSS_CONFIRM_MS,
+    });
+    crossing = { folderId: target.id, back, until: Date.now() + CROSS_CONFIRM_MS, toast };
   }
 
   function onKey(e: KeyboardEvent) {
@@ -554,6 +597,9 @@ export function MessageList(props: {
     window.addEventListener('keydown', onKey);
     // Results mount while the user types; don't steal focus from the search field.
     if (!search) scrollEl.focus({ preventScroll: true });
+    // Arrived here with N/P from a folder with nothing left unread.
+    const arrival = search ? null : takeUnreadOnArrival(folderId);
+    if (arrival) void nextUnread(arrival.back);
   });
   onCleanup(() => window.removeEventListener('keydown', onKey));
 

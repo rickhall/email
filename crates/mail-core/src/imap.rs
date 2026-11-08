@@ -87,6 +87,11 @@ fn wake_signal() -> &'static tokio::sync::watch::Sender<u64> {
     WAKE.get_or_init(|| tokio::sync::watch::channel(0).0)
 }
 
+/// How many times the computer has woken from sleep since the app started.
+pub fn wake_generation() -> u64 {
+    *wake_signal().borrow()
+}
+
 /// Changes when the computer wakes from sleep (for waits outside `stall_timeout`, like IDLE).
 pub fn wake_watch() -> tokio::sync::watch::Receiver<u64> {
     wake_signal().subscribe()
