@@ -85,14 +85,43 @@ jobs:
           echo "APP_VERSION=$v" >> "$GITHUB_ENV"
           echo "Building version $v"
 
+      # macOS signing and notarization (https://v2.tauri.app/distribute/sign/macos/): with the
+      # APPLE_* secrets set, the Tauri build imports the Developer ID certificate into a
+      # temporary keychain, signs, notarizes and staples. Without them (pull requests from
+      # forks) the build is unsigned: Tauri takes an empty variable as set, so they're only
+      # exported when there.
+      - name: Apple signing
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "No Apple secrets: unsigned build"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$API_PRIVATE_KEY" > "$key"
+          {
+            echo "APPLE_CERTIFICATE=$CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
+            echo "APPLE_API_ISSUER=$API_ISSUER"
+            echo "APPLE_API_KEY=$API_KEY"
+            echo "APPLE_API_KEY_PATH=$key"
+          } >> "$GITHUB_ENV"
+
       - name: Build
         working-directory: app
         run: |
           npm ci
           npm run tauri build -- ${{ matrix.args }}
 
-      # Unsigned builds. macOS signing/notarization needs an Apple Developer account and
-      # APPLE_* secrets; see https://v2.tauri.app/distribute/sign/macos/
       - uses: actions/upload-artifact@v7
         with:
           name: email-${{ matrix.platform }}-${{ env.APP_VERSION }}
