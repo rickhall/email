@@ -177,11 +177,6 @@ async fn remove_attachments(core: State<'_, Arc<Core>>, account_id: i64) -> Res<
 }
 
 #[tauri::command]
-async fn ensure_snooze_folder(core: State<'_, Arc<Core>>, account_id: i64) -> Res<i64> {
-    core.ensure_snooze_folder(account_id).await.map_err(err)
-}
-
-#[tauri::command]
 async fn set_display_name(core: State<'_, Arc<Core>>, account_id: i64, name: String) -> Res<()> {
     core.set_display_name(account_id, &name).map_err(err)
 }
@@ -462,6 +457,9 @@ async fn forward_events(app: tauri::AppHandle, core: Arc<Core>) {
                 }
                 Ok(CoreEvent::NewMail { account_id, folder_id, messages }) => {
                     notify::new_mail(&app, &core, account_id, folder_id, messages);
+                }
+                Ok(CoreEvent::SnoozeDue { account_id, folder_id, messages }) => {
+                    notify::snooze_due(&app, &core, account_id, folder_id, messages);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     // Changes were dropped: say everything changed, so nothing on screen stays stale.
@@ -918,7 +916,6 @@ pub fn run() {
             set_tag,
             delete_tag,
             notify::set_notifications,
-            ensure_snooze_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

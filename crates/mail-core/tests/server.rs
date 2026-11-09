@@ -346,48 +346,53 @@ async fn acting_on_a_message_just_moved_reaches_the_server() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn snoozed_mail_waits_in_snoozed_and_comes_back_unread() {
+async fn snoozed_mail_stays_put_and_comes_back_unread() {
     let Some(s) = servers() else { return };
     let user = new_user("snooze");
     let mut other = other_client(&s, &user).await;
-    for (n, subject) in [(1, "Later"), (2, "Now")] {
-        append(&mut other, "INBOX", &raw_message("Jane Doe <jane@example.test>", &user, subject, n), Some("(\\Seen)")).await;
-    }
+    other.session.create("Projects").await.expect("CREATE");
+    append(&mut other, "INBOX", &raw_message("Jane Doe <jane@example.test>", &user, "Later", 1), Some("(\\Seen)")).await;
+    append(&mut other, "Projects", &raw_message("Jane Doe <jane@example.test>", &user, "Now", 2), Some("(\\Seen)")).await;
     let a = app(&s, &user).await;
     folders_listed(&a).await;
-    until("2 messages", 30, || a.messages(FolderRole::Inbox).len() == 2).await;
+    until("the Inbox message", 30, || a.messages(FolderRole::Inbox).len() == 1).await;
     until("keyword support known", 30, || {
         a.core.accounts().unwrap().iter().any(|x| x.id == a.account.id && x.keywords == Some(true))
     })
     .await;
-    let snoozed = a.core.ensure_snooze_folder(a.account.id).await.expect("a Snoozed folder");
-    assert_eq!(a.core.ensure_snooze_folder(a.account.id).await.unwrap(), snoozed, "made once");
     let inbox = a.folder(FolderRole::Inbox);
-    let id = |subject: &str| a.messages(FolderRole::Inbox).into_iter().find(|m| m.subject == subject).unwrap().id;
+    let projects = a.core.folders(a.account.id).unwrap().into_iter().find(|f| f.raw_name == "Projects").unwrap();
+    until("the archived message", 30, || a.core.list_messages(projects.id, 0, 10).unwrap().total == 1).await;
+    let later = a.messages(FolderRole::Inbox)[0].id;
+    let archived = a.core.list_messages(projects.id, 0, 10).unwrap().messages[0].id;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    // An hour from now: stays away. A minute ago: back as soon as it's there.
-    a.core.apply_action(Action::Snooze { until: now + 3600 }, &[id("Later")], inbox.id).unwrap();
-    a.core.apply_action(Action::Snooze { until: now - 60 }, &[id("Now")], inbox.id).unwrap();
-    assert!(a.messages(FolderRole::Inbox).is_empty());
+    // An hour from now: stays where it is. A minute ago (archived): goes off at once.
+    a.core.apply_action(Action::Snooze { until: now + 3600 }, &[later], inbox.id).unwrap();
+    a.core.apply_action(Action::Snooze { until: now - 60 }, &[archived], projects.id).unwrap();
+    assert_eq!(a.subjects(FolderRole::Inbox), ["Later"], "nothing moves");
 
     let end = Instant::now() + Duration::from_secs(90);
     loop {
-        let later = on_server(&mut other, "Snoozed", "Later").await;
+        let stays = on_server(&mut other, "INBOX", "Later").await;
         let back = on_server(&mut other, "INBOX", "Now").await;
-        if later.len() == 1 && back.len() == 1 && on_server(&mut other, "Snoozed", "Now").await.is_empty() {
-            let flags = flags_on_server(&mut other, "Snoozed", later[0]).await;
+        if stays.len() == 1 && back.len() == 1 && on_server(&mut other, "Projects", "Now").await.is_empty() {
+            let flags = flags_on_server(&mut other, "INBOX", stays[0]).await;
             assert!(flags.iter().any(|f| f.contains("$snooze-")), "the time is on the server: {flags:?}");
             let flags = flags_on_server(&mut other, "INBOX", back[0]).await;
             assert!(!flags.iter().any(|f| f.contains("Seen")), "back unread: {flags:?}");
-            break;
+            if flags.iter().any(|f| f.contains("$woke-")) {
+                assert!(!flags.iter().any(|f| f.contains("$snooze-")), "gone off once: {flags:?}");
+                break;
+            }
         }
         assert!(Instant::now() < end, "snoozing never settled on the server");
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    until("settled here", 30, || a.subjects(FolderRole::Inbox) == ["Now"]).await;
-    let page = a.core.list_messages(snoozed, 0, 10).unwrap();
-    assert_eq!(page.messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["Later"]);
-    assert!(page.messages[0].snoozed_until.is_some_and(|t| t > now));
+    // Here: the one that went off on top (by when it did), the other still waiting.
+    until("settled here", 30, || a.subjects(FolderRole::Inbox) == ["Now", "Later"]).await;
+    let page = a.core.list_messages(inbox.id, 0, 10).unwrap();
+    assert!(page.messages[1].snoozed_until.is_some_and(|t| t > now));
+    assert_eq!(page.messages[0].snoozed_until, None);
 }
 
 /// Mailpit's messages, by subject (its HTTP API, without an HTTP client crate).

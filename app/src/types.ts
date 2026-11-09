@@ -61,7 +61,7 @@ export interface MessageSummary {
   sendFailed: boolean;
   /** a draft being written here (open it in a compose window) */
   draftId: number | null;
-  /** snoozed until (or woken at), Unix seconds */
+  /** snoozed until then (a reminder still to go off), Unix seconds */
   snoozedUntil?: number | null;
 }
 
@@ -200,9 +200,9 @@ export type Action =
   | { kind: 'flag' }
   | { kind: 'unflag' }
   | { kind: 'tag'; keyword: string; on: boolean }
-  /** into the Snoozed folder until `until` (Unix seconds); see ensure_snooze_folder */
+  /** a reminder: at `until` (Unix seconds) back unread at the top of the Inbox; nothing moves now */
   | { kind: 'snooze'; until: number }
-  /** back to the Inbox now, unread */
+  /** cancel the reminder */
   | { kind: 'unsnooze' };
 export type ActionKind = Action['kind'];
 
@@ -418,7 +418,6 @@ export interface CommandMap {
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   set_display_name: { args: { accountId: number; name: string }; ret: void };
   set_notifications: { args: { enabled: boolean }; ret: void };
-  ensure_snooze_folder: { args: { accountId: number }; ret: number };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };
   ui_log: { args: { message: string }; ret: void };

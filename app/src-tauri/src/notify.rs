@@ -1,4 +1,5 @@
-//! Desktop notifications for new mail in an Inbox, shown while the window isn't the one in use.
+//! Desktop notifications for new mail in an Inbox, shown while the window isn't the one in use,
+//! and for snoozed mail whose time came.
 //! Clicking one brings the window up on the message (or, for several, on the Inbox).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -54,8 +55,7 @@ pub fn new_mail(app: &tauri::AppHandle, core: &Core, account_id: i64, folder_id:
     let Some(first) = messages.first() else { return };
 
     let (summary, mut body, target) = if messages.len() == 1 {
-        let subject = if first.subject.trim().is_empty() { "(no subject)" } else { first.subject.trim() };
-        (sender(first).to_string(), subject.to_string(), Some(first.id))
+        (sender(first).to_string(), subject(first).to_string(), Some(first.id))
     } else {
         (format!("{} new messages", messages.len()), senders(&messages), None)
     };
@@ -63,7 +63,32 @@ pub fn new_mail(app: &tauri::AppHandle, core: &Core, account_id: i64, folder_id:
         body = format!("{body}\n{}", account.email);
     }
     tracing::info!(account = account.email, count = messages.len(), "new mail notification");
+    show(app, summary, body, folder_id, target, "email.arrived");
+}
 
+/// Snoozed mail whose time came: a reminder you asked for, so shown even while the window is in
+/// use.
+pub fn snooze_due(app: &tauri::AppHandle, core: &Core, account_id: i64, folder_id: i64, messages: Vec<NewMessage>) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(first) = messages.first() else { return };
+    let accounts = core.accounts().unwrap_or_default();
+    let Some(account) = accounts.iter().find(|a| a.id == account_id) else { return };
+    let (summary, mut body, target) = if messages.len() == 1 {
+        ("Snoozed message is back".to_string(), format!("{}\n{}", subject(first), sender(first)), Some(first.id))
+    } else {
+        (format!("{} snoozed messages are back", messages.len()), senders(&messages), None)
+    };
+    if accounts.len() > 1 {
+        body = format!("{body}\n{}", account.email);
+    }
+    tracing::info!(account = account.email, count = messages.len(), "snooze notification");
+    show(app, summary, body, folder_id, target, "email");
+}
+
+/// Show a notification on a thread of its own; a click opens `target` (or the folder).
+fn show(app: &tauri::AppHandle, summary: String, body: String, folder_id: i64, target: Option<i64>, category: &'static str) {
     let app = app.clone();
     std::thread::spawn(move || {
         let mut n = notify_rust::Notification::new();
@@ -72,8 +97,10 @@ pub fn new_mail(app: &tauri::AppHandle, core: &Core, account_id: i64, folder_id:
         {
             n.icon("mail-app")
                 .hint(notify_rust::Hint::DesktopEntry("Email".into()))
-                .hint(notify_rust::Hint::Category("email.arrived".into()));
+                .hint(notify_rust::Hint::Category(category.into()));
         }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let _ = category;
         let clickable = WAITING.fetch_add(1, Ordering::SeqCst) < MAX_WAITING;
         if clickable {
             n.action("default", "Open");
@@ -89,6 +116,11 @@ pub fn new_mail(app: &tauri::AppHandle, core: &Core, account_id: i64, folder_id:
         }
         WAITING.fetch_sub(1, Ordering::SeqCst);
     });
+}
+
+fn subject(m: &NewMessage) -> &str {
+    let s = m.subject.trim();
+    if s.is_empty() { "(no subject)" } else { s }
 }
 
 /// The window is up and in use: the new mail shows in the list, no need to interrupt.

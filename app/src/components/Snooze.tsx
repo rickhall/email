@@ -1,9 +1,10 @@
-import { createSignal, For, onMount } from 'solid-js';
+import { createSignal, For, onMount, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { placeNear, useDismiss } from './Actions';
 
-// Snooze: the message leaves for the account's Snoozed folder and comes back to the Inbox,
-// unread, at the chosen time (the core wakes it; see the snooze task in sync).
+// Snooze is a reminder: the message stays where it is, and at the chosen time it comes back
+// unread at the top of the Inbox (out of the archive, if it went there), with a notification
+// (see `tags::SNOOZE_PREFIX` in the core).
 
 const MENU_W = 260;
 
@@ -30,6 +31,12 @@ export function snoozeChoices(now: Date): { label: string; until: number }[] {
   return out.filter((c, i) => out.findIndex((d) => d.until === c.until) === i);
 }
 
+/** The latest snooze still to go off among `ms`, or null. */
+export function pendingSnooze(ms: { snoozedUntil?: number | null }[]): number | null {
+  const t = Math.max(0, ...ms.map((m) => m.snoozedUntil ?? 0));
+  return t > Date.now() / 1000 ? t : null;
+}
+
 /** When a snoozed message comes back: "14:00" today, "Tue 08:00" this week, else "21 Nov". */
 export function fmtWake(until: number, now = new Date()): string {
   const d = new Date(until * 1000);
@@ -47,7 +54,14 @@ function localInput(t: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-export function SnoozeMenu(props: { anchor: HTMLElement; onPick: (until: number) => void; onClose: (refocus: boolean) => void }) {
+export function SnoozeMenu(props: {
+  anchor: HTMLElement;
+  /** already snoozed until then: offered to cancel */
+  snoozedUntil: number | null;
+  onPick: (until: number) => void;
+  onUnsnooze: () => void;
+  onClose: (refocus: boolean) => void;
+}) {
   let el: HTMLDivElement | undefined;
   const now = new Date();
   const choices = snoozeChoices(now);
@@ -76,7 +90,7 @@ export function SnoozeMenu(props: { anchor: HTMLElement; onPick: (until: number)
         ref={el}
         class="view-menu snooze-menu"
         role="menu"
-        aria-label="Snooze until"
+        aria-label="Remind me"
         style={{ left: `${pos().left}px`, top: `${pos().top}px`, right: 'auto', width: `${MENU_W}px` }}
         onKeyDown={(e) => {
           e.stopPropagation();
@@ -100,7 +114,15 @@ export function SnoozeMenu(props: { anchor: HTMLElement; onPick: (until: number)
           }
         }}
       >
-        <div class="vm-section">Snooze until</div>
+        <div class="vm-section" title="At that time it comes back unread at the top of the Inbox">Remind me</div>
+        <Show when={props.snoozedUntil}>
+          {(t) => (
+            <button role="menuitem" class="vm-item" onClick={() => props.onUnsnooze()}>
+              <span class="vm-label">Unsnooze</span>
+              <span class="snooze-when">set for {fmtWake(t(), now)}</span>
+            </button>
+          )}
+        </Show>
         <For each={choices}>
           {(c) => (
             <button role="menuitem" class="vm-item" onClick={() => props.onPick(c.until)}>

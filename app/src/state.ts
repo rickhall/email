@@ -65,14 +65,6 @@ export function keywordsOk(folderId: number | null): boolean {
   return !!f && (accounts() ?? []).some((a) => a.id === f.accountId && a.keywords === true);
 }
 
-/** The account's Snoozed folder (as the core finds it: `actions::snooze_folder`). */
-export function isSnoozeFolder(f: Folder | undefined): boolean {
-  if (!f || f.role !== null || !f.selectable) return false;
-  const last = f.path[f.path.length - 1];
-  const top = f.path.length === 1 || (f.path.length === 2 && f.path[0]?.toUpperCase() === 'INBOX');
-  return top && (last === 'Snoozed' || last === 'Snoozed mail');
-}
-
 export function folderById(id: number | null): Folder | undefined {
   if (id == null) return undefined;
   for (const list of Object.values(foldersByAccount)) {

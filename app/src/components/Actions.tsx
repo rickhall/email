@@ -1,12 +1,12 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { hint } from '../lib/shortcuts';
 import { Portal } from 'solid-js/web';
-import { api, errorMessage, type Folder, type FolderRole } from '../api';
+import { type Folder, type FolderRole } from '../api';
 import { definedTags, TagMenu } from './Tags';
 import { SnoozeMenu } from './Snooze';
 import { showToast } from './Toast';
 import { clearHeaderHandler, runAction, setHeaderHandler, type BarCommand } from '../lib/actions';
-import { foldersByAccount, folderById, isSnoozeFolder, keywordsOk } from '../state';
+import { foldersByAccount, folderById, keywordsOk } from '../state';
 import { ArchiveIcon, ClockIcon, DeleteForeverIcon, ForwardIcon, InboxIcon, JunkIcon, MoreIcon, MoveIcon, ReadIcon, ReplyAllIcon, ReplyIcon, RoleIcon, StarFilledIcon, StarIcon, TagIcon, TrashIcon, UnreadIcon } from './Icons';
 import { startReply } from '../lib/compose';
 
@@ -216,6 +216,8 @@ export interface ActionTarget {
   advance: boolean;
   /** tags of each viewed message (Tag menu ✓ / mixed state, 1–9 / 0) */
   tagSets: string[][];
+  /** the latest snooze still to go off among them (Unix seconds), for the Snooze menu */
+  snoozedUntil: number | null;
 }
 
 function useActions(t: () => ActionTarget | null) {
@@ -229,10 +231,6 @@ function useActions(t: () => ActionTarget | null) {
   const canKeywords = () => {
     const x = t();
     return !!x && keywordsOk(x.folderId);
-  };
-  const inSnoozed = () => {
-    const x = t();
-    return !!x && isSnoozeFolder(folderById(x.folderId));
   };
   const noKeywords = () => showToast({ kind: 'error', text: NO_KEYWORDS });
   const [picker, setPicker] = createSignal<HTMLElement | null>(null);
@@ -272,7 +270,6 @@ function useActions(t: () => ActionTarget | null) {
         if (!canKeywords()) return noKeywords();
         return clearTags();
       case 'snooze':
-        if (inSnoozed()) return runAction({ kind: 'unsnooze' }, base);
         if (!canKeywords()) return noKeywords();
         if (anchor) setSnoozeMenu(snoozeMenu() ? null : anchor);
         return;
@@ -327,25 +324,24 @@ function useActions(t: () => ActionTarget | null) {
   const snoozeMenuEl = () => {
     const a = snoozeMenu();
     const x = t();
-    const f = x ? folderById(x.folderId) : undefined;
-    if (!a || !x || !f) return null;
+    if (!a || !x) return null;
+    // Nothing moves: the messages stay where they are (and on screen).
+    const base = { ids: x.ids, folderId: x.folderId, advance: false };
     return (
       <SnoozeMenu
         anchor={a}
+        snoozedUntil={x.snoozedUntil}
         onClose={(refocus) => {
           setSnoozeMenu(null);
           if (refocus) a.focus();
         }}
-        onPick={async (until) => {
+        onPick={(until) => {
           setSnoozeMenu(null);
-          try {
-            // Made on the server the first time (a moment's wait, once per account).
-            await api.ensureSnoozeFolder(f.accountId);
-          } catch (e) {
-            showToast({ kind: 'error', text: errorMessage(e) });
-            return;
-          }
-          void runAction({ kind: 'snooze', until }, { ids: x.ids, folderId: x.folderId, advance: x.advance });
+          void runAction({ kind: 'snooze', until }, base);
+        }}
+        onUnsnooze={() => {
+          setSnoozeMenu(null);
+          void runAction({ kind: 'unsnooze' }, base);
         }}
       />
     );
@@ -371,7 +367,7 @@ function useActions(t: () => ActionTarget | null) {
       />
     );
   };
-  return { command, inTrash, inSpam, canKeywords, inSnoozed, pickerEl, tagMenuEl, snoozeMenuEl, toggleTag };
+  return { command, inTrash, inSpam, canKeywords, pickerEl, tagMenuEl, snoozeMenuEl, toggleTag };
 }
 
 const NO_KEYWORDS = "This account's mail server doesn't keep tags or snooze times.";
@@ -469,11 +465,11 @@ export function HeaderActions(props: { target: ActionTarget | null }) {
           <StarFilledIcon class="icon starred" />
         </Show>
       </Btn>
-      {/* Same place either way: Unsnooze in the Snoozed folder; off where the server can't keep the time. */}
+      {/* Off (not hidden) where the server can't keep the time. */}
       <Btn
-        label={a.inSnoozed() ? 'Unsnooze' : a.canKeywords() ? 'Snooze…' : `Snooze: ${NO_KEYWORDS}`}
-        key={a.canKeywords() || a.inSnoozed() ? hint('snooze') : undefined}
-        disabled={!!x() && !a.inSnoozed() && !a.canKeywords()}
+        label={a.canKeywords() ? 'Snooze: remind me later…' : `Snooze: ${NO_KEYWORDS}`}
+        key={a.canKeywords() ? hint('snooze') : undefined}
+        disabled={!!x() && !a.canKeywords()}
         ref={(e) => (snoozeBtn = e)}
         onClick={(el) => void a.command('snooze', el)}
       >
@@ -523,7 +519,6 @@ export function CardActions(props: { target: ActionTarget }) {
             target={props.target}
             inSpam={a.inSpam()}
             canKeywords={a.canKeywords()}
-            inSnoozed={a.inSnoozed()}
             onClose={(refocus) => {
               setMenu(null);
               if (refocus) moreBtn.focus();
@@ -548,7 +543,6 @@ function CardMenu(props: {
   target: ActionTarget;
   inSpam: boolean;
   canKeywords: boolean;
-  inSnoozed: boolean;
   onClose: (refocus: boolean) => void;
   onCommand: (c: BarCommand) => void;
 }) {
@@ -567,13 +561,13 @@ function CardMenu(props: {
     ['forward', () => 'Forward'],
     ['move', () => 'Move to…'],
     ['tag-menu', () => 'Tag…'],
-    ['snooze', () => (props.inSnoozed ? 'Unsnooze' : 'Snooze…')],
+    ['snooze', () => 'Snooze…'],
     ['spam', () => (props.inSpam ? 'Not spam' : 'Spam')],
     ['unread', () => (props.target.anyUnread ? 'Mark as read' : 'Mark as unread')],
     ['star', () => (props.target.starred ? 'Unstar' : 'Star')],
   ];
-  // Tags and snooze only where the server keeps them (Unsnooze always, in Snoozed).
-  const items = all.filter(([c]) => props.canKeywords || (c === 'snooze' ? props.inSnoozed : c !== 'tag-menu'));
+  // Tags and snooze only where the server keeps them.
+  const items = all.filter(([c]) => props.canKeywords || (c !== 'snooze' && c !== 'tag-menu'));
   return (
     <Portal>
       <div

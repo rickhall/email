@@ -3309,11 +3309,11 @@ html.macos .app.rail-mode .search-bar {
   height: 26px;
   padding: 0 10px;
 }
-/* list rows of snoozed mail: when it comes back, in the date's place */
-.row-date.snoozed {
+/* list rows of snoozed mail: a clock among the markers (the time on hover) */
+.snooze-mark {
   display: inline-flex;
-  align-items: center;
-  gap: 3px;
+}
+.row-icons .snooze-mark .marker {
   color: var(--accent);
 }
 .act-btn:disabled {

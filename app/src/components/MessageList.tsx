@@ -31,16 +31,13 @@ import {
   revealRequest,
 } from '../state';
 import { CheckIcon, ClockIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
-import { fmtWake } from './Snooze';
 
-/** The row's date; for mail that's snoozed, when it comes back instead. */
-function RowDate(props: { date: number; snoozedUntil?: number | null }) {
-  const away = () => (props.snoozedUntil ?? 0) > Date.now() / 1000;
+/** A clock among the row's markers while a snooze is waiting to go off (its time on hover). */
+function SnoozeMark(props: { until?: number | null }) {
   return (
-    <Show when={away()} fallback={<span class="row-date">{smartDate(props.date)}</span>}>
-      <span class="row-date snoozed" title={`Snoozed until ${new Date(props.snoozedUntil! * 1000).toLocaleString()}`}>
-        <ClockIcon size={11} />
-        {fmtWake(props.snoozedUntil!)}
+    <Show when={(props.until ?? 0) > Date.now() / 1000}>
+      <span class="snooze-mark" title={`Snoozed until ${new Date(props.until! * 1000).toLocaleString()}`}>
+        <ClockIcon size={12} class="icon marker" />
       </span>
     </Show>
   );
@@ -126,8 +123,9 @@ function RowContent(props: { m: MessageSummary; re?: RegExp | null; subjRe?: Reg
           <Show when={props.m.flagged}>
             <FlagIcon size={12} class="icon flag" />
           </Show>
+          <SnoozeMark until={props.m.snoozedUntil} />
         </span>
-        <SendState m={props.m} fallback={<RowDate date={props.m.date} snoozedUntil={props.m.snoozedUntil} />} />
+        <SendState m={props.m} fallback={<span class="row-date">{smartDate(props.m.date)}</span>} />
       </div>
       <div class="row-line2">
         <span class="row-subject">
@@ -181,8 +179,9 @@ function ThreadRowContent(props: { t: ThreadSummary; me: { name: string; email: 
           <Show when={props.t.flagged}>
             <FlagIcon size={12} class="icon flag" />
           </Show>
+          <SnoozeMark until={props.t.snoozedUntil} />
         </span>
-        <SendState m={props.t} fallback={<RowDate date={props.t.date} snoozedUntil={props.t.snoozedUntil} />} />
+        <SendState m={props.t} fallback={<span class="row-date">{smartDate(props.t.date)}</span>} />
       </div>
       <div class="row-line2">
         <span class="row-subject">{props.t.subject || '(no subject)'}</span>

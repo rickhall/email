@@ -189,7 +189,7 @@ pub struct MessageSummary {
     pub send_failed: bool,
     /// A draft being written here (open it with `open_draft`).
     pub draft_id: Option<i64>,
-    /// Snoozed (or woken) until then, Unix seconds (see `tags::snooze_keyword`).
+    /// Snoozed until then (a reminder still to go off), Unix seconds (see `tags::snooze_keyword`).
     pub snoozed_until: Option<i64>,
 }
 
@@ -480,6 +480,8 @@ pub enum CoreEvent {
     Sync(SyncStatus),
     /// New unread mail arrived in a folder (not backfill), for notifications.
     NewMail { account_id: i64, folder_id: i64, messages: Vec<NewMessage> },
+    /// Snoozed messages whose time came, set off here (back in the Inbox `folder_id`).
+    SnoozeDue { account_id: i64, folder_id: i64, messages: Vec<NewMessage> },
 }
 
 /// A message that just arrived, as far as a notification needs it.

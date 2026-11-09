@@ -398,11 +398,6 @@ impl AccountSync {
         let _ = self.urgent_tx.send(Job::Body(message_id));
     }
 
-    /// For work that outlives the lock on the running accounts (see `SyncHandle`).
-    pub fn handle(&self) -> SyncHandle {
-        SyncHandle(self.shared.clone())
-    }
-
     /// A user action was queued: send it when due.
     pub fn wake_outbox(&self) {
         self.shared.outbox.notify_one();
@@ -775,60 +770,11 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
     Ok(())
 }
 
-/// A running account's sync, for async requests that use its connection settings.
-pub struct SyncHandle(Arc<Shared>);
-
-impl SyncHandle {
-    /// Create the Snoozed folder on the server (the first of `SNOOZE_FOLDER_NAMES` it accepts)
-    /// and list it here; its id. One that exists already is just listed.
-    pub async fn create_snooze_folder(&self) -> Result<i64> {
-        use crate::actions::{SNOOZE_FOLDER_NAMES, snooze_folder};
-        let shared = &self.0;
-        let account_id = shared.account.id;
-        let folders = shared.store.folders(account_id)?;
-        if let Some(f) = snooze_folder(&folders) {
-            return Ok(f.id);
-        }
-        // Servers that keep every folder under INBOX (INBOX.Sent) want new ones there too.
-        let prefix = folders
-            .iter()
-            .filter(|f| f.role.is_some_and(|r| r != FolderRole::Inbox))
-            .find_map(|f| ["INBOX.", "INBOX/"].into_iter().find(|p| f.raw_name.starts_with(p)))
-            .unwrap_or("");
-        let mut conn = shared.connect().await?;
-        let mut refused = None;
-        for name in SNOOZE_FOLDER_NAMES {
-            let raw = format!("{prefix}{name}");
-            match conn.session.create(&raw).await {
-                Ok(()) => {
-                    let _ = conn.session.subscribe(&raw).await;
-                    tracing::info!(folder = raw, "created the Snoozed folder");
-                    refused = None;
-                    break;
-                }
-                Err(e) => {
-                    tracing::info!(folder = raw, "the server refused the Snoozed folder: {e}");
-                    refused = Some(e.to_string());
-                }
-            }
-        }
-        // The listing settles it (one refused as existing is there too).
-        let listed = conn.list_folders().await?;
-        conn.logout().await;
-        shared.store.sync_folder_list(account_id, &listed)?;
-        shared.emit(CoreEvent::FoldersChanged { account_id });
-        match snooze_folder(&shared.store.folders(account_id)?) {
-            Some(f) => Ok(f.id),
-            None => Err(anyhow::anyhow!("The server wouldn't create a Snoozed folder ({}).", refused.unwrap_or_default())),
-        }
-    }
-}
-
-/// Snoozed mail whose time has come goes back to the Inbox. Checked every 30 s by the wall clock,
-/// at once after the computer wakes (a time that passed while asleep comes right after), and
-/// whenever headers arrive (a message that reaches Snoozed already due).
-/// Several clients may wake the same message: their commands address it by UID, and a second
-/// MOVE or STORE of a message that already left does nothing.
+/// Snoozes whose time has come go off (see `tags::SNOOZE_PREFIX`): checked every 30 s by the
+/// wall clock, at once after the computer wakes (a time that passed while asleep comes right
+/// after), and whenever headers arrive (a snooze set elsewhere that's already due).
+/// Several clients may set off the same snooze: their commands address it by UID, and doing
+/// it twice changes nothing.
 async fn snooze_task(shared: Arc<Shared>) {
     let mut woke = imap::wake_watch();
     loop {
@@ -844,16 +790,26 @@ async fn snooze_task(shared: Arc<Shared>) {
 }
 
 fn wake_snoozed(shared: &Shared) -> Result<()> {
-    let folders = shared.store.folders(shared.account.id)?;
-    let Some(folder) = crate::actions::snooze_folder(&folders) else { return Ok(()) };
+    let account_id = shared.account.id;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-    let due = shared.store.snoozed_due(folder.id, now)?;
+    let due = shared.store.snoozed_due(account_id, now)?;
     if due.is_empty() {
         return Ok(());
     }
-    tracing::info!(n = due.len(), "waking snoozed mail");
-    crate::queue_action(&shared.store, &shared.events, crate::actions::Action::Wake, &due, folder.id)?;
+    tracing::info!(n = due.len(), "snoozed mail is due");
+    let mut by_folder: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+    for (id, folder) in &due {
+        by_folder.entry(*folder).or_default().push(*id);
+    }
+    for (folder, ids) in by_folder {
+        crate::queue_action(&shared.store, &shared.events, crate::actions::Action::Wake, &ids, folder)?;
+    }
     shared.outbox.notify_one();
+    let ids: Vec<i64> = due.iter().map(|d| d.0).collect();
+    let inbox = shared.store.folders(account_id)?.into_iter().find(|f| f.role == Some(FolderRole::Inbox));
+    if let Some(inbox) = inbox {
+        shared.emit(CoreEvent::SnoozeDue { account_id, folder_id: inbox.id, messages: shared.store.new_messages(&ids)? });
+    }
     Ok(())
 }
 

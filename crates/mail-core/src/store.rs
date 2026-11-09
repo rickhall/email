@@ -439,6 +439,23 @@ fn assign_thread(
     Ok(())
 }
 
+/// A message whose snooze went off sorts in the Inbox by that time (its `$woke-` keyword, on
+/// every client); otherwise, and everywhere else, by its own date.
+fn settle_inbox_date(db: &Connection, message_id: i64) -> Result<()> {
+    let row: Option<(i64, String)> = db
+        .prepare_cached("SELECT date, keywords FROM messages WHERE id=?1")?
+        .query_row([message_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((date, keywords)) = row else { return Ok(()) };
+    let date = crate::tags::woken_at(&keywords).map_or(date, |t| date.max(t));
+    db.prepare_cached(
+        "UPDATE entries SET date=?2 WHERE message_id=?1 AND date<>?2
+           AND folder_id IN (SELECT id FROM folders WHERE role='inbox')",
+    )?
+    .execute(params![message_id, date])?;
+    Ok(())
+}
+
 /// Make a message's membership in label-backed folders match its Gmail labels exactly.
 /// `current` (the folder being synced) is left alone; folders not in `label_folders`
 /// (All Mail, Trash, Spam) are never touched. A message in Trash or Spam keeps its labels
@@ -974,7 +991,6 @@ impl Store {
         label_folders: &std::collections::HashMap<String, i64>,
     ) -> Result<Vec<i64>> {
         let mut changed = std::collections::BTreeSet::from([folder_id]);
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
         // New rows whose body may be waiting in the stash (moved between folders).
         let mut restore: Vec<(i64, String)> = Vec::new();
         let mut db = self.db_for_sync(epoch)?;
@@ -1127,13 +1143,13 @@ impl Store {
                         id
                     }
                 };
-                // A message woken from snooze sorts by when it came back, on every client.
-                let woken = crate::tags::snoozed_until(&crate::tags::join(&rec.keywords)).filter(|&t| t <= now);
-                let date = woken.map_or(rec.date, |t| rec.date.max(t));
-                entry.execute(params![folder_id, id, rec.uid, date])?;
+                entry.execute(params![folder_id, id, rec.uid, rec.date])?;
 
                 if let Some(labels) = &rec.gm_labels {
-                    apply_gmail_labels(&tx, id, folder_id, date, labels, label_folders, &mut changed)?;
+                    apply_gmail_labels(&tx, id, folder_id, rec.date, labels, label_folders, &mut changed)?;
+                }
+                if crate::tags::woken_at(&crate::tags::join(&rec.keywords)).is_some() {
+                    settle_inbox_date(&tx, id)?;
                 }
             }
         }
@@ -1225,6 +1241,8 @@ impl Store {
                 if let Some(labels) = &c.labels {
                     apply_gmail_labels(&tx, id, folder_id, date, labels, label_folders, &mut changed)?;
                 }
+                // A snooze that went off (or was snoozed again) on another client.
+                settle_inbox_date(&tx, id)?;
             }
         }
         tx.commit()?;
@@ -2867,33 +2885,58 @@ impl Store {
         Ok(found.unwrap_or_else(|| crate::tags::normalize(term)))
     }
 
-    /// Woken messages sort by when they came back: their new entries no earlier than `at`.
-    pub fn raise_entry_dates(&self, entries: &[(i64, i64)], at: i64) -> Result<()> {
+    /// After a local snooze change: Inbox dates follow the keywords (see `settle_inbox_date`).
+    pub fn settle_inbox_dates(&self, ids: &[i64]) -> Result<()> {
         let db = self.db();
-        let mut stmt = db.prepare_cached("UPDATE entries SET date=max(date, ?3) WHERE folder_id=?1 AND message_id=?2")?;
-        for (folder, id) in entries {
-            stmt.execute(params![folder, id, at])?;
+        for &id in ids {
+            settle_inbox_date(&db, id)?;
         }
         Ok(())
     }
 
-    /// Messages in the Snoozed folder whose wake time is at or before `now` (only copies the
-    /// server has: one still being moved in waits for its UID).
-    pub fn snoozed_due(&self, folder_id: i64, now: i64) -> Result<Vec<i64>> {
+    /// The account's snoozed messages whose time is at or before `now`, each with the folder to
+    /// act on it from: the Inbox if it's there, else Gmail's All Mail, else wherever it is.
+    /// Only copies the server has (one still being moved waits for its UID); not in Trash or
+    /// Spam (deleted, it isn't wanted back).
+    pub fn snoozed_due(&self, account_id: i64, now: i64) -> Result<Vec<(i64, i64)>> {
         let db = self.rdb();
         let mut stmt = db.prepare_cached(
-            "SELECT m.id, m.keywords FROM entries e JOIN messages m ON m.id = e.message_id
-             WHERE e.folder_id=?1 AND e.uid IS NOT NULL AND m.keywords LIKE '%$snooze-%'",
+            "SELECT m.id, m.keywords,
+                    (SELECT e.folder_id FROM entries e JOIN folders f ON f.id = e.folder_id
+                     WHERE e.message_id = m.id AND e.uid IS NOT NULL
+                       AND coalesce(f.role, '') NOT IN ('trash', 'junk')
+                     ORDER BY CASE f.role WHEN 'inbox' THEN 0 WHEN 'all' THEN 1 ELSE 2 END LIMIT 1)
+             FROM messages m
+             WHERE m.account_id=?1 AND m.keywords LIKE '%$snooze-%'",
         )?;
-        let rows = stmt.query_map([folder_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?))
+        })?;
         let mut due = Vec::new();
         for row in rows {
-            let (id, keywords) = row?;
-            if crate::tags::snoozed_until(&keywords).is_some_and(|t| t <= now) {
-                due.push(id);
+            let (id, keywords, folder) = row?;
+            if let Some(folder) = folder
+                && crate::tags::snoozed_until(&keywords).is_some_and(|t| t <= now)
+            {
+                due.push((id, folder));
             }
         }
         Ok(due)
+    }
+
+    /// Sender and subject of messages, for a notification.
+    pub fn new_messages(&self, ids: &[i64]) -> Result<Vec<NewMessage>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare_cached("SELECT from_name, from_addr, subject FROM messages WHERE id=?1")?;
+        let mut out = Vec::new();
+        for &id in ids {
+            if let Some((from_name, from_addr, subject)) =
+                stmt.query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?
+            {
+                out.push(NewMessage { id, from_name, from_addr, subject });
+            }
+        }
+        Ok(out)
     }
 
     /// The message's stored keywords (space-separated, normalised).

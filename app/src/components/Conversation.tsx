@@ -16,6 +16,7 @@ import { ForwardIcon, ImageIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
 import { DRAG } from '../lib/platform';
 import { CardActions, HeaderActions, type ActionTarget } from './Actions';
+import { pendingSnooze } from './Snooze';
 import { searchTag, TagChips, TagDots } from './Tags';
 import { runAction } from '../lib/actions';
 import { forwardFrameKeys } from '../lib/frameKeys';
@@ -477,6 +478,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
       starred: newest.flagged,
       advance: true,
       tagSets: state.list.map((m) => m.tags ?? []),
+      snoozedUntil: pendingSnooze(state.list),
     };
   };
   /** One card's own actions; it advances only when that message is the last one here. */
@@ -489,6 +491,7 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
     starred: m.flagged,
     advance: m.folderId === t.folderId && !state.list.some((x) => x.id !== m.id && x.folderId === t.folderId),
     tagSets: [m.tags ?? []],
+    snoozedUntil: pendingSnooze([m]),
   });
 
   const subject = () => state.list[0]?.subject || t.subject || '(no subject)';

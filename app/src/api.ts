@@ -194,8 +194,6 @@ export const api = {
   setDisplayName: (accountId: number, name: string): Promise<void> => call('set_display_name', { accountId, name }),
   /** Desktop notifications for new mail in an Inbox (while the window isn't in use). */
   setNotifications: (enabled: boolean): Promise<void> => call('set_notifications', { enabled }),
-  /** The account's Snoozed folder (created on the server first if needed); its id. */
-  ensureSnoozeFolder: (accountId: number): Promise<number> => call('ensure_snooze_folder', { accountId }),
 };
 
 async function on<K extends EventName>(event: K, cb: (p: EventMap[K]) => void): Promise<() => void> {

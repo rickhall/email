@@ -7,6 +7,7 @@ import { cacheGet, cacheMarkRemoteAllowed, cachePut, onMessageReady, readyAt } f
 import { avatarColor, initials, linkify, longDate } from '../lib/format';
 import { patchSelectedSummary, readerMessageId, restorePending, searchActive, selectedFolderId, selectedMessageId, selectedSummary } from '../state';
 import { HeaderActions, type ActionTarget } from './Actions';
+import { pendingSnooze } from './Snooze';
 import { searchTag, TagChips } from './Tags';
 import { runAction } from '../lib/actions';
 import { ForwardIcon, ImageIcon, MailIcon, PaperclipIcon, ReplyIcon } from './Icons';
@@ -215,7 +216,7 @@ const actionTarget = (): ActionTarget | null => {
   if (!s || s.id !== id) return null;
   // Search results span folders: act in the message's own folder there.
   const folderId = searchActive() ? s.folderId : selectedFolderId() ?? s.folderId;
-  return { ids: [s.id], folderId, anyUnread: s.unread, starId: s.id, replyId: s.id, starred: s.flagged, advance: !searchActive(), tagSets: [s.tags ?? []] };
+  return { ids: [s.id], folderId, anyUnread: s.unread, starId: s.id, replyId: s.id, starred: s.flagged, advance: !searchActive(), tagSets: [s.tags ?? []], snoozedUntil: pendingSnooze([s]) };
 };
 
 export function Reader(props: { ref?: (el: HTMLElement) => void }) {

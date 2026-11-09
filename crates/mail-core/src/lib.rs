@@ -461,16 +461,6 @@ impl Core {
         Ok(result)
     }
 
-    /// The account's Snoozed folder, created on the server first if it has none.
-    pub async fn ensure_snooze_folder(&self, account_id: i64) -> Result<i64> {
-        if let Some(f) = actions::snooze_folder(&self.store.folders(account_id)?) {
-            return Ok(f.id);
-        }
-        let sync = self.running.lock().unwrap().get(&account_id).map(|s| s.handle());
-        let sync = sync.ok_or_else(|| anyhow!("This account isn't connected."))?;
-        sync.create_snooze_folder().await
-    }
-
     /// Undo an action that hasn't been sent yet (within the undo window).
     pub fn undo_action(&self, op_id: i64) -> Result<()> {
         let snapshot = self
@@ -994,15 +984,13 @@ pub(crate) fn queue_action(
         bail!("This account's mail server doesn't keep tags or snooze times.");
     }
     let gmail = account.provider == Provider::Gmail;
-    let woken = matches!(action, actions::Action::Wake | actions::Action::Unsnooze);
+    let snooze = matches!(action, actions::Action::Snooze { .. } | actions::Action::Unsnooze | actions::Action::Wake);
     let planned = actions::plan(store, account_id, gmail, action, message_ids, folder_id)?;
     let snapshot = store.snapshot(message_ids)?;
     let mut changed = store.apply_local(&planned.change)?;
-    if woken {
-        // Back at the top of the Inbox, as if it had just arrived.
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-        let added: Vec<(i64, i64)> = planned.change.add.clone();
-        store.raise_entry_dates(&added, now)?;
+    if snooze {
+        // Gone off: at the top of the Inbox by that time; snoozed again: back to its own date.
+        store.settle_inbox_dates(message_ids)?;
     }
     // Rows show flags and tags, so every folder holding these messages refreshes, not only
     // those whose counts changed (a tag or a non-Gmail star changes no count).

@@ -85,6 +85,12 @@ function describe(a: Action, n: number, targetName?: string): string {
       return `Moved${many} to Inbox`;
     case 'move':
       return `Moved${many} to ${targetName ?? 'folder'}`;
+    case 'snooze': {
+      const when = new Date(a.until * 1000).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      return `Snoozed${many}: back ${when}`;
+    }
+    case 'unsnooze':
+      return `Unsnoozed${many}`;
     default:
       return 'Done';
   }

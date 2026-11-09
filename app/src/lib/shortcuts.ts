@@ -64,7 +64,7 @@ export const COMMANDS: CommandSection[] = [
       c('spam', 'Spam / not spam'),
       c('unread', 'Mark read / unread'),
       c('star', 'Star / unstar'),
-      c('snooze', 'Snooze… / unsnooze'),
+      c('snooze', 'Snooze (remind me later)…'),
       c('undo', 'Undo'),
     ],
   },
