@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "screenshots": "node scripts/screenshots.js"
+    "screenshots": "node scripts/screenshots.js",
+    "test:ui": "node --test --test-concurrency=1 scripts/ui-tests.js"
   },
   "dependencies": {
     "@tanstack/solid-virtual": "3.13.48",

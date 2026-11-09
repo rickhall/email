@@ -1063,6 +1063,37 @@ export function createMockBackend(): Backend {
     (window as unknown as { __menu: (id: MenuActionId) => void }).__menu = (id) => emit('menu-action', { id });
   }
 
+  // For the UI tests (scripts/ui-tests.js).
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as {
+      __clickNotification: (subjectOrId: string | number) => boolean;
+      __olderInConversation: (role: FolderRole) => { id: number; subject: string } | null;
+    };
+    // A notification click for the newest Inbox message with this subject (or id), as the
+    // desktop one does (the `open-message` event).
+    w.__clickNotification = (subjectOrId) => {
+      for (const f of folders.values()) {
+        if (f.role !== 'inbox') continue;
+        const m = (folderMsgs.get(f.id) ?? []).find((x) => x.subject === subjectOrId || x.id === subjectOrId);
+        if (m) {
+          emit('open-message', { folderId: f.id, id: m.id });
+          return true;
+        }
+      }
+      return false;
+    };
+    // A read message, in the first account's folder with this role, that isn't the newest of its
+    // conversation there (a conversation opens on its newest).
+    w.__olderInConversation = (role) => {
+      const f = [...folders.values()].find((x) => x.role === role);
+      const list = f ? (folderMsgs.get(f.id) ?? []) : [];
+      const newest = new Map<number, number>();
+      for (const m of list) if (!newest.has(threadOf(m))) newest.set(threadOf(m), m.id);
+      const m = list.find((x) => newest.get(threadOf(x)) !== x.id && !x.unread);
+      return m ? { id: m.id, subject: m.subject } : null;
+    };
+  }
+
   const startEmpty = typeof location !== 'undefined' && new URLSearchParams(location.search).has('empty');
   // `?demo`: for screenshots (scripts/screenshots.js): no test samples, sync already done,
   // nothing arriving or changing on its own.
@@ -1228,6 +1259,26 @@ export function createMockBackend(): Backend {
     }
     return undefined;
   }
+  /** A message's (or with `threaded`, a conversation's) row in the folder's list. */
+  function indexIn(folderId: number, id: number, threaded: boolean): number | null {
+    const list = folderMsgs.get(folderId) ?? [];
+    if (!threaded) {
+      const i = list.findIndex((m) => m.id === id);
+      return i >= 0 ? i : null;
+    }
+    // Same ordering as list_threads: threads by their newest message in this folder.
+    const seen = new Set<number>();
+    let n = 0;
+    for (const m of list) {
+      const tid = threadOf(m);
+      if (seen.has(tid)) continue;
+      if (tid === id) return n;
+      seen.add(tid);
+      n++;
+    }
+    return null;
+  }
+
   /** Move (or with `to` null, delete) messages; returns a rollback. Emits once. */
   function relocate(ms: MessageSummary[], to: Folder | null): () => void {
     const moved: { m: MessageSummary; from: Folder }[] = [];
@@ -1616,24 +1667,15 @@ export function createMockBackend(): Backend {
       pendingOps.delete(opId);
       op.rollback();
     },
+    async locate_message({ folderId, messageId, threaded }) {
+      await sleep(3);
+      const id = threaded ? (meta.get(messageId)?.threadId ?? messageId) : messageId;
+      const index = indexIn(folderId, id, threaded);
+      return index == null ? null : { id, index };
+    },
     async index_of({ folderId, id, threaded }) {
       await sleep(3);
-      const list = folderMsgs.get(folderId) ?? [];
-      if (!threaded) {
-        const i = list.findIndex((m) => m.id === id);
-        return i >= 0 ? i : null;
-      }
-      // Same ordering as list_threads: threads by their newest message in this folder.
-      const seen = new Set<number>();
-      let n = 0;
-      for (const m of list) {
-        const tid = threadOf(m);
-        if (seen.has(tid)) continue;
-        if (tid === id) return n;
-        seen.add(tid);
-        n++;
-      }
-      return null;
+      return indexIn(folderId, id, threaded);
     },
     async show_log() {
       await sleep(3);

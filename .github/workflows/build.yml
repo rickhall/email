@@ -28,6 +28,17 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker logs mail-test-dovecot 2>&1 | tail -100; docker logs mail-test-mailpit 2>&1 | tail -50
+      # The UI against its mock backend, in the runner's Google Chrome (app/scripts/ui-tests.js).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: UI tests
+        working-directory: app
+        run: |
+          npm ci
+          npm run test:ui
 
   bundle:
     needs: test

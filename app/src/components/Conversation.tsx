@@ -11,6 +11,8 @@ import {
   readerThread,
   selectedThreadId,
   selectThread,
+  conversationFocus,
+  takeConversationFocus,
 } from '../state';
 import { ForwardIcon, ImageIcon, PaperclipIcon, ReplyIcon } from './Icons';
 import { AddrList, AttachmentControl, Avatar, BodySkeleton, buildSrcdoc, PlainBody, ReaderEmpty } from './Reader';
@@ -372,14 +374,18 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
       if (!initialized) {
         initialized = true;
         const newest = list[list.length - 1];
+        // One message asked for (a search result kept, a notification): that one, not the newest.
+        const asked = takeConversationFocus(t.id);
+        const focus = asked != null && list.some((m) => m.id === asked) ? asked : null;
         const open: Record<number, boolean> = {};
         for (const m of list) {
           seen.add(m.id);
           if (m.unread) open[m.id] = true;
         }
-        if (newest) open[newest.id] = true;
+        if (focus != null) open[focus] = true;
+        else if (newest) open[newest.id] = true;
         setExpanded(reconcile(open));
-        const target = list.find((m) => m.unread) ?? newest;
+        const target = focus != null ? list.find((m) => m.id === focus) : (list.find((m) => m.unread) ?? newest);
         setScrollTarget(target?.id ?? null);
       } else {
         // New arrivals while open: expand them if unread.
@@ -430,6 +436,21 @@ function ConversationView(props: { thread: ThreadSummary; ref?: (el: HTMLElement
         initialized = false;
         seen.clear();
         void load();
+      },
+      { defer: true },
+    ),
+  );
+
+  // Asked for while this conversation is already open.
+  createEffect(
+    on(
+      conversationFocus,
+      () => {
+        if (!state.loaded) return; // the first load takes it
+        const id = takeConversationFocus(t.id);
+        if (id == null || !state.list.some((m) => m.id === id)) return;
+        setExpanded(id, true);
+        setScrollTarget(id);
       },
       { defer: true },
     ),

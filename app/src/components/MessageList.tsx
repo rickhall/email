@@ -28,6 +28,8 @@ import {
   selectFolderAtUnread,
   takeUnreadOnArrival,
   takeReveal,
+  type Reveal,
+  focusInConversation,
   revealRequest,
 } from '../state';
 import { CheckIcon, ClockIcon, FlagIcon, ForwardIcon, PaperclipIcon, ReplyIcon } from './Icons';
@@ -514,10 +516,12 @@ export function MessageList(props: {
     e.preventDefault();
   }
 
-  // Open a message by id once its row is here: the folder's remembered item (per view mode,
-  // Thunderbird-style) when entering it, or one asked for by a notification (`force`: it
-  // replaces whatever is selected).
-  function openById(target: number, force: boolean) {
+  // Open a row by id once it's here: the folder's remembered item (per view mode,
+  // Thunderbird-style) when entering it, or a message asked for by a notification or kept from a
+  // search (`asked`: a message id, its conversation in conversation view; it replaces whatever
+  // is selected, and its fallback runs if the folder doesn't have it).
+  function openById(item: number, asked?: Reveal) {
+    const force = asked != null;
     let disposed = false;
     onCleanup(() => {
       disposed = true;
@@ -527,13 +531,20 @@ export function MessageList(props: {
     // The empty reader stays quiet at most this long, then shows its hint as usual.
     const quietTimer = setTimeout(() => setRestorePending(false), 150);
     // index_of answers both questions at once: still in this folder, and where (any depth).
-    void api
-      .indexOf(folderId, target, threaded)
+    let target = item;
+    const where: Promise<number | null> = asked
+      ? api.locateMessage(folderId, asked.id, threaded).then((l) => {
+          if (l) target = l.id;
+          return l?.index ?? null;
+        })
+      : api.indexOf(folderId, item, threaded);
+    void where
       .catch(() => null)
       .then(async (idx) => {
         if (disposed) return;
         if (idx == null) {
           if (!force) rememberSelection(folderId, threaded, null);
+          else asked?.fallback?.();
           return;
         }
         // The user may have picked something meanwhile: never override that.
@@ -559,6 +570,8 @@ export function MessageList(props: {
         }
         if (!m) return;
         setSelIndex(k);
+        // A conversation: its reader opens the message asked for, not the newest.
+        if (asked && threaded) focusInConversation(m.id, asked.id);
         select(m);
         queueMicrotask(() => reveal(k));
       })
@@ -570,15 +583,16 @@ export function MessageList(props: {
 
   if (!search) {
     const revealed = takeReveal(folderId);
-    const target = revealed ?? rememberedSelection(folderId, threaded);
-    if (target != null && (revealed != null || untrack(selectedId) == null)) openById(target, revealed != null);
+    const remembered = rememberedSelection(folderId, threaded);
+    if (revealed) openById(revealed.id, revealed);
+    else if (remembered != null && untrack(selectedId) == null) openById(remembered);
     // Asked for while this folder is already showing.
     createEffect(
       on(
         revealRequest,
         () => {
-          const id = takeReveal(folderId);
-          if (id != null) openById(id, true);
+          const r = takeReveal(folderId);
+          if (r) openById(r.id, r);
         },
         { defer: true },
       ),
@@ -775,6 +789,7 @@ export function MessageList(props: {
                   id={`${rowPrefix}-${item.index}`}
                   role="option"
                   class="row"
+                  data-id={m()?.id}
                   classList={{
                     selected: !!m() && isSelected(m()!.id),
                     unread: !!m()?.unread,

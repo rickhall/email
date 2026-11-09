@@ -81,6 +81,7 @@ export function patchSelectedSummary(id: number, patch: Partial<MessageSummary>)
 }
 
 export function selectMessage(m: MessageSummary | null): void {
+  if (m && searchActive()) pickedInSearch = true;
   batch(() => {
     setSelectedMessageId(m ? m.id : null);
     setSelectedSummary(m ? { ...m } : null);
@@ -139,15 +140,27 @@ export const searchActive = () => searchQuery().trim() !== '';
 
 /** Selection before the search started, restored when the query is cleared. */
 let preSearchSelection: MessageSummary | null = null;
+/** A result was picked during this search (see `setSearchQuery`). */
+let pickedInSearch = false;
 
 export function setSearchQuery(q: string): void {
   const was = searchActive();
   setSearchQuerySig(q);
   const now = searchActive();
-  if (!was && now) preSearchSelection = selectedSummary();
-  else if (was && !now) {
-    selectMessage(preSearchSelection);
+  if (!was && now) {
+    preSearchSelection = selectedSummary();
+    pickedInSearch = false;
+  } else if (was && !now) {
+    const before = preSearchSelection;
     preSearchSelection = null;
+    const picked = pickedInSearch ? selectedSummary() : null;
+    pickedInSearch = false;
+    const folderId = selectedFolderId();
+    if (picked && folderId != null) {
+      // A result picked during the search stays open if the folder has it (the folder's list
+      // finds and selects it, or its conversation); else the selection from before comes back.
+      setRevealRequest({ folderId, id: picked.id, fallback: () => selectMessage(before) });
+    } else selectMessage(before);
   }
 }
 
@@ -257,18 +270,46 @@ export function takeUnreadOnArrival(folderId: number): { back: boolean } | null 
   return u?.folderId === folderId ? { back: u.back } : null;
 }
 
-// A notification was clicked: the folder's list opens this message once it's up (or, already
-// showing that folder, right away). A new object each time, so the same message works twice.
-const [revealRequest, setRevealRequest] = createSignal<{ folderId: number; id: number } | null>(null);
+// A notification was clicked (or a search result picked, and the search cleared): the folder's
+// list opens this message once it's up (or, already showing that folder, right away); in
+// conversation view, its conversation. `fallback` runs if the folder doesn't have it. A new
+// object each time, so the same message works twice.
+export interface Reveal {
+  folderId: number;
+  /** a message id (never a conversation's) */
+  id: number;
+  fallback?: () => void;
+}
+const [revealRequest, setRevealRequest] = createSignal<Reveal | null>(null);
+
+/** Requests already taken. Not cleared through the signal: that would re-run the list's effect
+ * watching it, and so cancel the opening just started. */
+const revealsTaken = new WeakSet<Reveal>();
 
 /** For the folder's list: the message to open, if one was asked for there (taken once). */
-export function takeReveal(folderId: number): number | null {
+export function takeReveal(folderId: number): Reveal | null {
   const r = untrack(revealRequest);
-  if (r?.folderId !== folderId) return null;
-  setRevealRequest(null);
-  return r.id;
+  if (!r || r.folderId !== folderId || revealsTaken.has(r)) return null;
+  revealsTaken.add(r);
+  return r;
 }
 export { revealRequest };
+
+// A reveal that selected a conversation: which of its messages to open (expanded, scrolled to)
+// instead of the newest. Taken once, by the conversation's reader (as it opens, or if it's open).
+const [conversationFocus, setConversationFocus] = createSignal<{ threadId: number; messageId: number } | null>(null);
+const focusTaken = new WeakSet<object>();
+export { conversationFocus };
+export function focusInConversation(threadId: number, messageId: number): void {
+  setConversationFocus({ threadId, messageId });
+}
+/** For a conversation's reader: the message to open, if one was asked for there. */
+export function takeConversationFocus(threadId: number): number | null {
+  const f = untrack(conversationFocus);
+  if (!f || f.threadId !== threadId || focusTaken.has(f)) return null;
+  focusTaken.add(f);
+  return f.messageId;
+}
 
 /** Show the folder and, if given, select this message in it. */
 export function revealMessage(folderId: number, id: number | null): void {

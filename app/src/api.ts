@@ -128,6 +128,9 @@ export const api = {
   /** Row index of a message / conversation in the folder's list (null = not in it). */
   indexOf: (folderId: number, id: number, threaded: boolean): Promise<number | null> =>
     call('index_of', { folderId, id, threaded }),
+  /** Where a message shows in the folder's list: its row's id (the message, or its conversation) and position. */
+  locateMessage: (folderId: number, messageId: number, threaded: boolean): Promise<{ id: number; index: number } | null> =>
+    call('locate_message', { folderId, messageId, threaded }),
   /** The next unread item below `after` in the folder's list, wrapping to the top; with `back`
    *  the previous one above it, wrapping to the bottom (null = none). */
   nextUnread: (folderId: number, after: number | null, threaded: boolean, back = false): Promise<NextUnread | null> =>

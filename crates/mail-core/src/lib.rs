@@ -483,6 +483,14 @@ impl Core {
         self.store.index_of(folder_id, id, threaded)
     }
 
+    /// Where a message shows in the folder's list: its row (the message, or with `threaded` its
+    /// conversation) and that row's position; None if it isn't in the folder.
+    pub fn locate_message(&self, folder_id: i64, message_id: i64, threaded: bool) -> Result<Option<(i64, u32)>> {
+        let item = if threaded { self.store.message_thread_id(message_id)? } else { Some(message_id) };
+        let Some(item) = item else { return Ok(None) };
+        Ok(self.store.index_of(folder_id, item, threaded)?.map(|i| (item, i)))
+    }
+
     /// A message's detail, downloading its body first if it isn't local yet (waits up to 30 s).
     async fn detail_now(&self, id: i64) -> Result<MessageDetail> {
         let mut rx = self.events.subscribe();

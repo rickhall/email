@@ -359,6 +359,20 @@ async fn index_of(core: State<'_, Arc<Core>>, folder_id: i64, id: i64, threaded:
     timed("index_of", || core.index_of(folder_id, id, threaded)).map_err(err)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Located {
+    id: i64,
+    index: u32,
+}
+
+#[tauri::command]
+async fn locate_message(core: State<'_, Arc<Core>>, folder_id: i64, message_id: i64, threaded: bool) -> Res<Option<Located>> {
+    timed("locate_message", || core.locate_message(folder_id, message_id, threaded))
+        .map(|l| l.map(|(id, index)| Located { id, index }))
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn next_unread(
     core: State<'_, Arc<Core>>,
@@ -898,6 +912,7 @@ pub fn run() {
             apply_action,
             undo_action,
             index_of,
+            locate_message,
             next_unread,
             show_log,
             send_message,
