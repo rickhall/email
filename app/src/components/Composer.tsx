@@ -18,13 +18,14 @@ import {
   updateCompose,
   type ComposeState,
 } from '../lib/compose';
+import { switchRecipients, type ReplyRecipients } from '../lib/recipients';
 import { api } from '../api';
 import { composeDraftId, onCloseRequested, onFileDrop, pickFiles, setWindowTitle } from '../lib/windows';
 import { GMAIL_LIMIT } from '../lib/compose';
 import { MOD } from '../lib/shortcuts';
 import { DRAG } from '../lib/platform';
 import { confirmDialog } from './Actions';
-import { CloseIcon, PaperclipIcon, TrashIcon } from './Icons';
+import { CloseIcon, ForwardIcon, PaperclipIcon, ReplyAllIcon, ReplyIcon, TrashIcon } from './Icons';
 import { AutoHeightFrame } from './Conversation';
 import { buildSrcdoc } from './Reader';
 import { fmtSize } from '../lib/format';
@@ -499,11 +500,70 @@ export function Composer() {
   const accountList = () => accounts() ?? [];
   const from = () => accountList().find((a) => a.id === c().accountId);
 
+  // Reply ⇄ Reply all: the recipients each would fill in, to switch between them.
+  const [replyCtx, setReplyCtx] = createSignal<{ reply: ReplyRecipients; replyAll: ReplyRecipients } | null>(null);
+  onMount(() => {
+    const id = c().replyingTo;
+    if (id == null || (c().mode !== 'reply' && c().mode !== 'replyAll')) return;
+    void Promise.all([api.replyContext(id, 'reply'), api.replyContext(id, 'replyAll')])
+      .then(([r, all]) => setReplyCtx({ reply: { to: r.to, cc: r.cc }, replyAll: { to: all.to, cc: all.cc } }))
+      .catch(() => {});
+  });
+  /** Reply all would add no one: nothing to switch to. */
+  const nobodyElse = () => {
+    const k = replyCtx();
+    if (!k) return false;
+    const set = (r: ReplyRecipients) => [...r.to, ...r.cc].map((a) => a.addr.toLowerCase()).sort().join(' ');
+    return set(k.reply) === set(k.replyAll);
+  };
+  function switchMode(mode: 'reply' | 'replyAll') {
+    const cur = c();
+    const k = replyCtx();
+    if (!k || cur.mode === mode || (cur.mode !== 'reply' && cur.mode !== 'replyAll')) return;
+    const next = switchRecipients(cur, k[cur.mode], k[mode]);
+    updateCompose({ mode, ...next, showCc: cur.showCc || next.cc.length > 0 });
+  }
+
   return (
     <section class="reader composer" aria-label="New message" ref={root}>
       {/* Compact: the subject is in the window title and the field below, not repeated here. */}
       <header class="cmp-bar" data-tauri-drag-region={DRAG}>
-        <span class="cmp-kind">{{ new: 'New message', reply: 'Reply', replyAll: 'Reply all', forward: 'Forward' }[c().mode]}</span>
+        <Show
+          when={(c().mode === 'reply' || c().mode === 'replyAll') && c().replyingTo != null}
+          fallback={
+            <span class="cmp-kind">
+              <Show when={c().mode === 'forward'}>
+                <ForwardIcon size={14} />
+              </Show>
+              {c().mode === 'forward' ? 'Forward' : 'New message'}
+            </span>
+          }
+        >
+          {/* Which reply this is, at a glance, and the other one a click away. */}
+          <div class="cmp-mode" role="radiogroup" aria-label="Reply to">
+            <button
+              role="radio"
+              aria-checked={c().mode === 'reply'}
+              classList={{ on: c().mode === 'reply' }}
+              title="Reply to the sender only"
+              onClick={() => switchMode('reply')}
+            >
+              <ReplyIcon size={14} />
+              Reply
+            </button>
+            <button
+              role="radio"
+              aria-checked={c().mode === 'replyAll'}
+              classList={{ on: c().mode === 'replyAll' }}
+              title={nobodyElse() ? 'No one else was on the original' : 'Reply to everyone on the original'}
+              disabled={nobodyElse() && c().mode !== 'replyAll'}
+              onClick={() => switchMode('replyAll')}
+            >
+              <ReplyAllIcon size={14} />
+              Reply all
+            </button>
+          </div>
+        </Show>
         <div class="cmp-actions" data-tauri-drag-region={DRAG}>
           <span class="cmp-hint">{MOD === '⌘' ? '⌘↵' : 'Ctrl+Enter'} to send · Esc to close</span>
           <Show when={asking()}>

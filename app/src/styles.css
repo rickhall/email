@@ -4370,10 +4370,51 @@ html.inactive .sk-line {
   border-bottom: 1px solid var(--sep);
 }
 .cmp-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 650;
   color: var(--text-2);
   white-space: nowrap;
+}
+/* Reply | Reply all: the current one filled, the other a click away */
+.cmp-mode {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--sep);
+  border-radius: 8px;
+}
+.cmp-mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cmp-mode button:hover:not(:disabled):not(.on) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.cmp-mode button.on {
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: default;
+}
+.cmp-mode button:disabled:not(.on) {
+  opacity: 0.4;
+  cursor: default;
 }
 .cmp-bar .cmp-actions {
   flex: 1;

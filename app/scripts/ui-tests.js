@@ -42,7 +42,7 @@ async function open({ threaded }) {
   await page.goto(base + '?demo');
   await page.waitForSelector('.folder-layer .row');
   await page.waitForTimeout(300);
-  return { page, errors, close: () => context.close() };
+  return { page, errors, context, close: () => context.close() };
 }
 
 const selected = (page) => page.locator('.folder-layer .row.selected .row-subject').first();
@@ -162,6 +162,39 @@ describe('conversation view: the message asked for', () => {
       await page.waitForTimeout(300);
       await page.fill('.search-field input', '');
       await cardOpen(page, older.id, 'after clearing');
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('compose', () => {
+  test('Reply and Reply all switch over, changing only their own recipients', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      // The first demo message has people in Cc.
+      await page.locator('.folder-layer .row').first().click();
+      await page.waitForTimeout(300);
+      const popup = context.waitForEvent('page');
+      await page.locator('.reader [aria-label="Reply all"]').first().click();
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      await w.waitForSelector('.cmp-mode');
+      const on = async () => (await w.locator('.cmp-mode button.on').textContent()).trim();
+      const people = async () =>
+        (await w.locator('.cmp-fields .addr-chip').allTextContents()).map((t) => t.replace('×', '').trim());
+      await w.waitForFunction(() => document.querySelectorAll('.cmp-fields .addr-chip').length >= 3);
+      assert.equal(await on(), 'Reply all');
+      const all = await people();
+
+      await w.locator('.cmp-mode button', { hasText: /^Reply$/ }).click();
+      assert.equal(await on(), 'Reply');
+      assert.equal((await people()).length, 1, 'only the sender');
+
+      await w.locator('.cmp-mode button', { hasText: 'Reply all' }).click();
+      assert.equal(await on(), 'Reply all');
+      assert.deepEqual(await people(), all);
       assert.deepEqual(errors, []);
     } finally {
       await close();
