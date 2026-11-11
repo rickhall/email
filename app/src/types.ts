@@ -11,6 +11,10 @@ export interface Account {
   auth: 'password' | 'microsoft';
   /** its server keeps keywords we make up (tags, snooze); null until the first sync tells */
   keywords: boolean | null;
+  /** its marker's letter and colour (a palette name, lib/accountMarks) as the user set them;
+   *  null: automatic */
+  markLetter: string | null;
+  markColor: string | null;
 }
 
 export type FolderRole =
@@ -418,6 +422,8 @@ export interface CommandMap {
   update_password: { args: { accountId: number; password: string }; ret: void };
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   set_display_name: { args: { accountId: number; name: string }; ret: void };
+  set_account_order: { args: { ids: number[] }; ret: void };
+  set_account_mark: { args: { accountId: number; letter: string | null; color: string | null }; ret: void };
   set_notifications: { args: { enabled: boolean }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };
   attachment_counts: { args: undefined; ret: AttachmentCounts[] };

@@ -132,6 +132,15 @@ enum Cmd {
         #[arg(long)]
         select: bool,
     },
+    /// A server's folders as it lists them (LIST, with attributes) and which are subscribed
+    /// (LSUB). Read-only; signs in as `flags` does.
+    Folders {
+        email: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        microsoft: bool,
+    },
     /// Uses the password the app stored in the system keychain.
     Probe {
         email: String,
@@ -181,6 +190,31 @@ async fn main() -> Result<()> {
             let mut names: Vec<String> = caps.iter().map(|c| format!("{c:?}")).collect();
             names.sort();
             println!("CAPABILITIES: {}", names.join(" "));
+            conn.logout().await;
+            Ok(())
+        }
+        Cmd::Folders { email, host, microsoft } => {
+            use futures::TryStreamExt;
+            let secret = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let credentials = if microsoft {
+                let tokens = mail_core::oauth::microsoft_refresh(&secret).await?;
+                mail_core::imap::Credentials::OAuth2 { access_token: tokens.access_token }
+            } else {
+                mail_core::imap::Credentials::Password(secret)
+            };
+            let cfg = mail_core::imap::ServerConfig { host, port: 993, user: email.clone(), credentials };
+            let mut conn = mail_core::imap::connect(&cfg).await?;
+            let listed: Vec<_> = conn.session.list(Some(""), Some("*")).await?.try_collect().await?;
+            let subscribed: Vec<_> = conn.session.lsub(Some(""), Some("*")).await?.try_collect().await?;
+            let subs: std::collections::HashSet<String> = subscribed.iter().map(|n| n.name().to_string()).collect();
+            for n in &listed {
+                let mark = if subs.contains(n.name()) { "sub" } else { "   " };
+                println!("{mark}  {:<40} {:?}", n.name(), n.attributes());
+            }
+            println!("{} listed, {} subscribed", listed.len(), subscribed.len());
+            println!("Exchange: {}", conn.caps.exchange);
+            let shown: Vec<String> = conn.list_folders().await?.into_iter().map(|f| f.path.join("/")).collect();
+            println!("shown ({}): {}", shown.len(), shown.join(", "));
             conn.logout().await;
             Ok(())
         }

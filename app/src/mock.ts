@@ -689,6 +689,8 @@ export function createMockBackend(): Backend {
       auth: provider === 'outlook' ? 'microsoft' : 'password',
       // Exchange doesn't keep keywords of our own (no tags or snooze there).
       keywords: provider !== 'outlook',
+      markLetter: null,
+      markColor: null,
     };
     accounts.push(acc);
     const me: Person = { name: displayName, addr: email };
@@ -1830,6 +1832,16 @@ export function createMockBackend(): Backend {
       await sleep(3);
       const acc = accounts.find((x) => x.id === accountId);
       if (acc) acc.displayName = name.trim() || acc.email;
+    },
+    async set_account_order({ ids }) {
+      await sleep(3);
+      const rank = (a: Account) => (ids.includes(a.id) ? ids.indexOf(a.id) : ids.length + a.id);
+      accounts.sort((a, b) => rank(a) - rank(b));
+    },
+    async set_account_mark({ accountId, letter, color }) {
+      await sleep(3);
+      const acc = accounts.find((x) => x.id === accountId);
+      if (acc) Object.assign(acc, { markLetter: letter?.trim().toUpperCase() || null, markColor: color || null });
     },
     async set_keep_attachments({ accountId, keep }) {
       await sleep(3);

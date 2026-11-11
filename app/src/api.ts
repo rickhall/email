@@ -195,6 +195,11 @@ export const api = {
     call('set_keep_attachments', { accountId, keep }),
   /** The name mail from the account is sent under (empty: the address alone). */
   setDisplayName: (accountId: number, name: string): Promise<void> => call('set_display_name', { accountId, name }),
+  /** The order accounts are listed in, first to last. */
+  setAccountOrder: (ids: number[]): Promise<void> => call('set_account_order', { ids }),
+  /** An account's marker letter and colour; null for automatic. */
+  setAccountMark: (accountId: number, letter: string | null, color: string | null): Promise<void> =>
+    call('set_account_mark', { accountId, letter, color }),
   /** Desktop notifications for new mail in an Inbox (while the window isn't in use). */
   setNotifications: (enabled: boolean): Promise<void> => call('set_notifications', { enabled }),
 };

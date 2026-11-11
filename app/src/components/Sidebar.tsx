@@ -611,7 +611,7 @@ function AccountSection(props: { account: Account; index: number }) {
           </Show>
         </span>
         <Show when={collapsed() && totalUnread() > 0}>
-          <span class="badge subtle">{fmtNum(totalUnread())}</span>
+          <span class="badge">{fmtNum(totalUnread())}</span>
         </Show>
       </button>
       <Show when={!collapsed()}>

@@ -2774,6 +2774,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures",
  "keyring",
  "mail-core",
  "rpassword",

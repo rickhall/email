@@ -2,10 +2,10 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import { hint } from '../lib/shortcuts';
 import { Portal } from 'solid-js/web';
 import type { Account, Folder } from '../api';
-import { avatarColor, fmtNum } from '../lib/format';
+import { fmtNum } from '../lib/format';
 import { DRAG } from '../lib/platform';
 import { norm } from '../lib/query';
-import { accounts, folderById, foldersByAccount, selectedFolderId, selectFolder } from '../state';
+import { accountMark, accounts, folderById, foldersByAccount, selectedFolderId, selectFolder } from '../state';
 import { ChevronIcon, RoleIcon } from './Icons';
 import { isInboxPath, ROLE_ORDER } from './Sidebar';
 
@@ -21,12 +21,12 @@ export function AccountDot(props: { account: Account; size?: number }) {
   return (
     <span
       class="acct-dot"
-      style={{ background: avatarColor(props.account.email), width: `${props.size ?? 18}px`, height: `${props.size ?? 18}px` }}
+      style={{ background: accountMark(props.account).color, width: `${props.size ?? 18}px`, height: `${props.size ?? 18}px` }}
       title={props.account.email}
       aria-label={props.account.email}
       role="img"
     >
-      {(props.account.email[0] ?? '?').toUpperCase()}
+      {accountMark(props.account).letter}
     </span>
   );
 }

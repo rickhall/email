@@ -1,10 +1,10 @@
 import { createMemo, For, Show } from 'solid-js';
 import { hint } from '../lib/shortcuts';
 import type { Account, Folder } from '../api';
-import { avatarColor, fmtNum } from '../lib/format';
+import { fmtNum } from '../lib/format';
 import { flyout, setFlyout, toggleSidebar } from '../lib/layout';
 import { DRAG } from '../lib/platform';
-import { accounts, folderById, foldersByAccount, selectedFolderId, selectFolder } from '../state';
+import { accountMark, accounts, folderById, foldersByAccount, selectedFolderId, selectFolder } from '../state';
 import { FoldersIcon, RoleIcon, SidebarIcon } from './Icons';
 import { badgeFor, isAccountCollapsed, isInboxPath, roleFolders, SyncFooter, toggleAccount } from './Sidebar';
 
@@ -39,7 +39,6 @@ function RailFolder(props: { f: Folder }) {
 /** An account: its marker (click to fold it away, as in the sidebar), then its main folders. */
 function RailAccount(props: { account: Account }) {
   const roles = createMemo(() => roleFolders(foldersByAccount[props.account.id] ?? []));
-  const letter = () => (props.account.email[0] ?? '?').toUpperCase();
   const collapsed = () => isAccountCollapsed(props.account.id);
   // Folded: the Inbox's unread badge moves onto the marker (placed as on the Inbox icon), and
   // the marker is selected if the open folder is in this account.
@@ -56,8 +55,8 @@ function RailAccount(props: { account: Account }) {
         aria-expanded={!collapsed()}
         onClick={() => toggleAccount(props.account.id)}
       >
-        <span class="rail-letter" style={{ background: avatarColor(props.account.email) }}>
-          {letter()}
+        <span class="rail-letter" style={{ background: accountMark(props.account).color }}>
+          {accountMark(props.account).letter}
         </span>
         <Show when={collapsed() && inboxUnread() > 0}>
           <span class="rail-badge">{compact(inboxUnread())}</span>

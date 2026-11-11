@@ -283,6 +283,9 @@ pub struct Caps {
     pub move_ext: bool,
     /// RFC 4315: UID EXPUNGE removes only the given messages.
     pub uidplus: bool,
+    /// Microsoft Exchange (Office 365, Outlook.com), by its greeting: it lists its calendars,
+    /// contacts, tasks and such as folders too, leaving only the mail ones subscribed.
+    pub exchange: bool,
 }
 
 pub struct Connection {
@@ -354,7 +357,11 @@ async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
     let activity = Activity::default();
     activity.touch();
     let mut client = async_imap::Client::new(Tracked { inner: tls, activity: activity.clone() });
-    client.read_response().await?.ok_or_else(|| disconnected("server closed before greeting".into()))?;
+    let greeting = client.read_response().await?.ok_or_else(|| disconnected("server closed before greeting".into()))?;
+    let exchange = matches!(
+        greeting.parsed(),
+        async_imap::imap_proto::Response::Data { outcome: async_imap::imap_proto::Outcome { information: Some(text), .. }, .. } if text.contains("Microsoft Exchange")
+    );
 
     let mut session = match &cfg.credentials {
         Credentials::Password(pw) => client.login(&cfg.user, pw).await.map_err(|(e, _)| auth_error(e))?,
@@ -374,6 +381,7 @@ async fn connect_inner(cfg: &ServerConfig) -> Result<Connection> {
         objectid: c.has_str("OBJECTID"),
         move_ext: c.has_str("MOVE"),
         uidplus: c.has_str("UIDPLUS"),
+        exchange,
     };
     Ok(Connection { session, caps, selected: None, activity })
 }
@@ -456,6 +464,16 @@ impl Connection {
                 role = guess_role(&path);
             }
             out.push(ListedFolder { raw_name: raw, path, role, selectable });
+        }
+        // Exchange: only the folders it subscribes (its mail ones, as Thunderbird shows), not its
+        // Calendar, Contacts, Tasks, Notes, Journal, Outbox, Sync Issues and such. Ones with a
+        // role and the parents of those kept stay too. No subscriptions at all: all shown.
+        if self.caps.exchange {
+            let subscribed: Vec<_> = self.session.lsub(Some(""), Some("*")).await?.try_collect().await?;
+            let subscribed: std::collections::HashSet<String> = subscribed.iter().map(|n| n.name().to_string()).collect();
+            if !subscribed.is_empty() {
+                keep_subscribed(&mut out, &subscribed);
+            }
         }
         // Gmail exposes "[Gmail]" as a non-selectable container (some accounts keep user labels
         // under it too); flatten it away so the sidebar shows "Sent" or "Work", not "[Gmail] / …".
@@ -752,6 +770,16 @@ impl crate::partial::Sections for FetchSections<'_> {
     }
 }
 
+/// Drop the folders not subscribed, but for ones with a role and the parents of those kept.
+fn keep_subscribed(folders: &mut Vec<ListedFolder>, subscribed: &std::collections::HashSet<String>) {
+    let kept: Vec<Vec<String>> = folders
+        .iter()
+        .filter(|f| f.role.is_some() || subscribed.contains(&f.raw_name))
+        .map(|f| f.path.clone())
+        .collect();
+    folders.retain(|f| kept.iter().any(|k| k.starts_with(&f.path)));
+}
+
 fn guess_role(path: &[String]) -> Option<FolderRole> {
     let last = path.last()?.to_ascii_lowercase();
     Some(match last.as_str() {
@@ -956,6 +984,33 @@ pub fn server_for(email: &str) -> Option<(&'static str, u16, crate::model::Provi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_shows_its_subscribed_folders() {
+        let f = |name: &str, role| ListedFolder {
+            raw_name: name.into(),
+            path: name.split('/').map(str::to_string).collect(),
+            role,
+            selectable: true,
+        };
+        let mut folders = vec![
+            f("INBOX", Some(FolderRole::Inbox)),
+            f("Sent Items", Some(FolderRole::Sent)),
+            f("Calendar", None),
+            f("Calendar/Birthdays", None),
+            f("Contacts", None),
+            f("Projects", None),
+            f("Projects/Acme", None),
+            f("Sync Issues", None),
+            f("Sync Issues/Conflicts", None),
+            f("Work", None),
+        ];
+        // Exchange leaves INBOX out of LSUB; "Projects" isn't subscribed, its child is.
+        let subscribed = ["Sent Items", "Projects/Acme", "Work"].map(String::from).into_iter().collect();
+        keep_subscribed(&mut folders, &subscribed);
+        let names: Vec<_> = folders.iter().map(|f| f.raw_name.as_str()).collect();
+        assert_eq!(names, ["INBOX", "Sent Items", "Projects", "Projects/Acme", "Work"]);
+    }
 
     #[test]
     fn mutf7() {

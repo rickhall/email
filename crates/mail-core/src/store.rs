@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS accounts (
     smtp_port    INTEGER,
     keep_attachments INTEGER NOT NULL DEFAULT 0, -- download whole messages (offline attachments)
     auth         TEXT NOT NULL DEFAULT 'password', -- how it signs in: password | microsoft (OAuth)
-    keywords     INTEGER                -- server keeps custom keywords (\* in PERMANENTFLAGS); NULL: not seen yet
+    keywords     INTEGER,               -- server keeps custom keywords (\* in PERMANENTFLAGS); NULL: not seen yet
+    position     INTEGER,               -- the user's order (dragged in the sidebar); NULL: after the others, by id
+    mark_letter  TEXT,                  -- its marker's letter, set by the user; NULL: automatic
+    mark_color   TEXT                   -- its marker's colour (a name from the app's palette); NULL: automatic
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -221,6 +224,14 @@ const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
     |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN auth TEXT NOT NULL DEFAULT 'password';")?),
     // 9: whether the server keeps custom keywords (tags, snooze)
     |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN keywords INTEGER;")?),
+    // 10: the accounts' order and markers, set by the user
+    |db| {
+        Ok(db.execute_batch(
+            "ALTER TABLE accounts ADD COLUMN position INTEGER;
+             ALTER TABLE accounts ADD COLUMN mark_letter TEXT;
+             ALTER TABLE accounts ADD COLUMN mark_color TEXT;",
+        )?)
+    },
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
@@ -725,10 +736,10 @@ impl Store {
             params![email, display_name, provider.as_str(), host, port],
         )?;
         let id: i64 = db.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))?;
-        let (smtp_host, smtp_port, auth, keywords) = db.query_row(
-            "SELECT smtp_host, smtp_port, auth, keywords FROM accounts WHERE id=?1",
+        let (smtp_host, smtp_port, auth, keywords, mark_letter, mark_color) = db.query_row(
+            "SELECT smtp_host, smtp_port, auth, keywords, mark_letter, mark_color FROM accounts WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?), r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?), r.get(3)?, r.get(4)?, r.get(5)?)),
         )?;
         Ok(Account {
             id,
@@ -741,6 +752,8 @@ impl Store {
             smtp_port,
             auth,
             keywords,
+            mark_letter,
+            mark_color,
         })
     }
 
@@ -755,8 +768,9 @@ impl Store {
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth, keywords
-             FROM accounts ORDER BY id",
+            "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth, keywords,
+                    mark_letter, mark_color
+             FROM accounts ORDER BY position IS NULL, position, id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Account {
@@ -770,6 +784,8 @@ impl Store {
                 smtp_port: r.get(7)?,
                 auth: AuthKind::parse(&r.get::<_, String>(8)?),
                 keywords: r.get(9)?,
+                mark_letter: r.get(10)?,
+                mark_color: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1801,6 +1817,27 @@ impl Store {
 
     pub fn set_display_name(&self, account_id: i64, name: &str) -> Result<()> {
         self.db().execute("UPDATE accounts SET display_name=?2 WHERE id=?1", params![account_id, name])?;
+        Ok(())
+    }
+
+    /// The accounts' order: `ids` first to last (others after them, by id).
+    pub fn set_account_order(&self, ids: &[i64]) -> Result<()> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        tx.execute("UPDATE accounts SET position=NULL", [])?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute("UPDATE accounts SET position=?2 WHERE id=?1", params![id, i as i64])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// An account's marker as the user set it (None: automatic).
+    pub fn set_account_mark(&self, account_id: i64, letter: Option<&str>, color: Option<&str>) -> Result<()> {
+        self.db().execute(
+            "UPDATE accounts SET mark_letter=?2, mark_color=?3 WHERE id=?1",
+            params![account_id, letter, color],
+        )?;
         Ok(())
     }
 
@@ -3083,6 +3120,33 @@ mod tests {
     }
 
     #[test]
+    fn accounts_keep_the_users_order_and_markers() {
+        let dir = std::env::temp_dir().join(format!("mail-core-acct-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let a = store.insert_account("john@example.com", "John", Provider::Imap, "h", 993).unwrap().id;
+        let b = store.insert_account("jane@example.org", "Jane", Provider::Imap, "h", 993).unwrap().id;
+        let c = store.insert_account("jdoe@example.net", "J", Provider::Imap, "h", 993).unwrap().id;
+        let ids = |s: &Store| s.accounts().unwrap().iter().map(|x| x.id).collect::<Vec<_>>();
+        assert_eq!(ids(&store), [a, b, c]);
+        // c first, then a; b (not in the list) after them
+        store.set_account_order(&[c, a]).unwrap();
+        assert_eq!(ids(&store), [c, a, b]);
+        store.set_account_mark(b, Some("W"), Some("teal")).unwrap();
+        let d = store.insert_account("doe@example.com", "D", Provider::Imap, "h", 993).unwrap();
+        assert_eq!((d.mark_letter, d.mark_color), (None, None));
+        drop(store);
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(ids(&store), [c, a, b, d.id], "a new account comes last");
+        let jane = store.accounts().unwrap().into_iter().find(|x| x.id == b).unwrap();
+        assert_eq!((jane.mark_letter.as_deref(), jane.mark_color.as_deref()), (Some("W"), Some("teal")));
+        store.set_account_mark(b, None, None).unwrap();
+        let jane = store.accounts().unwrap().into_iter().find(|x| x.id == b).unwrap();
+        assert_eq!((jane.mark_letter, jane.mark_color), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn leftover_local_copies_of_sent_mail_go() {
         let dir = std::env::temp_dir().join(format!("mail-core-leftover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3428,7 +3492,8 @@ mod tests {
             let db = Connection::open(dir.join("mail.db")).unwrap();
             db.execute_batch(&format!(
                 "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE accounts DROP COLUMN auth;
-                 ALTER TABLE accounts DROP COLUMN keywords;
+                 ALTER TABLE accounts DROP COLUMN keywords; ALTER TABLE accounts DROP COLUMN position;
+                 ALTER TABLE accounts DROP COLUMN mark_letter; ALTER TABLE accounts DROP COLUMN mark_color;
                  ALTER TABLE messages DROP COLUMN attachments_stored;
                  PRAGMA user_version={BASE_VERSION};"
             ))

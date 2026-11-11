@@ -779,6 +779,26 @@ impl Core {
         Ok(())
     }
 
+    /// The order accounts are listed in: `ids` first to last (any others after them).
+    pub fn set_account_order(&self, ids: &[i64]) -> Result<()> {
+        self.store.set_account_order(ids)
+    }
+
+    /// The letter and colour of an account's marker; None (or empty) for automatic. The letter
+    /// is one character, the colour a name from the app's palette (lowercase letters).
+    pub fn set_account_mark(&self, account_id: i64, letter: Option<&str>, color: Option<&str>) -> Result<()> {
+        self.account(account_id)?;
+        let letter = letter.map(str::trim).filter(|l| !l.is_empty()).map(|l| l.to_uppercase());
+        if letter.as_ref().is_some_and(|l| l.chars().count() > 1) {
+            bail!("a marker is one letter");
+        }
+        let color = color.map(str::trim).filter(|c| !c.is_empty());
+        if color.is_some_and(|c| c.len() > 16 || !c.chars().all(|ch| ch.is_ascii_lowercase())) {
+            bail!("not a marker colour");
+        }
+        self.store.set_account_mark(account_id, letter.as_deref(), color)
+    }
+
     /// Download whole messages for `account_id` (attachments for offline use), or stop doing so.
     /// Turning it on also fetches, in the background, the messages already stored without them.
     pub fn set_keep_attachments(&self, account_id: i64, keep: bool) -> Result<()> {

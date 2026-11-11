@@ -361,6 +361,10 @@ body.resizing iframe {
   font-weight: 700;
   color: var(--text);
 }
+/* a folded account's total: lined up with the folder rows' counts */
+.account-head .badge {
+  margin-right: 4px;
+}
 .account-head:hover {
   color: var(--text-2);
 }
@@ -448,18 +452,20 @@ body.resizing iframe {
   text-overflow: ellipsis;
 }
 
+/* Unread count: the same blue pill as on the rail (.rail-badge), a size up. */
 .badge {
   flex: none;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--text-3);
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--unread);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
   font-variant-numeric: tabular-nums;
-}
-.folder.selected .badge {
-  color: var(--text-2);
-}
-.badge.subtle {
-  font-weight: 500;
 }
 
 /* ==========================================================================
@@ -4256,9 +4262,6 @@ html.macos .app.rail-mode .search-bar {
 .rail-btn.selected {
   color: var(--sel-folder-fg);
 }
-.folder.selected .badge {
-  color: var(--sel-folder-fg);
-}
 /* the account holding the selection: its name bold (the others regular) */
 .account-head .acct-dot {
   flex: none;
@@ -4532,6 +4535,35 @@ body.dragging-account * {
 }
 .st-editable:not(.link-btn):hover {
   background: var(--bg-hover);
+}
+.st-input.st-mark-letter {
+  width: 34px;
+  padding: 0;
+  text-align: center;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.st-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.st-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  /* a ring round the chosen one, outside its box (no shift) */
+  outline: 1.5px solid transparent;
+  outline-offset: 2px;
+}
+.st-swatch[aria-checked='true'] {
+  outline-color: var(--text-2);
 }
 .st-field-action {
   margin-left: auto;

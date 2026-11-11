@@ -201,3 +201,33 @@ describe('compose', () => {
     }
   });
 });
+
+describe('accounts', () => {
+  test('the order and markers set by the user come back from the core', async () => {
+    const { page, errors, close } = await open({ threaded: false });
+    try {
+      const names = () => page.locator('.sidebar .account-name').allTextContents();
+      const before = await names();
+      assert.ok(before.length >= 2, 'the demo has two accounts');
+      // Alt+↓ on the first account's header: it moves down one
+      await page.locator('.sidebar .account-head').first().focus();
+      await page.keyboard.press('Alt+ArrowDown');
+      const moved = [before[1], before[0], ...before.slice(2)];
+      assert.deepEqual(await names(), moved);
+      // Setting a marker reloads the accounts from the core: the order holds
+      await page.keyboard.press('Control+,');
+      const acct = page.locator('.st-acct', { hasText: before[0] });
+      await acct.locator('.st-mark-letter').fill('w');
+      await acct.locator('.st-swatch[title="Teal"]').click();
+      await page.waitForTimeout(300);
+      await page.keyboard.press('Escape');
+      const dot = page.locator('.sidebar .account', { hasText: before[0] }).locator('.acct-dot');
+      await hasText(dot, 'W', 'the marker letter');
+      assert.equal(await dot.evaluate((e) => getComputedStyle(e).backgroundColor), 'rgb(65, 200, 182)');
+      assert.deepEqual(await names(), moved);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+});

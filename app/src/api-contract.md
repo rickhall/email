@@ -10,6 +10,8 @@ interface Account {
   id: number; email: string; displayName: string; provider: Provider;
   auth: 'password' | 'microsoft';
   keywords: boolean | null;  // server keeps keywords of our own (tags, snooze); null until its first sync. Outlook: false
+  markLetter: string | null; // its marker's letter as the user set it; null: automatic
+  markColor: string | null;  // its marker's colour, a palette name (src/lib/accountMarks.ts); null: automatic
 }
 
 type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive'
@@ -116,7 +118,7 @@ interface SyncStatus {
 
 | name | args | returns |
 |---|---|---|
-| `list_accounts` | – | `Account[]` |
+| `list_accounts` | – | `Account[]` — in the user's order (`set_account_order`), then oldest first |
 | `add_account` | `{ email, password, displayName?, imapHost?, imapPort? }` | `Account` (throws string on auth failure) |
 | `list_folders` | `{ accountId }` | `Folder[]` |
 | `open_folder` | `{ folderId }` | `void` — tells sync engine to prioritise this folder |
@@ -147,6 +149,8 @@ interface SyncStatus {
 | `app_version` | – | `string` — e.g. "0.1.44 (8ec2f26)": major.minor, commit count, commit |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
+| `set_account_order` | `{ ids }` | `void` — the order accounts are listed in (`list_accounts`), first to last; others after them |
+| `set_account_mark` | `{ accountId, letter, color }` | `void` — the account's marker: one letter, a palette colour name; `null` = automatic |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |
 | `set_allow_remote` | `{ id, allow }` | `void` — remembers the "Load images" choice per message |
 | `message_in_folder` | `{ id, folderId }` | `boolean` — whether message `id` is (still) in folder `folderId`; `folderId: null` = whether it still exists anywhere in its account. Used to drop a selection that was archived/deleted elsewhere |

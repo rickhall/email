@@ -182,6 +182,16 @@ async fn set_display_name(core: State<'_, Arc<Core>>, account_id: i64, name: Str
 }
 
 #[tauri::command]
+async fn set_account_order(core: State<'_, Arc<Core>>, ids: Vec<i64>) -> Res<()> {
+    core.set_account_order(&ids).map_err(err)
+}
+
+#[tauri::command]
+async fn set_account_mark(core: State<'_, Arc<Core>>, account_id: i64, letter: Option<String>, color: Option<String>) -> Res<()> {
+    core.set_account_mark(account_id, letter.as_deref(), color.as_deref()).map_err(err)
+}
+
+#[tauri::command]
 async fn set_keep_attachments(core: State<'_, Arc<Core>>, account_id: i64, keep: bool) -> Res<()> {
     core.set_keep_attachments(account_id, keep).map_err(err)
 }
@@ -894,6 +904,8 @@ pub fn run() {
             update_password,
             set_keep_attachments,
             set_display_name,
+            set_account_order,
+            set_account_mark,
             detect_provider,
             add_microsoft_account,
             microsoft_sign_in_again,

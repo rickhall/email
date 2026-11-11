@@ -16,8 +16,9 @@ import {
   type Command,
 } from '../lib/shortcuts';
 import { ChevronIcon, CloseIcon } from './Icons';
-import { api, errorMessage, events, type AccountDetails, type AccountStorage, type AttachmentCounts } from '../api';
-import { accounts, notifyNewMail, reloadAccounts, setNotifyNewMail } from '../state';
+import { api, errorMessage, events, type Account, type AccountDetails, type AccountStorage, type AttachmentCounts } from '../api';
+import { accountMark, accounts, notifyNewMail, reloadAccounts, setNotifyNewMail } from '../state';
+import { MARK_COLORS } from '../lib/accountMarks';
 import { fmtNum, fmtSize, loadPref, savePref } from '../lib/format';
 import { AccountDot } from './FolderSwitcher';
 
@@ -253,6 +254,65 @@ function KeyboardSection() {
 
 const PROVIDER: Record<string, string> = { gmail: 'Gmail', outlook: 'Outlook', imap: 'IMAP' };
 
+/** The account's marker: a letter and a colour, each automatic unless set; saved as changed. */
+function MarkField(props: { account: Account; onError: (text: string) => void }) {
+  const mark = () => accountMark(props.account);
+  const save = async (letter: string | null, color: string | null) => {
+    try {
+      await api.setAccountMark(props.account.id, letter, color);
+      await reloadAccounts();
+    } catch (err) {
+      props.onError(errorMessage(err));
+    }
+  };
+  const pick = (color: string | null) => void save(props.account.markLetter, color);
+  return (
+    <Field label="Marker">
+      <input
+        class="st-input st-mark-letter"
+        type="text"
+        maxLength={1}
+        spellcheck={false}
+        aria-label="Marker letter (empty: automatic)"
+        title="The marker's letter; leave empty for the automatic one"
+        placeholder={mark().autoLetter}
+        value={props.account.markLetter ?? ''}
+        onInput={(e) => {
+          const el = e.currentTarget;
+          const l = [...el.value.trim()].pop()?.toUpperCase() ?? '';
+          el.value = l;
+          void save(l || null, props.account.markColor);
+        }}
+      />
+      <span class="st-swatches" role="radiogroup" aria-label="Marker colour">
+        <button
+          class="st-swatch auto"
+          role="radio"
+          aria-checked={!props.account.markColor}
+          title="Automatic: a colour unlike the other accounts'"
+          style={{ background: mark().autoColor }}
+          onClick={() => pick(null)}
+        >
+          A
+        </button>
+        <For each={MARK_COLORS}>
+          {(c) => (
+            <button
+              class="st-swatch"
+              role="radio"
+              aria-checked={props.account.markColor === c.name}
+              title={c.label}
+              aria-label={c.label}
+              style={{ background: `hsl(${c.hue} ${c.sat}% 52%)` }}
+              onClick={() => pick(c.name)}
+            />
+          )}
+        </For>
+      </span>
+    </Field>
+  );
+}
+
 function Field(props: { label: string; children: JSX.Element }) {
   return (
     <div class="st-field">
@@ -405,6 +465,7 @@ function AccountCard(props: { d: AccountDetails }) {
           </form>
         </Show>
       </Field>
+      <Show when={account()}>{(a) => <MarkField account={a()} onError={(text) => setMsg({ text, error: true })} />}</Show>
       <Field label="Type">{PROVIDER[props.d.provider] ?? props.d.provider}</Field>
       <Field label="Incoming (IMAP)">
         {props.d.imapHost}:{props.d.imapPort}

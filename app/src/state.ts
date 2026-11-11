@@ -1,38 +1,48 @@
 import { batch, createEffect, createMemo, createRoot, createSignal, on, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, events, type Account, type Folder, type MessageSummary, type SyncStatus, type ThreadSummary, type ConversationScope, type SearchField } from './api';
+import { accountMarks, type AccountMark } from './lib/accountMarks';
 import { loadPref, savePref } from './lib/format';
 
 // ------------------------------------------------------------- accounts & folders
 
-/** null while the initial load is in flight. In the order the core lists them; see `accounts`. */
-const [accountList, setAccounts] = createSignal<Account[] | null>(null);
+/** null while the initial load is in flight. In the user's order (dragged in the sidebar; kept
+ *  by the core, which lists them so), wherever accounts are listed: sidebar, rail, flyout,
+ *  switcher, default account. */
+const [accounts, setAccounts] = createSignal<Account[] | null>(null);
 
-/** The user's order of accounts (ids; dragged in the sidebar). Persisted on this machine. */
-const ORDER_KEY = 'ui.accountOrder';
-const [accountOrder, setAccountOrder] = createSignal<number[]>(loadPref<number[]>(ORDER_KEY, []));
+/** Where the order was kept before the core kept it: moved there once, then dropped. */
+const OLD_ORDER_KEY = 'ui.accountOrder';
+async function moveOldOrder(): Promise<void> {
+  const ids = loadPref<number[] | null>(OLD_ORDER_KEY, null);
+  if (!Array.isArray(ids)) return;
+  await api.setAccountOrder(ids);
+  try {
+    localStorage.removeItem(OLD_ORDER_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
 
-/** Accounts in the user's order (new ones after the ordered ones, oldest first): everywhere
- *  accounts are listed (sidebar, rail, flyout, switcher, default account). */
-const accounts = createRoot(() =>
-  createMemo(() => {
-    const list = accountList();
-    if (!list) return list;
-    const order = accountOrder();
-    const rank = (a: Account) => {
-      const i = order.indexOf(a.id);
-      return i < 0 ? order.length + a.id : i;
-    };
-    return [...list].sort((a, b) => rank(a) - rank(b));
-  }),
-);
+/** Each account's marker (letter and colour), told apart from the others'. */
+const marks = createRoot(() => createMemo(() => accountMarks(accounts() ?? [])));
+export function accountMark(a: Account): AccountMark {
+  const letter = (a.email[0] ?? '?').toUpperCase();
+  return marks().get(a.id) ?? { letter, color: 'var(--text-3)', autoLetter: letter, autoColor: 'var(--text-3)' };
+}
 
 /** Move account `id` to position `to` (0 = first). */
 export function moveAccount(id: number, to: number): void {
-  const ids = (accounts() ?? []).map((a) => a.id).filter((x) => x !== id);
-  ids.splice(Math.max(0, Math.min(to, ids.length)), 0, id);
-  setAccountOrder(ids);
-  savePref(ORDER_KEY, ids);
+  const list = accounts() ?? [];
+  const moved = list.find((a) => a.id === id);
+  if (!moved) return;
+  const next = list.filter((a) => a.id !== id);
+  next.splice(Math.max(0, Math.min(to, next.length)), 0, moved);
+  setAccounts(next);
+  api.setAccountOrder(next.map((a) => a.id)).catch((e) => {
+    console.error('set_account_order', e);
+    void reloadAccounts();
+  });
 }
 const [foldersByAccount, setFoldersByAccount] = createStore<Record<number, Folder[]>>({});
 const [syncByAccount, setSyncByAccount] = createStore<Record<number, SyncStatus | undefined>>({});
@@ -443,6 +453,7 @@ export async function initApp(): Promise<void> {
   api.setNotifications(notifyNewMail()).catch((e) => console.warn('set_notifications failed', e));
   await Promise.all(listening).catch((e) => console.warn('subscribing to core events', e));
 
+  await moveOldOrder().catch((e) => console.warn('moving the account order', e));
   try {
     await reloadAccounts();
   } catch (e) {
