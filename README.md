@@ -7,6 +7,8 @@ A fast, local-first desktop email client for Linux and macOS: a Rust core (IMAP 
   <img src="docs/screenshots/inbox.png" alt="The main window: accounts and folders, the message list, and a conversation">
 </picture>
 
+**Download:** the newest build of `main` is on the [Latest build](https://github.com/rickhall/email/releases/tag/latest) pre-release: a `.dmg` for macOS (signed and notarized; Apple Silicon and Intel), and `.rpm`, `.deb` and AppImage for Linux.
+
 ## A quick tour
 
 **Every account in one window.** Gmail (labels included) and any IMAP server, side by side. Mail is kept locally, so the list scrolls through tens of thousands of messages at once and opening one is instant; new mail arrives by IMAP IDLE. Conversations are grouped by their headers, across folders.

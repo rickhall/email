@@ -44,6 +44,9 @@ jobs:
 
   bundle:
     needs: test
+    # Publishing to the "latest" release (below) needs to write to the repository.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +139,8 @@ jobs:
           npm run tauri build -- ${{ matrix.args }}
 
       - uses: actions/upload-artifact@v7
+        # The release below is what's for downloading: don't let this service stop it.
+        continue-on-error: true
         with:
           name: email-${{ matrix.platform }}-${{ env.APP_VERSION }}
           path: |
@@ -144,3 +149,50 @@ jobs:
             ${{ matrix.bundle }}/appimage/*.AppImage
             ${{ matrix.bundle }}/dmg/*.dmg
           if-no-files-found: ignore
+
+      # Every build of main: its files on the "latest" pre-release, as plain downloads with
+      # stable links (artifacts come zipped, need a login, expire, and their download service
+      # fails at times). Each platform replaces only its own files there.
+      - name: Publish to the latest release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM: ${{ matrix.platform }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          shopt -s nullglob
+          files=("$BUNDLE"/deb/*.deb "$BUNDLE"/rpm/*.rpm "$BUNDLE"/appimage/*.AppImage "$BUNDLE"/dmg/*.dmg)
+          if [ ${#files[@]} -eq 0 ]; then echo "nothing to publish"; exit 0; fi
+          # The first build creates the release (both platforms may try at once: one wins).
+          gh release view latest >/dev/null 2>&1 \
+            || gh release create latest --prerelease --target "$GITHUB_SHA" --title "Latest build" \
+                 --notes "The newest build of main. Unsigned on Linux; signed and notarized on macOS." \
+            || gh release view latest >/dev/null
+          for a in $(gh release view latest --json assets --jq '.assets[].name'); do
+            case "$PLATFORM:$a" in
+              macos:*.dmg | linux:*.deb | linux:*.rpm | linux:*.AppImage) gh release delete-asset latest "$a" --yes ;;
+            esac
+          done
+          gh release upload latest "${files[@]}" --clobber
+
+  # The "latest" tag and notes follow the commit just published.
+  release:
+    needs: bundle
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Point the latest release at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          v="${base%.*}.$(git rev-list --count HEAD)"
+          git push --force origin "$GITHUB_SHA:refs/tags/latest"
+          gh release edit latest --prerelease --title "Latest build ($v)" \
+            --notes "Version $v, built from ${GITHUB_SHA:0:7}. Unsigned on Linux; signed and notarized on macOS."
