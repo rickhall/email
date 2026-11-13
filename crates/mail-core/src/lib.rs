@@ -443,7 +443,7 @@ impl Core {
             .unwrap_or_default();
         let subject = mail_parser::MessageParser::default()
             .parse_headers(&raw)
-            .and_then(|m| m.subject().map(str::to_string))
+            .and_then(|m| m.subject().map(crate::mime::clean_subject))
             .unwrap_or_default();
         Ok((stored + omitted.len(), subject))
     }
@@ -833,8 +833,17 @@ impl Core {
     }
 
     fn build_contacts(&self) -> Result<Vec<contacts::Contact>> {
-        let me: Vec<String> = self.store.accounts()?.into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
-        Ok(contacts::build(self.store.contact_rows()?, &me))
+        Ok(contacts::build(self.store.contact_rows()?, &not_suggested(&self.store)?))
+    }
+
+    /// Take `addr` out of the address suggestions, now and from then on.
+    pub fn forget_address(&self, addr: &str) -> Result<()> {
+        self.store.forget_address(addr)?;
+        let addr = addr.trim().to_ascii_lowercase();
+        if let Some(list) = self.contacts.lock().unwrap().list.as_mut() {
+            list.retain(|c| !c.addr.eq_ignore_ascii_case(&addr));
+        }
+        Ok(())
     }
 
     /// Rebuild the suggestions in the background (once at a time).
@@ -849,8 +858,7 @@ impl Core {
         let (store, contacts) = (self.store.clone(), self.contacts.clone());
         std::thread::spawn(move || {
             let t = std::time::Instant::now();
-            let me: Vec<String> = store.accounts().unwrap_or_default().into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
-            let list = store.contact_rows().map(|rows| contacts::build(rows, &me));
+            let list = not_suggested(&store).and_then(|me| Ok(contacts::build(store.contact_rows()?, &me)));
             let mut c = contacts.lock().unwrap();
             c.building = false;
             match list {
@@ -873,13 +881,13 @@ impl Core {
             let addr = r.addr.trim().to_ascii_lowercase();
             match list.iter_mut().find(|x| x.addr == addr) {
                 Some(x) => {
-                    x.sent += 1;
+                    x.sent += contacts::weight(now);
                     x.last = now;
                     if r.name.is_some() {
                         x.name = r.name.clone();
                     }
                 }
-                None => list.push(contacts::Contact { name: r.name.clone(), addr, sent: 1, received: 0, last: now }),
+                None => list.push(contacts::Contact { name: r.name.clone(), addr, sent: contacts::weight(now), received: 0.0, last: now }),
             }
         }
     }
@@ -1048,4 +1056,11 @@ pub(crate) fn queue_action(
         not_before,
     )?;
     Ok(ActionResult { op_id: Some(op_id), undoable: planned.delay_ms > 0 })
+}
+
+/// Addresses never suggested: the user's own, and those they removed from the suggestions.
+fn not_suggested(store: &Store) -> Result<Vec<String>> {
+    let mut out: Vec<String> = store.accounts()?.into_iter().map(|a| a.email.to_ascii_lowercase()).collect();
+    out.extend(store.forgotten_addresses()?);
+    Ok(out)
 }

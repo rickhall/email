@@ -40,7 +40,8 @@ const QUOTE_FRAME_CSS = 'html{overflow-y:hidden}body{padding:0 0 12px}';
 const chipText = (a: Addr) => (a.name ? `${a.name} <${a.addr}>` : a.addr);
 
 /** To/Cc/Bcc: typed addresses become chips on Enter, comma, semicolon, Tab or leaving the field;
- *  people from your mail are suggested as you type (↑/↓, Enter or Tab to pick, Esc to close). */
+ *  people from your mail are suggested as you type (↑/↓, Enter or Tab to pick, Esc to close,
+ *  Shift+Delete or × to stop suggesting one). */
 function AddressField(props: {
   label: string;
   list: Addr[];
@@ -85,6 +86,15 @@ function AddressField(props: {
       },
       () => {},
     );
+  };
+  /** Take suggestion `i` out of the suggestions, for good (Shift+Delete, or its ×). */
+  const forget = (i: number) => {
+    const a = sugg()[i];
+    if (!a) return;
+    void api.forgetAddress(a.addr).catch(() => {});
+    const rest = sugg().filter((_, j) => j !== i);
+    setSugg(rest);
+    setHi(Math.min(hi(), Math.max(0, rest.length - 1)));
   };
   /** Complete addresses become chips; anything else stays as text to fix (never a chip that
    *  can only be deleted). */
@@ -182,6 +192,11 @@ function AddressField(props: {
           onKeyDown={(e) => {
             const n = sugg().length;
             if (n > 0) {
+              if (e.key === 'Delete' && e.shiftKey) {
+                e.preventDefault();
+                forget(hi());
+                return;
+              }
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
                 navigated = true;
@@ -245,6 +260,19 @@ function AddressField(props: {
                   <Show when={a.name}>
                     <span class="sugg-addr">{a.addr}</span>
                   </Show>
+                  <button
+                    class="sugg-forget"
+                    tabIndex={-1}
+                    title="Don't suggest this address (Shift+Delete)"
+                    aria-label={`Don't suggest ${a.addr}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      forget(i());
+                    }}
+                  >
+                    <CloseIcon size={12} />
+                  </button>
                 </div>
               )}
             </For>

@@ -22,6 +22,9 @@ export interface ListNav {
   /** Drop the selected row (an own action is removing it) and select the next older row in its
    *  place (else the newer one, else nothing), scrolling only if needed. */
   advance(): Removed | null;
+  /** Select the next older row (else the newer one), keeping the selected one: a search result
+   *  acted on still matches (in its new folder), so it stays in the results. */
+  step(): void;
   /** Undo of `advance`: the row back in its place, selected (whatever is selected now). */
   putBack(r: Removed): void;
   /** Refetch the rows on screen (puts back a row `advance` dropped when the action didn't go). */
@@ -131,7 +134,8 @@ export async function runAction(action: Action, o: RunOpts): Promise<void> {
     // Own action: open the next older item right away (the "left this folder → blank pane"
     // rule is for changes made elsewhere).
     prev = snapshot();
-    removed = nav?.advance() ?? null;
+    if (searchActive()) nav?.step();
+    else removed = nav?.advance() ?? null;
     next = currentId();
   }
   const putBack = () => {

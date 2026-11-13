@@ -149,6 +149,10 @@ interface SyncStatus {
 | `app_version` | – | `string` — e.g. "0.1.44 (8ec2f26)": major.minor, commit count, commit |
 | `reveal_path` | `{ path }` | `void` — show the file in the system file manager |
 | `get_sync_status` | – | `SyncStatus[]` |
+| `default_mail_status` | – | `{ supported, isDefault }` — whether Email opens `mailto:` links here (Linux: xdg-mime; macOS: Launch Services) |
+| `make_default_mail` | – | `void` — makes it so (macOS may ask the user to confirm) |
+| `forget_address` | `{ addr }` | `void` — leaves the address out of `suggest_addresses` from now on |
+| `take_mailto_links` | – | `string[]` — `mailto:` links other programs sent (the `mailto` event says some came), each once |
 | `set_account_order` | `{ ids }` | `void` — the order accounts are listed in (`list_accounts`), first to last; others after them |
 | `set_account_mark` | `{ accountId, letter, color }` | `void` — the account's marker: one letter, a palette colour name; `null` = automatic |
 | `update_password` | `{ accountId, password }` | `void` — verifies with the server (throws a readable string if rejected), saves to the keychain, restarts sync |

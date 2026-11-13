@@ -616,6 +616,11 @@ export function MessageList(props: {
         });
         return { id: it.id, index: cur, row: it };
       },
+      step() {
+        const cur = selIndex();
+        const n = count();
+        if (n > 1) selectIndex(cur + 1 < n ? cur + 1 : cur - 1);
+      },
       putBack(r) {
         // The undone row returns to its place, selected, in one update.
         batch(() => {

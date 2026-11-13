@@ -4319,6 +4319,26 @@ html.macos .app.rail-mode .search-bar {
   text-overflow: ellipsis;
   color: var(--text);
 }
+.sugg-forget {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--text-3);
+  /* only on the highlighted row, its space always kept (no shift) */
+  visibility: hidden;
+}
+.addr-sugg-row.on .sugg-forget {
+  visibility: visible;
+}
+.sugg-forget:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
 .sugg-addr {
   min-width: 0;
   overflow: hidden;

@@ -1440,6 +1440,8 @@ export function createMockBackend(): Backend {
 
   const latency = () => sleep(8 + Math.random() * 25);
 
+  const forgotten = new Set<string>();
+  let mailDefault = false;
   const handlers: { [K in CommandName]: (args: CommandMap[K]['args']) => Promise<CommandMap[K]['ret']> } = {
     async list_accounts() {
       await latency();
@@ -1833,6 +1835,18 @@ export function createMockBackend(): Backend {
       const acc = accounts.find((x) => x.id === accountId);
       if (acc) acc.displayName = name.trim() || acc.email;
     },
+    async default_mail_status() {
+      return { supported: true, isDefault: mailDefault };
+    },
+    async make_default_mail() {
+      mailDefault = true;
+    },
+    async forget_address({ addr }) {
+      forgotten.add(addr.trim().toLowerCase());
+    },
+    async take_mailto_links() {
+      return [];
+    },
     async set_account_order({ ids }) {
       await sleep(3);
       const rank = (a: Account) => (ids.includes(a.id) ? ids.indexOf(a.id) : ids.length + a.id);
@@ -1877,6 +1891,7 @@ export function createMockBackend(): Backend {
       const seen = new Map<string, { name: string | null; addr: string; n: number }>();
       for (const m of byId.values()) {
         const k = m.fromAddr.toLowerCase();
+        if (forgotten.has(k)) continue;
         const e = seen.get(k) ?? { name: m.fromName || null, addr: k, n: 0 };
         e.n++;
         seen.set(k, e);

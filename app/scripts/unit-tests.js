@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { switchRecipients } from '../src/lib/recipients.ts';
 import { accountMarks, hash } from '../src/lib/accountMarks.ts';
+import { parseMailto } from '../src/lib/mailto.ts';
 
 const a = (addr, name = null) => ({ name, addr });
 const addrs = (list) => list.map((x) => x.addr);
@@ -87,4 +88,22 @@ test('a marker the user set is kept, and the automatic ones steer clear of it', 
   // John's J is taken by Kate's choice: he falls back to his domain's E, his colour clear of teal
   assert.equal(m.get(1).letter, 'E');
   assert.ok(gap(hueOf(m.get(1).color), 172) >= 40);
+});
+
+// ------------------------------------------------------------- mailto: links
+
+test('a mailto link with recipients, subject and body', () => {
+  const m = parseMailto('mailto:ann@example.com,Bob%20%3Cbob@example.org%3E?cc=cy@example.com&subject=Look%20at%20this&body=Hi%2C%0A%0Ahttps%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2%0Asecond%20line');
+  assert.deepEqual(m.to, [{ name: null, addr: 'ann@example.com' }, { name: 'Bob', addr: 'bob@example.org' }]);
+  assert.deepEqual(m.cc, [{ name: null, addr: 'cy@example.com' }]);
+  assert.equal(m.subject, 'Look at this');
+  assert.equal(m.html, '<p>Hi,</p><p>https://example.com/a?b=1&amp;c=2<br>second line</p>');
+});
+
+test('a browser\'s "email link": no recipient, a plus kept, markup escaped', () => {
+  const m = parseMailto('MAILTO:?subject=C%2B%2B%20%3Ctips%3E&body=1+1');
+  assert.deepEqual(m.to, []);
+  assert.equal(m.subject, 'C++ <tips>');
+  assert.equal(m.html, '<p>1+1</p>');
+  assert.equal(parseMailto('https://example.com'), null);
 });

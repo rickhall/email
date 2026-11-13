@@ -28,7 +28,7 @@ import { ConfirmHost } from './components/Actions';
 import { isTextInput, openShortcuts, ShortcutsHost } from './components/ShortcutsSheet';
 import { openSettings, SettingsHost } from './components/Settings';
 import { commandFor } from './lib/shortcuts';
-import { newMessage } from './lib/compose';
+import { newMessage, takeMailtoLinks } from './lib/compose';
 import { ManageTagsHost } from './components/Tags';
 import { AttachmentToast } from './components/Attachments';
 import { loadPref, savePref } from './lib/format';
@@ -96,6 +96,16 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
+
+  // mailto: links from other programs: as they come, and any that came while starting up (once
+  // there's an account to write from).
+  onMount(() => {
+    const un = events.onMailto(() => void takeMailtoLinks());
+    onCleanup(() => void un.then((f) => f()));
+  });
+  createEffect(() => {
+    if ((accounts()?.length ?? 0) > 0) void takeMailtoLinks();
   });
 
   // Native macOS menu bar (no-op elsewhere: the event is never sent).

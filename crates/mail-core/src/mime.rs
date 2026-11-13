@@ -115,6 +115,52 @@ pub fn decode_rfc2047(s: &str) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
+/// A subject as shown: HTML character references some senders put in the header itself (a web
+/// form's "Wacky&#x27;s" for "Wacky's") decoded. Only numeric ones and the XML five (plus
+/// &nbsp;), which nobody writes on purpose; anything else is left as it is.
+pub fn clean_subject(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let decoded = rest[1..].find(';').filter(|&j| j <= 10).and_then(|j| {
+            let name = &rest[1..1 + j];
+            let c = if let Some(n) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                u32::from_str_radix(n, 16).ok().and_then(char::from_u32)
+            } else if let Some(n) = name.strip_prefix('#') {
+                n.parse().ok().and_then(char::from_u32)
+            } else {
+                match name {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some(' '),
+                    _ => None,
+                }
+            };
+            c.filter(|c| !c.is_control()).map(|c| (c, j + 2))
+        });
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Parse a `BODY[HEADER.FIELDS (...)]` block.
 pub fn parse_header_block(raw: &[u8]) -> ParsedHeader {
     let Some(msg) = MessageParser::default().parse_headers(raw) else {
@@ -147,7 +193,7 @@ pub fn parse_header_block(raw: &[u8]) -> ParsedHeader {
         })
         .unwrap_or(false);
     ParsedHeader {
-        subject: msg.subject().unwrap_or_default().to_string(),
+        subject: clean_subject(msg.subject().unwrap_or_default()),
         from_name,
         from_addr,
         to_addrs,
@@ -218,7 +264,7 @@ pub fn render(id: i64, raw: &[u8], date: i64) -> Option<MessageDetail> {
 
     Some(MessageDetail {
         id,
-        subject: msg.subject().unwrap_or_default().to_string(),
+        subject: clean_subject(msg.subject().unwrap_or_default()),
         from: Addr { name: (!from_name.is_empty()).then_some(from_name), addr: from_addr },
         to: addr_list(msg.to()),
         cc: addr_list(msg.cc()),
@@ -449,6 +495,15 @@ fn has_remote(html: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_references_in_subjects() {
+        assert_eq!(clean_subject("Review (Wacky&#x27;s Bar)"), "Review (Wacky's Bar)");
+        assert_eq!(clean_subject("Q&amp;A &#8212; &quot;fast&quot;"), "Q&A — \"fast\"");
+        // left alone: not a reference, an unknown name, a control character
+        assert_eq!(clean_subject("AT&T; R&D & more &copy; &#0;"), "AT&T; R&D & more &copy; &#0;");
+        assert_eq!(clean_subject("plain"), "plain");
+    }
 
     #[test]
     fn strips_active_content_keeps_layout() {

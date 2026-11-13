@@ -28,6 +28,7 @@ import type {
   ThreadPage,
   ThreadView,
   TagDef,
+  DefaultMail,
 } from './types';
 
 export * from './types';
@@ -195,6 +196,13 @@ export const api = {
     call('set_keep_attachments', { accountId, keep }),
   /** The name mail from the account is sent under (empty: the address alone). */
   setDisplayName: (accountId: number, name: string): Promise<void> => call('set_display_name', { accountId, name }),
+  defaultMailStatus: (): Promise<DefaultMail> => call('default_mail_status', {}),
+  /** Make Email the program mailto: links open. */
+  makeDefaultMail: (): Promise<void> => call('make_default_mail', {}),
+  /** Leave an address out of the suggestions from now on. */
+  forgetAddress: (addr: string): Promise<void> => call('forget_address', { addr }),
+  /** mailto: links from other programs not yet taken (each opens a new message). */
+  takeMailtoLinks: (): Promise<string[]> => call('take_mailto_links', {}),
   /** The order accounts are listed in, first to last. */
   setAccountOrder: (ids: number[]): Promise<void> => call('set_account_order', { ids }),
   /** An account's marker letter and colour; null for automatic. */
@@ -219,4 +227,5 @@ export const events = {
   onActionFailed: (cb: (p: EventMap['action-failed']) => void) => on('action-failed', cb),
   onOpenMessage: (cb: (p: EventMap['open-message']) => void) => on('open-message', cb),
   onMenuAction: (cb: (p: EventMap['menu-action']) => void) => on('menu-action', cb),
+  onMailto: (cb: () => void) => on('mailto', cb),
 };

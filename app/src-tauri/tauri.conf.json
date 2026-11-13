@@ -27,6 +27,23 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/email.desktop"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/email.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "mailto"
+        ]
+      }
+    }
   }
 }

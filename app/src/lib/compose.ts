@@ -3,6 +3,7 @@ import { accounts, folderById, selectedFolderId } from '../state';
 import { api, errorMessage, events, type Addr, type Attachment, type FileInfo, type ReplyMode, type SendRequest } from '../api';
 import { hideToast, showToast } from '../components/Toast';
 import { broadcast, closeThisWindow, composeDraftId, isComposeWindow, onBroadcast, openComposeWindow } from './windows';
+import { parseMailto } from './mailto';
 
 // Writing mail happens in compose windows, one per draft (see lib/windows.ts). The main window
 // starts them (new message, reply, forward) and shows "Sending… Undo" once one sends; the core
@@ -99,6 +100,30 @@ export function newMessage(): void {
     quoteHtml: null,
     fwdAttachments: [],
   });
+}
+
+/** New messages for the mailto: links other programs sent (e.g. a browser's "Email link"). */
+export async function takeMailtoLinks(): Promise<void> {
+  const accountId = defaultAccount();
+  if (accountId == null) return; // left waiting until there's an account
+  for (const url of await api.takeMailtoLinks()) {
+    const m = parseMailto(url);
+    if (!m) continue;
+    await openDraftWindow({
+      mode: 'new',
+      accountId,
+      to: m.to,
+      cc: m.cc,
+      bcc: m.bcc,
+      showCc: m.cc.length + m.bcc.length > 0,
+      subject: m.subject,
+      html: m.html,
+      replyingTo: null,
+      forwarding: null,
+      quoteHtml: null,
+      fwdAttachments: [],
+    });
+  }
 }
 
 /** Reply, reply all or forward message `id` (prefilled by the core) in a new compose window. */

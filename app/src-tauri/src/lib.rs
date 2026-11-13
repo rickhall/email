@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
+mod default_mail;
 mod notify;
 mod window_state;
 
@@ -728,6 +729,61 @@ async fn delete_draft(core: State<'_, Arc<Core>>, id: i64) -> Res<()> {
     core.delete_draft(id).map_err(err)
 }
 
+// ------------------------------------------------------------- mailto: links
+
+/// `mailto:` links from other programs (the app is registered for the scheme), waiting for the
+/// main window to take them: it may still be starting when the first one comes.
+#[derive(Default)]
+struct MailtoLinks(std::sync::Mutex<Vec<String>>);
+
+/// Links come with the launch (Linux: on the command line), from a second launch (forwarded by
+/// the single-instance plugin) or, on macOS, as an Apple Event; each brings the window forward
+/// and tells it to take them.
+fn mailto_links(app: &tauri::App) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+    app.manage(MailtoLinks::default());
+    let handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+        deliver_mailto(&handle, urls);
+    });
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        deliver_mailto(app.handle(), urls.iter().map(|u| u.to_string()).collect());
+    }
+}
+
+fn deliver_mailto(app: &tauri::AppHandle, urls: Vec<String>) {
+    let urls: Vec<String> = urls.into_iter().filter(|u| u.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("mailto:"))).collect();
+    if urls.is_empty() {
+        return;
+    }
+    tracing::info!(n = urls.len(), "mailto link received");
+    app.state::<MailtoLinks>().0.lock().unwrap().extend(urls);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit("mailto", ());
+}
+
+/// Whether Email opens `mailto:` links on this system (Settings › General).
+#[tauri::command]
+async fn default_mail_status(app: tauri::AppHandle) -> default_mail::DefaultMail {
+    default_mail::status(&app)
+}
+
+#[tauri::command]
+async fn make_default_mail(app: tauri::AppHandle) -> Res<()> {
+    default_mail::make_default(&app)
+}
+
+/// The `mailto:` links received and not yet taken (see `MailtoLinks`).
+#[tauri::command]
+fn take_mailto_links(links: State<'_, MailtoLinks>) -> Vec<String> {
+    std::mem::take(&mut *links.0.lock().unwrap())
+}
+
 /// Open draft `draft_id` in its own compose window (or bring that window forward). The page
 /// finds its draft from the window label, `compose-<id>`.
 #[tauri::command]
@@ -746,6 +802,8 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
     let requested = saved.as_ref().map(|s| (s.width, s.height)).unwrap_or((760.0, 720.0));
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
         .title("New Message")
+        // Shown by the page once the composer is drawn (no blank window first); see below.
+        .visible(false)
         .inner_size(requested.0, requested.1)
         .min_inner_size(520.0, 420.0);
     if let Some(state) = &saved {
@@ -767,12 +825,26 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
         .build()
         .map_err(|e| e.to_string())?;
     window_state::track(&window, saved, requested, window_state::COMPOSE);
+    // Should the page not get that far (an error before it can), show it anyway.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if window.is_visible().is_ok_and(|v| !v) {
+            tracing::warn!("compose window not shown by its page; showing it");
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    });
     Ok(())
 }
 
 #[tauri::command]
 async fn suggest_addresses(core: State<'_, Arc<Core>>, query: String, limit: Option<usize>) -> Res<Vec<Addr>> {
     core.suggest_addresses(&query, limit.unwrap_or(8)).map_err(err)
+}
+
+#[tauri::command]
+async fn forget_address(core: State<'_, Arc<Core>>, addr: String) -> Res<()> {
+    core.forget_address(&addr).map_err(err)
 }
 
 #[tauri::command]
@@ -865,6 +937,7 @@ pub fn run() {
             tracing::info!(version = version_label(), "starting");
             create_main_window(app)?;
             notify::init();
+            mailto_links(app);
             if let Ok(dir) = opened_attachments_dir(app.handle()) {
                 let _ = std::fs::remove_dir_all(dir);
             }
@@ -889,7 +962,12 @@ pub fn run() {
             });
             Ok(())
         })
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
+            take_mailto_links,
+            default_mail_status,
+            make_default_mail,
+            forget_address,
             list_accounts,
             add_account,
             list_folders,

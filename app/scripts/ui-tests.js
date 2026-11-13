@@ -202,6 +202,59 @@ describe('compose', () => {
   });
 });
 
+describe('search', () => {
+  test('deleting a result moves on to the next one', async () => {
+    const { page, errors, close } = await open({ threaded: false });
+    try {
+      await page.fill('.search-field input', 'Northwind');
+      await page.waitForSelector('.search-layer .row');
+      await page.waitForTimeout(300);
+      const subjects = await page.locator('.search-layer .row .row-subject').allTextContents();
+      assert.ok(subjects.length >= 2, 'two results at least');
+      await page.locator('.search-layer .row').first().click();
+      await hasText(reader(page), subjects[0].trim(), 'the first result opens');
+      await page.locator('.reader [aria-label="Delete"]').first().click();
+      const sel = page.locator('.search-layer .row.selected .row-subject').first();
+      await hasText(sel, subjects[1].trim(), 'the next result is selected');
+      await hasText(reader(page), subjects[1].trim(), 'and open');
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('compose', () => {
+  test('a suggested address can be removed for good', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const to = w.locator('input[aria-label="To"]');
+      await to.waitFor();
+      await to.fill('a');
+      await w.waitForSelector('.addr-sugg-row');
+      const first = async () => (await w.locator('.addr-sugg-row .sugg-addr, .addr-sugg-row .sugg-name').first().textContent()).trim();
+      const gone = await first();
+      const all = await w.locator('.addr-sugg-row').allTextContents();
+      await to.press('Shift+Delete');
+      await w.waitForFunction((n) => document.querySelectorAll('.addr-sugg-row').length === n - 1, all.length);
+      // typed again: still not suggested
+      await to.fill('');
+      await to.fill('a');
+      await w.waitForSelector('.addr-sugg-row');
+      await w.waitForTimeout(200);
+      const again = await w.locator('.addr-sugg-row').allTextContents();
+      assert.ok(!again.some((t) => t.includes(gone)), `${gone} not suggested again: ${again}`);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+});
+
 describe('accounts', () => {
   test('the order and markers set by the user come back from the core', async () => {
     const { page, errors, close } = await open({ threaded: false });

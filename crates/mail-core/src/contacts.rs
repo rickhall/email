@@ -10,26 +10,39 @@ use crate::model::Addr;
 pub struct Contact {
     pub name: Option<String>,
     pub addr: String,
-    /// Messages the user sent to them.
-    pub sent: u32,
-    /// Messages from them.
-    pub received: u32,
+    /// Messages the user sent to them, each as its `weight` (see `decayed`).
+    pub sent: f64,
+    /// Messages from them, the same way.
+    pub received: f64,
     /// Newest exchange (unix seconds).
     pub last: i64,
 }
 
+/// A message counts half as much every this many days: someone written to often years ago
+/// ranks below someone written to a few times this month.
+const HALF_LIFE_DAYS: f64 = 180.0;
+/// Weights are kept relative to this moment (2020-01-01), so sums never need redoing as time
+/// passes: `decayed` brings one to the present.
+const EPOCH: i64 = 1_577_836_800;
+
+/// A message's weight, for adding up (`2^(age from EPOCH / half-life)`).
+pub fn weight(date: i64) -> f64 {
+    ((date - EPOCH) as f64 / 86_400.0 / HALF_LIFE_DAYS).exp2()
+}
+
+/// A sum of weights as it counts at `now`: each message 1 when new, ½ after a half-life, ….
+fn decayed(sum: f64, now: i64) -> f64 {
+    sum / weight(now)
+}
+
 impl Contact {
-    /// Writing to someone counts most; recent exchanges more than old ones.
+    /// Writing to someone counts most (4 per message, against the square root of what they
+    /// sent, so a mailing list's hundreds don't swamp it); recent messages more than old ones;
+    /// and the very latest exchange adds a little, fading over a few months.
     fn score(&self, now: i64) -> f64 {
-        let age_days = ((now - self.last).max(0) / 86_400) as f64;
-        let recency = if age_days < 30.0 {
-            6.0
-        } else if age_days < 365.0 {
-            3.0
-        } else {
-            0.0
-        };
-        self.sent as f64 * 4.0 + (self.received as f64).sqrt() + recency
+        let age_days = (now - self.last).max(0) as f64 / 86_400.0;
+        let recency = 3.0 * (-age_days / 60.0).exp2();
+        4.0 * decayed(self.sent, now) + decayed(self.received, now).sqrt() + recency
     }
 }
 
@@ -96,11 +109,11 @@ where
         if key.is_empty() || !key.contains('@') || me.contains(&key) || is_robot(&key) {
             return;
         }
-        let c = by.entry(key.clone()).or_insert_with(|| Contact { name: None, addr: key, sent: 0, received: 0, last: 0 });
+        let c = by.entry(key.clone()).or_insert_with(|| Contact { name: None, addr: key, sent: 0.0, received: 0.0, last: 0 });
         if sent {
-            c.sent += 1;
+            c.sent += weight(date);
         } else {
-            c.received += 1;
+            c.received += weight(date);
         }
         // The name from the newest message that had one.
         if let Some(n) = name.map(str::trim).filter(|n| !n.is_empty() && !n.contains('@')) {
@@ -150,6 +163,22 @@ pub fn suggest(list: &[Contact], query: &str, limit: usize, now: i64) -> Vec<Add
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_correspondents_outrank_old_frequent_ones() {
+        let me = vec!["me@example.com".to_string()];
+        let day = 86_400;
+        let now = 2_000_000_000;
+        let to = |addr: &str, days_ago: i64| ("Me".to_string(), "me@example.com".to_string(), addr.to_string(), now - days_ago * day);
+        let mut rows: Vec<_> = (0..30).map(|i| to("sam@example.org", 3 * 365 + i)).collect();
+        rows.push(to("sue@example.org", 2));
+        rows.push(to("sue@example.org", 5));
+        // and someone written to steadily all year beats both
+        rows.extend((0..24).map(|i| to("sid@example.org", i * 15)));
+        let list = build(rows, &me);
+        let got: Vec<_> = suggest(&list, "s", 3, now).into_iter().map(|a| a.addr).collect();
+        assert_eq!(got, ["sid@example.org", "sue@example.org", "sam@example.org"]);
+    }
 
     #[test]
     fn recipient_lists() {

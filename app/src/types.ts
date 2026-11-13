@@ -17,6 +17,12 @@ export interface Account {
   markColor: string | null;
 }
 
+/** Whether Email opens mailto: links on this system. */
+export interface DefaultMail {
+  supported: boolean;
+  isDefault: boolean;
+}
+
 export type FolderRole =
   | 'inbox'
   | 'sent'
@@ -357,6 +363,8 @@ export interface EventMap {
   'send-failed': SendEventPayload;
   'action-failed': ActionFailedPayload;
   'open-message': OpenMessagePayload;
+  /** mailto: links came from another program: take them (take_mailto_links) */
+  mailto: null;
 }
 
 export interface CommandMap {
@@ -423,6 +431,10 @@ export interface CommandMap {
   set_keep_attachments: { args: { accountId: number; keep: boolean }; ret: void };
   set_display_name: { args: { accountId: number; name: string }; ret: void };
   set_account_order: { args: { ids: number[] }; ret: void };
+  take_mailto_links: { args: Record<string, never>; ret: string[] };
+  forget_address: { args: { addr: string }; ret: void };
+  default_mail_status: { args: Record<string, never>; ret: DefaultMail };
+  make_default_mail: { args: Record<string, never>; ret: void };
   set_account_mark: { args: { accountId: number; letter: string | null; color: string | null }; ret: void };
   set_notifications: { args: { enabled: boolean }; ret: void };
   account_storage: { args: undefined; ret: AccountStorage[] };

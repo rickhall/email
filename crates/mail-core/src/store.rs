@@ -178,6 +178,11 @@ END;
 
 -- Quick search over sender, recipients and subject. Contentless: it stores only the index, rows
 -- are joined back to `messages` by rowid. Triggers keep it current.
+-- addresses the user removed from the suggestions (lowercase)
+CREATE TABLE IF NOT EXISTS forgotten_addresses (
+    addr TEXT PRIMARY KEY
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
     subject, sender, recipients,
     content='', contentless_delete=1,
@@ -231,6 +236,23 @@ const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
              ALTER TABLE accounts ADD COLUMN mark_letter TEXT;
              ALTER TABLE accounts ADD COLUMN mark_color TEXT;",
         )?)
+    },
+    // 11: subjects with HTML character references in the header decoded (`clean_subject`);
+    // addresses removed from the suggestions
+    |db| {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS forgotten_addresses (addr TEXT PRIMARY KEY);")?;
+        let rows: Vec<(i64, String)> = db
+            .prepare("SELECT id, subject FROM messages WHERE subject LIKE '%&%;%'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut update = db.prepare("UPDATE messages SET subject=?2 WHERE id=?1")?;
+        for (id, subject) in rows {
+            let clean = crate::mime::clean_subject(&subject);
+            if clean != subject {
+                update.execute(params![id, clean])?;
+            }
+        }
+        Ok(())
     },
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
@@ -1818,6 +1840,18 @@ impl Store {
     pub fn set_display_name(&self, account_id: i64, name: &str) -> Result<()> {
         self.db().execute("UPDATE accounts SET display_name=?2 WHERE id=?1", params![account_id, name])?;
         Ok(())
+    }
+
+    /// Leave `addr` out of the address suggestions from now on.
+    pub fn forget_address(&self, addr: &str) -> Result<()> {
+        self.db().execute("INSERT OR IGNORE INTO forgotten_addresses (addr) VALUES (?1)", [addr.trim().to_ascii_lowercase()])?;
+        Ok(())
+    }
+
+    pub fn forgotten_addresses(&self) -> Result<Vec<String>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare("SELECT addr FROM forgotten_addresses")?;
+        Ok(stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The accounts' order: `ids` first to last (others after them, by id).

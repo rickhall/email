@@ -2,6 +2,7 @@ import { createSignal, onMount, Show } from 'solid-js';
 import { errorMessage } from '../api';
 import { loadAccountsOnly } from '../state';
 import { compose, loadDraft } from '../lib/compose';
+import { revealWhenDrawn } from '../lib/windows';
 import { Composer } from './Composer';
 import { ToastHost } from './Toast';
 import { ConfirmHost } from './Actions';
@@ -15,6 +16,7 @@ export function ComposeWindow() {
     } catch (e) {
       setError(errorMessage(e));
     }
+    revealWhenDrawn();
   });
   return (
     <div class="compose-window">

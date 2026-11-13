@@ -25,8 +25,9 @@ import { AccountDot } from './FolderSwitcher';
 // Settings: sections on the left, the chosen one on the right (each with its own heading,
 // scrolling and buttons). Fixed size, so switching sections never moves the dialog.
 
-export type SettingsSection = 'accounts' | 'notifications' | 'keyboard' | 'troubleshooting';
+export type SettingsSection = 'general' | 'accounts' | 'notifications' | 'keyboard' | 'troubleshooting';
 const SECTIONS: { id: SettingsSection; title: string }[] = [
+  { id: 'general', title: 'General' },
   { id: 'accounts', title: 'Accounts' },
   { id: 'notifications', title: 'Notifications' },
   { id: 'keyboard', title: 'Keyboard' },
@@ -584,6 +585,50 @@ function AccountsSection() {
 
 // ------------------------------------------------------------- troubleshooting
 
+function GeneralSection() {
+  const [status, { refetch }] = createResource(() => api.defaultMailStatus().catch(() => null));
+  const [msg, setMsg] = createSignal<string | null>(null);
+  const make = async () => {
+    setMsg(null);
+    try {
+      await api.makeDefaultMail();
+    } catch (e) {
+      setMsg(errorMessage(e));
+    }
+    await refetch();
+  };
+  return (
+    <div class="st-body">
+      <Field label="Default mail app">
+        <Show when={status()} fallback={<span class="st-muted">…</span>}>
+          {(s) => (
+            <Show when={s().supported} fallback={<span class="st-muted">Set it in your system’s settings.</span>}>
+              <Show
+                when={s().isDefault}
+                fallback={
+                  <>
+                    <span class="st-muted">Email links (mailto:) open another program.</span>
+                    <button class="btn secondary st-field-action" onClick={() => void make()}>
+                      Make Email the default
+                    </button>
+                  </>
+                }
+              >
+                <span>Email opens email links (mailto:).</span>
+              </Show>
+            </Show>
+          )}
+        </Show>
+      </Field>
+      <Show when={msg()}>
+        <Field label="">
+          <span class="st-status error">{msg()}</span>
+        </Field>
+      </Show>
+    </div>
+  );
+}
+
 function NotificationsSection() {
   return (
     <div class="st-body">
@@ -693,6 +738,9 @@ function Panel() {
             </button>
           </header>
           <Switch>
+            <Match when={section() === 'general'}>
+              <GeneralSection />
+            </Match>
             <Match when={section() === 'accounts'}>
               <AccountsSection />
             </Match>
