@@ -314,6 +314,64 @@ function MarkField(props: { account: Account; onError: (text: string) => void })
   );
 }
 
+/** Microsoft accounts: tags and snooze through Microsoft Graph (Exchange keeps no keywords). */
+function GraphField(props: { account: Account; onMessage: (m: { text: string; error?: boolean } | null) => void }) {
+  const [waiting, setWaiting] = createSignal(false);
+  const turnOn = async () => {
+    props.onMessage(null);
+    setWaiting(true);
+    try {
+      await api.enableGraph(props.account.id);
+      await reloadAccounts();
+      props.onMessage({ text: 'Tags and snooze are on: tags show as Outlook categories.' });
+    } catch (err) {
+      props.onMessage({ text: errorMessage(err), error: true });
+    } finally {
+      setWaiting(false);
+    }
+  };
+  const turnOff = async () => {
+    props.onMessage(null);
+    try {
+      await api.disableGraph(props.account.id);
+      await reloadAccounts();
+    } catch (err) {
+      props.onMessage({ text: errorMessage(err), error: true });
+    }
+  };
+  return (
+    <Field label="Tags & snooze">
+      <Show
+        when={props.account.graph}
+        fallback={
+          <>
+            <span class="st-muted" title="Outlook doesn't keep other programs' tags over IMAP; with your permission they go through Microsoft Graph instead. A work account may need your administrator's approval.">
+              {waiting() ? 'Waiting for Microsoft’s sign-in page…' : 'Off: Outlook needs your permission'}
+            </span>
+            <Show
+              when={!waiting()}
+              fallback={
+                <button class="link-btn st-field-action" onClick={() => void api.cancelSignIn()}>
+                  Cancel
+                </button>
+              }
+            >
+              <button class="link-btn st-field-action" onClick={() => void turnOn()}>
+                Turn on…
+              </button>
+            </Show>
+          </>
+        }
+      >
+        <span>On, as Outlook categories</span>
+        <button class="link-btn st-field-action" onClick={() => void turnOff()}>
+          Turn off
+        </button>
+      </Show>
+    </Field>
+  );
+}
+
 function Field(props: { label: string; children: JSX.Element }) {
   return (
     <div class="st-field">
@@ -467,6 +525,9 @@ function AccountCard(props: { d: AccountDetails }) {
         </Show>
       </Field>
       <Show when={account()}>{(a) => <MarkField account={a()} onError={(text) => setMsg({ text, error: true })} />}</Show>
+      <Show when={account()?.auth === 'microsoft' ? account() : undefined}>
+        {(a) => <GraphField account={a()} onMessage={setMsg} />}
+      </Show>
       <Field label="Type">{PROVIDER[props.d.provider] ?? props.d.provider}</Field>
       <Field label="Incoming (IMAP)">
         {props.d.imapHost}:{props.d.imapPort}

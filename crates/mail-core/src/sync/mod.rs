@@ -153,6 +153,10 @@ struct Shared {
     server: ServerConfig,
     /// A Microsoft (OAuth) account's access tokens; None: `server` has the password.
     microsoft: Option<Arc<crate::oauth::MicrosoftSession>>,
+    /// A Microsoft account's tags and snooze, through Graph (`crate::graph`), when allowed.
+    graph: Option<Arc<crate::graph::Graph>>,
+    /// Wakes the Graph task (our own changes went out).
+    graph_refresh: Notify,
     strategy: Arc<dyn HeaderSync>,
     events: broadcast::Sender<CoreEvent>,
     focus: watch::Receiver<Option<i64>>,
@@ -335,6 +339,7 @@ impl AccountSync {
         account: Account,
         server: ServerConfig,
         microsoft: Option<Arc<crate::oauth::MicrosoftSession>>,
+        graph: Option<Arc<crate::graph::Graph>>,
         strategy: Arc<dyn HeaderSync>,
         events: broadcast::Sender<CoreEvent>,
         options: SyncOptions,
@@ -344,6 +349,8 @@ impl AccountSync {
         let shared = Arc::new(Shared {
             store,
             microsoft,
+            graph,
+            graph_refresh: Notify::new(),
             header: Mutex::new(initial_status(account.id)),
             status: Mutex::new(initial_status(account.id)),
             account,
@@ -376,6 +383,7 @@ impl AccountSync {
             tokio::spawn(supervise("idle-inbox", shared.clone(), |s| Box::pin(idle_task(s, false)))),
             tokio::spawn(supervise("idle-focus", shared.clone(), |s| Box::pin(idle_task(s, true)))),
             tokio::spawn(snooze_task(shared.clone())),
+            tokio::spawn(graph_task(shared.clone())),
         ];
         if shared.options.download_bodies {
             for i in 0..shared.options.body_workers {
@@ -775,6 +783,98 @@ async fn sweep_counts(shared: &Shared, conn: &mut Connection, only: Option<&Hash
 /// after), and whenever headers arrive (a snooze set elsewhere that's already due).
 /// Several clients may set off the same snooze: their commands address it by UID, and doing
 /// it twice changes nothing.
+/// One queued Graph change (`ServerOp::Graph`).
+async fn run_graph_op(shared: &Shared, op: &crate::actions::ServerOp) -> Result<()> {
+    use crate::graph::{Change, GraphRejected};
+    let crate::actions::ServerOp::Graph { message_id, keyword, category, on } = op else { unreachable!() };
+    let Some(graph) = &shared.graph else {
+        return Err(GraphRejected("tags and snooze through Microsoft Graph are turned off for this account".into()).into());
+    };
+    let change = match category {
+        Some((name, color)) => Change::Category { name, color, on: *on },
+        None => Change::Marker { keyword, on: *on },
+    };
+    graph.apply(message_id, change).await
+}
+
+/// A Microsoft account's tags and snooze as Graph has them, every few minutes and after our
+/// own changes went out: categories and markers set or removed elsewhere (Outlook, another
+/// machine) reach the messages here. Nothing while changes of ours wait to go out.
+async fn graph_task(shared: Arc<Shared>) {
+    let Some(graph) = shared.graph.clone() else { return };
+    let mut woke = imap::wake_watch();
+    loop {
+        if !shared.auth_failed.load(std::sync::atomic::Ordering::SeqCst) {
+            match graph_sync(&shared, &graph).await {
+                Ok(n) if n > 0 => tracing::info!(n, "tags and snooze from Microsoft Graph"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Microsoft Graph: {e:#}"),
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(180)) => {}
+            _ = woke.changed() => {}
+            _ = shared.graph_refresh.notified() => {}
+        }
+    }
+}
+
+/// Bring the messages' tags and markers in line with Graph; how many changed.
+async fn graph_sync(shared: &Shared, graph: &crate::graph::Graph) -> Result<usize> {
+    let account_id = shared.account.id;
+    if shared.store.has_pending_ops(account_id)? {
+        return Ok(0);
+    }
+    let epoch = shared.store.local_epoch();
+    let snap = graph.snapshot().await?;
+    // Each category on a message is a tag: the one with its name, or a new one. Categories no
+    // message has (Outlook.com starts every mailbox with six, "Red category" and so on) don't
+    // become tags: the tag list is every account's.
+    let defs = shared.store.tags()?;
+    let used: HashSet<String> = snap.tagged.values().flatten().map(|n| n.to_lowercase()).collect();
+    let mut tag_for = HashMap::new();
+    let mut new_tags = false;
+    for (name, color) in &snap.categories {
+        let key = name.to_lowercase();
+        let keyword = match defs.iter().find(|d| d.defined && d.name.to_lowercase() == key) {
+            Some(d) => d.keyword.clone(),
+            None if used.contains(&key) => {
+                new_tags = true;
+                shared.store.set_tag(None, name, color)?
+            }
+            None => continue,
+        };
+        tag_for.insert(key, keyword);
+    }
+    if new_tags {
+        shared.emit(CoreEvent::FoldersChanged { account_id });
+    }
+    let mut updates = Vec::new();
+    for (id, mid, stored) in shared.store.account_message_keywords(account_id)? {
+        let have = crate::tags::parse(&stored);
+        let mut next: Vec<String> = have.iter().filter(|k| !crate::tags::kept_by_graph(k)).cloned().collect();
+        next.extend(crate::graph::keywords_from(&snap, &mid, &tag_for));
+        let next = crate::tags::join(&next);
+        if next != crate::tags::join(&have) {
+            updates.push((id, next));
+        }
+    }
+    if updates.is_empty() {
+        return Ok(0);
+    }
+    match shared.store.set_keywords_since(Some(epoch), &updates) {
+        Ok(folder_ids) => {
+            shared.emit(CoreEvent::MessagesChanged { folder_ids });
+            // A snooze set elsewhere may be due already.
+            shared.new_headers.notify_waiters();
+            Ok(updates.len())
+        }
+        // Something changed here meanwhile: next time.
+        Err(e) if e.is::<crate::store::SyncSuperseded>() => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
 async fn snooze_task(shared: Arc<Shared>) {
     let mut woke = imap::wake_watch();
     loop {
@@ -1451,7 +1551,12 @@ async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
         let mut failure: Option<anyhow::Error> = None;
         while !ops.is_empty() {
             let activity = conn.activity.clone();
-            match imap::stall_timeout(&activity, STALL_TIMEOUT, "sending an action", conn.run_op(&ops[0])).await.and_then(|r| r) {
+            let sent = if let ServerOp::Graph { .. } = &ops[0] {
+                run_graph_op(shared, &ops[0]).await
+            } else {
+                imap::stall_timeout(&activity, STALL_TIMEOUT, "sending an action", conn.run_op(&ops[0])).await.and_then(|r| r)
+            };
+            match sent {
                 Ok(()) => {
                     ops.remove(0);
                     shared.store.update_op(op.id, &serde_json::to_string(&ops)?)?;
@@ -1466,6 +1571,7 @@ async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
         match failure {
             None => {
                 shared.store.finish_op(op.id)?;
+                shared.graph_refresh.notify_one();
                 let ids: Vec<i64> = snapshot.flags.iter().map(|(m, _)| *m).collect();
                 // Messages deleted for good are in no folder now: drop them and their bodies.
                 shared.store.purge_orphans(&ids)?;
@@ -1478,6 +1584,7 @@ async fn run_outbox(shared: &Shared, conn: &mut Connection) -> Result<()> {
                 let rejected = e.chain().any(|c| {
                     matches!(c.downcast_ref::<async_imap::error::Error>(), Some(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_)))
                         || c.is::<imap::OpRejected>()
+                        || c.is::<crate::graph::GraphRejected>()
                 });
                 if rejected || op.attempts >= 5 {
                     tracing::warn!(op = op.id, "action failed, rolling back: {e:#}");

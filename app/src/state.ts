@@ -69,10 +69,11 @@ export {
   selectedSummary,
 };
 
-/** The folder's account keeps keywords on its server (tags, snooze): known after its first sync. */
+/** The folder's account can keep tags and snooze: its server keeps keywords (known after its
+ *  first sync), or (Microsoft) they go through Microsoft Graph. */
 export function keywordsOk(folderId: number | null): boolean {
   const f = folderById(folderId);
-  return !!f && (accounts() ?? []).some((a) => a.id === f.accountId && a.keywords === true);
+  return !!f && (accounts() ?? []).some((a) => a.id === f.accountId && (a.keywords === true || a.graph));
 }
 
 export function folderById(id: number | null): Folder | undefined {

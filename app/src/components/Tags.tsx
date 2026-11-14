@@ -27,11 +27,13 @@ export function TagDots(props: { tags: readonly string[] }) {
   );
 }
 
-/** CSS vars that tint the sender like Thunderbird (first tag), readable in both themes. */
+/** CSS vars for a tagged row's bar (first tag): the tag's own colour, as its dots and chips
+ *  show it; only one that would all but vanish into the background (black in the dark theme)
+ *  is lightened. */
 export function tintStyle(tags: readonly string[]): Record<string, string> | undefined {
   if (tags.length === 0) return undefined;
-  const t = tagTint(tagInfo(sortTags(tags)[0]!).color);
-  return { '--tint-l': t.light, '--tint-d': t.dark };
+  const bar = tagTint(tagInfo(sortTags(tags)[0]!).color, 1.4);
+  return { '--bar-l': bar.light, '--bar-d': bar.dark };
 }
 
 /** Reader chips: dot + name, × removes, click runs a tag search. One line, "+N" when crowded. */

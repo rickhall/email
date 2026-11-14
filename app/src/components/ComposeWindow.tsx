@@ -2,7 +2,7 @@ import { createSignal, onMount, Show } from 'solid-js';
 import { errorMessage } from '../api';
 import { loadAccountsOnly } from '../state';
 import { compose, loadDraft } from '../lib/compose';
-import { revealWhenDrawn } from '../lib/windows';
+import { endBoot } from '../lib/windows';
 import { Composer } from './Composer';
 import { ToastHost } from './Toast';
 import { ConfirmHost } from './Actions';
@@ -16,7 +16,8 @@ export function ComposeWindow() {
     } catch (e) {
       setError(errorMessage(e));
     }
-    revealWhenDrawn();
+    // The composer (or the error) is in place under the outline: the outline goes.
+    endBoot();
   });
   return (
     <div class="compose-window">

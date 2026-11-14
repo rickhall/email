@@ -132,6 +132,11 @@ enum Cmd {
         #[arg(long)]
         select: bool,
     },
+    /// Whether a Microsoft account's sign-in reaches Microsoft Graph, and what it holds there:
+    /// the account's categories, and a few messages' categories. Read-only.
+    GraphProbe {
+        email: String,
+    },
     /// A server's folders as it lists them (LIST, with attributes) and which are subscribed
     /// (LSUB). Read-only; signs in as `flags` does.
     Folders {
@@ -191,6 +196,57 @@ async fn main() -> Result<()> {
             names.sort();
             println!("CAPABILITIES: {}", names.join(" "));
             conn.logout().await;
+            Ok(())
+        }
+        Cmd::GraphProbe { email } => {
+            let secret = keyring::Entry::new("dev.mail-client.imap", &email)?.get_password()?;
+            let tokens = match mail_core::oauth::microsoft_refresh_for(&secret, mail_core::oauth::GRAPH_SCOPES).await {
+                Ok(t) => t,
+                Err(e) => {
+                    println!("Graph token refused: {e:#}");
+                    return Ok(());
+                }
+            };
+            println!("Graph token: ok (expires in {} s)", tokens.expires_in);
+            // What the app's sync reads (read-only): counts only.
+            struct Fixed(String);
+            impl mail_core::oauth::TokenStore for Fixed {
+                fn refresh_token(&self, _: &str) -> anyhow::Result<String> {
+                    Ok(self.0.clone())
+                }
+                fn save_refresh_token(&self, _: &str, _: &str) -> anyhow::Result<()> {
+                    Ok(())
+                }
+            }
+            let session = std::sync::Arc::new(mail_core::oauth::MicrosoftSession::graph(&email, std::sync::Arc::new(Fixed(secret.clone()))));
+            match mail_core::graph::Graph::new(session).snapshot().await {
+                Ok(snap) => println!(
+                    "snapshot: {} categories, {} messages with categories, {} with the app's markers",
+                    snap.categories.len(),
+                    snap.tagged.len(),
+                    snap.markers.len()
+                ),
+                Err(e) => println!("snapshot failed: {e:#}"),
+            }
+            let auth = format!("Bearer {}", tokens.access_token);
+            for path in [
+                "/v1.0/me/outlook/masterCategories",
+                "/v1.0/me/mailFolders/inbox/messages?$top=5&$select=subject,categories,internetMessageId",
+                "/v1.0/me/messages?$top=5&$select=categories&$filter=categories/any(c:c+ne+'')",
+            ] {
+                let (status, body) = mail_core::oauth::graph_get(&auth, path).await?;
+                println!("GET {path}: HTTP {status}");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                if let Some(items) = v["value"].as_array() {
+                    for i in items {
+                        // names and categories only; subjects shortened
+                        let subject: String = i["subject"].as_str().unwrap_or("").chars().take(30).collect();
+                        println!("  {} {} {}", i["displayName"].as_str().unwrap_or(""), subject, i["categories"]);
+                    }
+                } else {
+                    println!("  {}", body.chars().take(300).collect::<String>());
+                }
+            }
             Ok(())
         }
         Cmd::Folders { email, host, microsoft } => {

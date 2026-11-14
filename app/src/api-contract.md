@@ -11,6 +11,7 @@ interface Account {
   auth: 'password' | 'microsoft';
   keywords: boolean | null;  // server keeps keywords of our own (tags, snooze); null until its first sync. Outlook: false
   markLetter: string | null; // its marker's letter as the user set it; null: automatic
+  graph: boolean;            // Microsoft: tags and snooze through Microsoft Graph (enable_graph)
   markColor: string | null;  // its marker's colour, a palette name (src/lib/accountMarks.ts); null: automatic
 }
 
@@ -151,6 +152,8 @@ interface SyncStatus {
 | `get_sync_status` | – | `SyncStatus[]` |
 | `default_mail_status` | – | `{ supported, isDefault }` — whether Email opens `mailto:` links here (Linux: xdg-mime; macOS: Launch Services) |
 | `make_default_mail` | – | `void` — makes it so (macOS may ask the user to confirm) |
+| `enable_graph` | `{ accountId }` | `void` — Microsoft accounts: tags (as Outlook categories) and snooze through Microsoft Graph; a browser sign-in asking for it, checked; rejects when refused (e.g. a work account needing an administrator's consent) |
+| `disable_graph` | `{ accountId }` | `void` — back to no tags or snooze on that account (the categories stay in Outlook) |
 | `forget_address` | `{ addr }` | `void` — leaves the address out of `suggest_addresses` from now on |
 | `take_mailto_links` | – | `string[]` — `mailto:` links other programs sent (the `mailto` event says some came), each once |
 | `set_account_order` | `{ ids }` | `void` — the order accounts are listed in (`list_accounts`), first to last; others after them |

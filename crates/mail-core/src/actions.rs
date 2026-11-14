@@ -214,6 +214,10 @@ pub enum ServerOp {
     /// Store a message (base64 of the raw message) in `folder`, marked read: a copy of mail we
     /// sent, on servers that don't file it themselves.
     Append { folder: String, raw: String },
+    /// Microsoft Graph, on an account whose tags and snooze go there (`crate::graph`): a tag,
+    /// as the category `category` (name, colour), or else one of the app's markers, on every
+    /// copy of the message with this Message-ID.
+    Graph { message_id: String, keyword: String, category: Option<(String, String)>, on: bool },
 }
 
 impl ServerOp {
@@ -222,7 +226,7 @@ impl ServerOp {
         let mut op = self.clone();
         match &mut op {
             ServerOp::Labels { uid: u, .. } | ServerOp::Move { uid: u, .. } | ServerOp::Flags { uid: u, .. } | ServerOp::Expunge { uid: u, .. } => *u = uid,
-            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } => {}
+            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } | ServerOp::Graph { .. } => {}
         }
         op
     }
@@ -231,7 +235,7 @@ impl ServerOp {
     fn uid(&self) -> Option<u32> {
         match self {
             ServerOp::Labels { uid, .. } | ServerOp::Move { uid, .. } | ServerOp::Flags { uid, .. } | ServerOp::Expunge { uid, .. } => Some(*uid),
-            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } => None,
+            ServerOp::Find { .. } | ServerOp::FindByMessageId { .. } | ServerOp::Append { .. } | ServerOp::Graph { .. } => None,
         }
     }
 
@@ -245,6 +249,7 @@ impl ServerOp {
             | ServerOp::Find { folder, .. }
             | ServerOp::Append { folder, .. } => folder,
             ServerOp::FindByMessageId { then, .. } => then.folder(),
+            ServerOp::Graph { .. } => "",
         }
     }
 
@@ -517,7 +522,19 @@ fn plan_basic(
                 }
                 change.tags.push((id, k.clone(), on));
                 let flag = k.clone();
-                if gmail {
+                if crate::tags::kept_by_graph(&k) && store.account_uses_graph(account_id)? {
+                    // Exchange keeps no keywords: through Graph, by Message-ID, every copy at once.
+                    let message_id = store
+                        .message_header_id(id)?
+                        .filter(|m| !m.is_empty())
+                        .ok_or_else(|| anyhow!("This message has no Message-ID, so Outlook can't keep its tags."))?;
+                    let category = crate::tags::is_tag(&k).then(|| {
+                        let def = store.tags().ok().and_then(|t| t.into_iter().find(|d| d.keyword == k && d.defined));
+                        def.map(|d| (d.name, d.color)).unwrap_or_else(|| (k.clone(), crate::tags::generated_color(&k)))
+                    });
+                    ops.push(wrap(ServerOp::Graph { message_id, keyword: k.clone(), category, on }));
+                    touched.extend(copies.iter().map(|c| c.0));
+                } else if gmail {
                     let (folder, uid) = need_primary()?;
                     ops.push(wrap(ServerOp::Flags { folder, uid, flag, on }));
                 } else {
@@ -1052,6 +1069,60 @@ mod tests {
         none_archive.store.upsert_headers(none_archive.acct, none_archive.id("INBOX"), &[rec(1, None, None, "c@x", 0)], &none).unwrap();
         let m = none_archive.store.message_ids_for_uids(none_archive.id("INBOX"), &[1]).unwrap()[0];
         assert!(plan(&none_archive.store, none_archive.acct, false, Action::Archive, &[m], none_archive.id("INBOX")).is_err());
+    }
+
+    #[test]
+    fn graph_accounts_keep_tags_and_snooze_through_graph() {
+        let env = Env::new("graph", Provider::Outlook, &[lf("INBOX", Some(FolderRole::Inbox)), lf("Archive", Some(FolderRole::Archive))]);
+        env.store.set_account_graph(env.acct, true).unwrap();
+        let none = HashMap::new();
+        let inbox = env.id("INBOX");
+        env.store.upsert_headers(env.acct, inbox, &[rec(7, None, None, "s@x", flags::SEEN)], &none).unwrap();
+        let msg = env.store.message_ids_for_uids(inbox, &[7]).unwrap()[0];
+
+        // A tag: its category (name and colour), by Message-ID.
+        let p = plan(&env.store, env.acct, false, Action::Tag { keyword: "$label2".into(), on: true }, &[msg], inbox).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![ServerOp::Graph {
+                message_id: "s@x".into(),
+                keyword: "$label2".into(),
+                category: Some(("Work".into(), "#FF9900".into())),
+                on: true
+            }]
+        );
+        env.store.apply_local(&p.change).unwrap();
+        // Exchange keeps no keywords (seen at its first sync): with Graph, actions still go.
+        env.store.set_keywords_supported(env.acct, false).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        crate::queue_action(&env.store, &events, Action::Tag { keyword: "$label3".into(), on: true }, &[msg], inbox).unwrap();
+        env.store.set_account_graph(env.acct, false).unwrap();
+        assert!(crate::queue_action(&env.store, &events, Action::Tag { keyword: "$label4".into(), on: true }, &[msg], inbox).is_err());
+        env.store.set_account_graph(env.acct, true).unwrap();
+        // Snooze: a marker of the app's own.
+        let until = 1_794_236_400;
+        let p = plan(&env.store, env.acct, false, Action::Snooze { until }, &[msg], inbox).unwrap();
+        assert_eq!(
+            p.ops,
+            vec![ServerOp::Graph { message_id: "s@x".into(), keyword: "$snooze-202611091500".into(), category: None, on: true }]
+        );
+        env.store.apply_local(&p.change).unwrap();
+        // Read/unread stay IMAP.
+        let p = plan(&env.store, env.acct, false, Action::Unread, &[msg], inbox).unwrap();
+        assert!(matches!(p.ops[0], ServerOp::Flags { .. }));
+
+        // The server's flags (no keywords on Exchange) leave the tag and the snooze alone.
+        let change = crate::store::FlagChange { uid: 7, flags: 0, keywords: vec!["$forwarded".into()], labels: None };
+        env.store.update_flags_since(None, inbox, &[change], &none).unwrap();
+        let page = env.store.list_messages(inbox, 0, 10).unwrap();
+        assert_eq!(page.messages[0].tags, ["$label2", "$label3"]);
+        assert_eq!(page.messages[0].snoozed_until, Some(until));
+
+        // Without Graph, the same flags replace them.
+        env.store.set_account_graph(env.acct, false).unwrap();
+        let change = crate::store::FlagChange { uid: 7, flags: 0, keywords: vec![], labels: None };
+        env.store.update_flags_since(None, inbox, &[change], &none).unwrap();
+        assert!(env.store.list_messages(inbox, 0, 10).unwrap().messages[0].tags.is_empty());
     }
 
     #[test]

@@ -37,11 +37,19 @@ const NOT_TAGS: &[&str] = &[
     "$phishing", "$notphishing", "$submitpending", "$submitted", "$hasattachment", "$hasnoattachment",
     "$autojunk", "$autonotjunk", "$important", "$muted", "$followed", "$ismailinglist", "$isnotification",
     "$istrusted", "$seen", "nonjunk", "$label0",
+    // another program's "show this message's images"
+    "loadremoteimages",
 ];
 
 /// Normalise a keyword for storage and comparison (IMAP keywords are case-insensitive).
 pub fn normalize(k: &str) -> String {
     k.trim().to_ascii_lowercase()
+}
+
+/// Keywords a Microsoft account keeps through Graph (`crate::graph`), not IMAP: its tags (as
+/// Outlook categories) and snooze markers. IMAP flag sync leaves these alone there.
+pub fn kept_by_graph(keyword: &str) -> bool {
+    is_tag(keyword) || snooze_time(keyword).is_some() || woke_time(keyword).is_some()
 }
 
 /// Whether a message keyword should be shown as a tag.

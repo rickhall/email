@@ -58,19 +58,21 @@ function mix(c: [number, number, number], w: [number, number, number], t: number
 const hex = (c: [number, number, number]) => `#${c.map((x) => x.toString(16).padStart(2, '0')).join('')}`;
 
 const cache = new Map<string, { light: string; dark: string }>();
-/** The tag colour adjusted to ≥3.5:1 contrast on the light (#fff) and dark (#1c1c1f) list. */
-export function tagTint(color: string): { light: string; dark: string } {
-  const hit = cache.get(color);
+/** The tag colour adjusted to at least `minContrast` against the light (#fff) and dark
+ *  (#1c1c1f) list. */
+export function tagTint(color: string, minContrast = 3.5): { light: string; dark: string } {
+  const key = `${color} ${minContrast}`;
+  const hit = cache.get(key);
   if (hit) return hit;
   const c = rgb(color);
   if (!c) return { light: color, dark: color };
   const fit = (bg: [number, number, number], toward: [number, number, number]) => {
     const lb = lum(bg);
     let x = c;
-    for (let t = 0; t <= 1 && contrast(lum(x), lb) < 3.5; t += 0.1) x = mix(c, toward, t);
+    for (let t = 0; t <= 1 && contrast(lum(x), lb) < minContrast; t += 0.1) x = mix(c, toward, t);
     return hex(x);
   };
   const out = { light: fit([255, 255, 255], [0, 0, 0]), dark: fit([28, 28, 31], [255, 255, 255]) };
-  cache.set(color, out);
+  cache.set(key, out);
   return out;
 }

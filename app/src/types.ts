@@ -11,6 +11,8 @@ export interface Account {
   auth: 'password' | 'microsoft';
   /** its server keeps keywords we make up (tags, snooze); null until the first sync tells */
   keywords: boolean | null;
+  /** Microsoft: tags and snooze go through Microsoft Graph (the user allowed it) */
+  graph: boolean;
   /** its marker's letter and colour (a palette name, lib/accountMarks) as the user set them;
    *  null: automatic */
   markLetter: string | null;
@@ -432,6 +434,8 @@ export interface CommandMap {
   set_display_name: { args: { accountId: number; name: string }; ret: void };
   set_account_order: { args: { ids: number[] }; ret: void };
   take_mailto_links: { args: Record<string, never>; ret: string[] };
+  enable_graph: { args: { accountId: number }; ret: void };
+  disable_graph: { args: { accountId: number }; ret: void };
   forget_address: { args: { addr: string }; ret: void };
   default_mail_status: { args: Record<string, never>; ret: DefaultMail };
   make_default_mail: { args: Record<string, never>; ret: void };

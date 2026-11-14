@@ -370,7 +370,7 @@ function useActions(t: () => ActionTarget | null) {
   return { command, inTrash, inSpam, canKeywords, pickerEl, tagMenuEl, snoozeMenuEl, toggleTag };
 }
 
-const NO_KEYWORDS = "This account's mail server doesn't keep tags or snooze times.";
+const NO_KEYWORDS = "This account's mail server doesn't keep tags or snooze times. For a Microsoft account, turn them on in Settings › Accounts.";
 
 function Btn(props: {
   label: string;

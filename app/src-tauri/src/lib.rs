@@ -222,6 +222,19 @@ async fn microsoft_sign_in_again(app: tauri::AppHandle, core: State<'_, Arc<Core
     core.microsoft_sign_in_again(account_id, |url| open_sign_in(&app, &url)).await.map_err(err)
 }
 
+/// Tags and snooze for a Microsoft account through Microsoft Graph: a browser sign-in asking
+/// for it (`Core::enable_graph`).
+#[tauri::command]
+async fn enable_graph(app: tauri::AppHandle, core: State<'_, Arc<Core>>, account_id: i64) -> Res<()> {
+    let core = core.inner().clone();
+    core.enable_graph(account_id, |url| open_sign_in(&app, &url)).await.map_err(err)
+}
+
+#[tauri::command]
+async fn disable_graph(core: State<'_, Arc<Core>>, account_id: i64) -> Res<()> {
+    core.disable_graph(account_id).map_err(err)
+}
+
 /// Stop waiting for a browser sign-in.
 #[tauri::command]
 fn cancel_sign_in(core: State<'_, Arc<Core>>) {
@@ -802,8 +815,10 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
     let requested = saved.as_ref().map(|s| (s.width, s.height)).unwrap_or((760.0, 720.0));
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
         .title("New Message")
-        // Shown by the page once the composer is drawn (no blank window first); see below.
-        .visible(false)
+        // At once, in the page's colour, and the page draws the composer's outline before its
+        // code has loaded (index.html): something to see right away, nothing blank or white.
+        .background_color(compose_background(&app))
+        .initialization_script("window.__EMAIL_WINDOW = 'compose';")
         .inner_size(requested.0, requested.1)
         .min_inner_size(520.0, 420.0);
     if let Some(state) = &saved {
@@ -825,16 +840,13 @@ async fn open_compose(app: tauri::AppHandle, draft_id: i64) -> Res<()> {
         .build()
         .map_err(|e| e.to_string())?;
     window_state::track(&window, saved, requested, window_state::COMPOSE);
-    // Should the page not get that far (an error before it can), show it anyway.
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        if window.is_visible().is_ok_and(|v| !v) {
-            tracing::warn!("compose window not shown by its page; showing it");
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
-    });
     Ok(())
+}
+
+/// The composer's background (styles.css --bg-reader) in the main window's theme.
+fn compose_background(app: &tauri::AppHandle) -> tauri::window::Color {
+    let dark = app.get_webview_window("main").and_then(|w| w.theme().ok()) == Some(tauri::Theme::Dark);
+    if dark { tauri::window::Color(0x1f, 0x1f, 0x22, 255) } else { tauri::window::Color(255, 255, 255, 255) }
 }
 
 #[tauri::command]
@@ -965,6 +977,8 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             take_mailto_links,
+            enable_graph,
+            disable_graph,
             default_mail_status,
             make_default_mail,
             forget_address,

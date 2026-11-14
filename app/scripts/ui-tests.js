@@ -170,6 +170,20 @@ describe('conversation view: the message asked for', () => {
 });
 
 describe('compose', () => {
+  test('the outline a compose window shows while loading is laid out like the composer', async () => {
+    const context = await browser.newContext({ viewport: { width: 760, height: 400 } });
+    try {
+      const page = await context.newPage();
+      // only the page itself: the app's code never comes, as if it were still loading
+      await page.route(/\.(tsx?|jsx?)(\?|$)|@vite|@id|node_modules/, (r) => r.abort());
+      await page.goto(base + '?compose=1');
+      const tops = await page.locator('#boot .boot-row').evaluateAll((rs) => rs.map((r) => [r.textContent, Math.round(r.getBoundingClientRect().top)]));
+      assert.deepEqual(tops, [['From', 52], ['To', 92], ['Subject', 132]]);
+    } finally {
+      await context.close();
+    }
+  });
+
   test('Reply and Reply all switch over, changing only their own recipients', async () => {
     const { page, errors, context, close } = await open({ threaded: false });
     try {
@@ -195,6 +209,30 @@ describe('compose', () => {
       await w.locator('.cmp-mode button', { hasText: 'Reply all' }).click();
       assert.equal(await on(), 'Reply all');
       assert.deepEqual(await people(), all);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('snooze', () => {
+  test('a day from the calendar and a typed time', async () => {
+    const { page, errors, close } = await open({ threaded: false });
+    try {
+      await page.locator('.folder-layer .row').nth(3).click();
+      await page.locator('.reader [aria-label^="Snooze"]').first().click();
+      await page.waitForSelector('.snz-cal');
+      // the next month's 10th: forward a month, click it
+      await page.locator('[aria-label="Next month"]').click();
+      await page.locator('.snz-day:not(.out)', { hasText: /^10$/ }).click();
+      const time = page.locator('.snz-time');
+      await time.fill('2pm');
+      await time.press('ArrowUp'); // 2:15 PM
+      assert.match(await page.locator('.snz-summary').textContent(), /10 at 2:15/);
+      await time.press('Enter');
+      await page.waitForSelector('.snooze-menu', { state: 'detached' });
+      await page.waitForSelector('.folder-layer .row.selected .snooze-mark');
       assert.deepEqual(errors, []);
     } finally {
       await close();
@@ -234,6 +272,7 @@ describe('compose', () => {
       w.on('pageerror', (e) => errors.push(e.message));
       const to = w.locator('input[aria-label="To"]');
       await to.waitFor();
+      assert.equal(await w.locator('#boot').count(), 0, 'the outline gives way to the composer');
       await to.fill('a');
       await w.waitForSelector('.addr-sugg-row');
       const first = async () => (await w.locator('.addr-sugg-row .sugg-addr, .addr-sugg-row .sugg-name').first().textContent()).trim();
@@ -256,6 +295,29 @@ describe('compose', () => {
 });
 
 describe('accounts', () => {
+  test('a Microsoft account can turn on tags and snooze', async () => {
+    const { page, errors, close } = await open({ threaded: false });
+    try {
+      await page.locator('[aria-label="Add account"]').first().click();
+      await page.fill('input[placeholder="you@example.com"]', 'jane@outlook.com');
+      await page.getByRole('button', { name: 'Continue with Microsoft' }).click();
+      await page.waitForSelector('.sidebar .account-name:has-text("jane@outlook.com")', { timeout: 15000 });
+      await page.waitForSelector('.folder-layer .row', { timeout: 15000 });
+      await page.locator('.folder-layer .row').first().click();
+      const tag = page.locator('.reader .act-btn[aria-label^="Tag"]').first();
+      assert.match(await tag.getAttribute('aria-label'), /doesn't keep tags/);
+      await page.keyboard.press('Control+,');
+      const acct = page.locator('.st-acct', { hasText: 'jane@outlook.com' });
+      await acct.getByRole('button', { name: 'Turn on…' }).click();
+      await acct.getByText('On, as Outlook categories').waitFor();
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => document.querySelector('.reader .act-btn[aria-label^="Tag"]')?.getAttribute('aria-label') === 'Tag');
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
   test('the order and markers set by the user come back from the core', async () => {
     const { page, errors, close } = await open({ threaded: false });
     try {

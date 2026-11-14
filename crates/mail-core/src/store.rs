@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     keywords     INTEGER,               -- server keeps custom keywords (\* in PERMANENTFLAGS); NULL: not seen yet
     position     INTEGER,               -- the user's order (dragged in the sidebar); NULL: after the others, by id
     mark_letter  TEXT,                  -- its marker's letter, set by the user; NULL: automatic
-    mark_color   TEXT                   -- its marker's colour (a name from the app's palette); NULL: automatic
+    mark_color   TEXT,                  -- its marker's colour (a name from the app's palette); NULL: automatic
+    graph        INTEGER                -- Microsoft: tags and snooze through Graph (1), allowed by the user
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -254,6 +255,8 @@ const MIGRATIONS: &[fn(&Connection) -> Result<()>] = &[
         }
         Ok(())
     },
+    // 12: Microsoft accounts can keep tags and snooze through Graph
+    |db| Ok(db.execute_batch("ALTER TABLE accounts ADD COLUMN graph INTEGER;")?),
 ];
 const SCHEMA_VERSION: i64 = BASE_VERSION + MIGRATIONS.len() as i64;
 
@@ -474,6 +477,22 @@ fn assign_thread(
 
 /// A message whose snooze went off sorts in the Inbox by that time (its `$woke-` keyword, on
 /// every client); otherwise, and everywhere else, by its own date.
+/// A message's keywords as its server reports them (`server`), to store: on an account whose
+/// tags and snooze go through Graph, those it has now stay (the server has none of them).
+fn server_keywords(db: &Connection, message_id: i64, server: &[String]) -> Result<String> {
+    let (stored, graph): (String, bool) = db
+        .prepare_cached("SELECT m.keywords, coalesce(a.graph, 0) FROM messages m JOIN accounts a ON a.id = m.account_id WHERE m.id=?1")?
+        .query_row([message_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?
+        .unwrap_or_default();
+    if !graph {
+        return Ok(crate::tags::join(server));
+    }
+    let mut all: Vec<String> = crate::tags::parse(&stored).into_iter().filter(|k| crate::tags::kept_by_graph(k)).collect();
+    all.extend(server.iter().filter(|k| !crate::tags::kept_by_graph(k)).cloned());
+    Ok(crate::tags::join(&all))
+}
+
 fn settle_inbox_date(db: &Connection, message_id: i64) -> Result<()> {
     let row: Option<(i64, String)> = db
         .prepare_cached("SELECT date, keywords FROM messages WHERE id=?1")?
@@ -758,10 +777,10 @@ impl Store {
             params![email, display_name, provider.as_str(), host, port],
         )?;
         let id: i64 = db.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))?;
-        let (smtp_host, smtp_port, auth, keywords, mark_letter, mark_color) = db.query_row(
-            "SELECT smtp_host, smtp_port, auth, keywords, mark_letter, mark_color FROM accounts WHERE id=?1",
+        let (smtp_host, smtp_port, auth, keywords, mark_letter, mark_color, graph) = db.query_row(
+            "SELECT smtp_host, smtp_port, auth, keywords, mark_letter, mark_color, coalesce(graph, 0) FROM accounts WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?), r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, AuthKind::parse(&r.get::<_, String>(2)?), r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )?;
         Ok(Account {
             id,
@@ -774,6 +793,7 @@ impl Store {
             smtp_port,
             auth,
             keywords,
+            graph,
             mark_letter,
             mark_color,
         })
@@ -791,7 +811,7 @@ impl Store {
         let db = self.db();
         let mut stmt = db.prepare(
             "SELECT id, email, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, auth, keywords,
-                    mark_letter, mark_color
+                    mark_letter, mark_color, coalesce(graph, 0)
              FROM accounts ORDER BY position IS NULL, position, id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -808,6 +828,7 @@ impl Store {
                 keywords: r.get(9)?,
                 mark_letter: r.get(10)?,
                 mark_color: r.get(11)?,
+                graph: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1144,7 +1165,7 @@ impl Store {
                 };
                 let id = match existing {
                     Some(id) => {
-                        update_flags.execute(params![id, rec.flags, crate::tags::join(&rec.keywords)])?;
+                        update_flags.execute(params![id, rec.flags, server_keywords(&tx, id, &rec.keywords)?])?;
                         adopt.execute(params![id, rec.gm_msgid.map(|g| g as i64), identity])?;
                         id
                     }
@@ -1275,7 +1296,7 @@ impl Store {
                 else {
                     continue;
                 };
-                set.execute(params![id, c.flags, crate::tags::join(&c.keywords)])?;
+                set.execute(params![id, c.flags, server_keywords(&tx, id, &c.keywords)?])?;
                 if let Some(labels) = &c.labels {
                     apply_gmail_labels(&tx, id, folder_id, date, labels, label_folders, &mut changed)?;
                 }
@@ -1840,6 +1861,52 @@ impl Store {
     pub fn set_display_name(&self, account_id: i64, name: &str) -> Result<()> {
         self.db().execute("UPDATE accounts SET display_name=?2 WHERE id=?1", params![account_id, name])?;
         Ok(())
+    }
+
+    pub fn account_uses_graph(&self, account_id: i64) -> Result<bool> {
+        Ok(self
+            .rdb()
+            .prepare_cached("SELECT coalesce(graph, 0) FROM accounts WHERE id=?1")?
+            .query_row([account_id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Whether an account's tags and snooze go through Microsoft Graph.
+    pub fn set_account_graph(&self, account_id: i64, on: bool) -> Result<()> {
+        self.db().execute("UPDATE accounts SET graph=?2 WHERE id=?1", params![account_id, on])?;
+        Ok(())
+    }
+
+    /// (id, Message-ID, stored keywords) of an account's messages that have a Message-ID: what
+    /// Graph's tags and markers are matched against.
+    pub fn account_message_keywords(&self, account_id: i64) -> Result<Vec<(i64, String, String)>> {
+        let db = self.rdb();
+        let mut stmt = db.prepare(
+            "SELECT id, message_id, keywords FROM messages WHERE account_id=?1 AND message_id IS NOT NULL AND message_id <> ''",
+        )?;
+        Ok(stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// New keywords for messages (id, stored form), from a sync step that started at `epoch`;
+    /// the folders they're in.
+    pub fn set_keywords_since(&self, epoch: Option<u64>, updates: &[(i64, String)]) -> Result<Vec<i64>> {
+        let mut db = self.db_for_sync(epoch)?;
+        let tx = db.transaction()?;
+        let mut folders = std::collections::BTreeSet::new();
+        {
+            let mut set = tx.prepare_cached("UPDATE messages SET keywords=?2 WHERE id=?1")?;
+            let mut where_ = tx.prepare_cached("SELECT folder_id FROM entries WHERE message_id=?1")?;
+            for (id, keywords) in updates {
+                set.execute(params![id, keywords])?;
+                settle_inbox_date(&tx, *id)?;
+                for f in where_.query_map([id], |r| r.get::<_, i64>(0))? {
+                    folders.insert(f?);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(folders.into_iter().collect())
     }
 
     /// Leave `addr` out of the address suggestions from now on.
@@ -3528,6 +3595,7 @@ mod tests {
                 "ALTER TABLE accounts DROP COLUMN keep_attachments; ALTER TABLE accounts DROP COLUMN auth;
                  ALTER TABLE accounts DROP COLUMN keywords; ALTER TABLE accounts DROP COLUMN position;
                  ALTER TABLE accounts DROP COLUMN mark_letter; ALTER TABLE accounts DROP COLUMN mark_color;
+                 ALTER TABLE accounts DROP COLUMN graph;
                  ALTER TABLE messages DROP COLUMN attachments_stored;
                  PRAGMA user_version={BASE_VERSION};"
             ))

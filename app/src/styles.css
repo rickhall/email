@@ -593,6 +593,19 @@ body.resizing iframe {
   background: var(--sel-bg);
   color: var(--sel-text);
 }
+/* The selected row's contents take their colours from these, set on the row itself and
+   inherited, never from rules like `.row.selected .row-subject`: WebKitGTK sometimes doesn't
+   restyle a row's contents when it stops being the selected one (white text on white, seen
+   after notification clicks), but it does carry an inherited change down. Unset elsewhere:
+   each use falls back to the normal colour. */
+.list-scroll:focus-within .row.selected {
+  --rs-text: var(--sel-text);
+  --rs-muted: var(--sel-muted);
+  --rs-chip-bg: rgba(255, 255, 255, 0.22);
+  --rs-chip-fg: #fff;
+  --rs-mark: rgba(255, 255, 255, 0.28);
+  --rs-ring: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
 
 .unread-dot {
   position: absolute;
@@ -633,7 +646,7 @@ body.resizing iframe {
   display: flex;
   align-items: center;
   gap: 4px;
-  color: var(--text-3);
+  color: var(--rs-muted, var(--text-3));
 }
 .row-icons .flag {
   color: var(--flag);
@@ -641,11 +654,11 @@ body.resizing iframe {
 .row-date {
   flex: none;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--rs-muted, var(--text-3));
   font-variant-numeric: tabular-nums;
 }
 .row.unread .row-date {
-  color: var(--accent);
+  color: var(--rs-muted, var(--accent));
   font-weight: 500;
 }
 
@@ -653,7 +666,7 @@ body.resizing iframe {
   margin-top: 2px;
   font-size: 12.5px;
   line-height: 17px;
-  color: var(--text-3);
+  color: var(--rs-muted, var(--text-3));
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -662,20 +675,10 @@ body.resizing iframe {
   overflow-wrap: anywhere;
 }
 .row-subject {
-  color: var(--text);
+  color: var(--rs-text, var(--text));
 }
 .row.unread .row-subject {
   font-weight: 550;
-}
-
-.list-scroll:focus-within .row.selected :is(.row-date,
-.row-snippet,
-.row-icons,
-.row-subject) {
-  color: var(--sel-muted);
-}
-.list-scroll:focus-within .row.selected .row-subject {
-  color: var(--sel-text);
 }
 
 /* skeletons */
@@ -1254,17 +1257,13 @@ body.resizing iframe {
   height: 16px;
   padding: 0 5px;
   border-radius: 8px;
-  background: var(--bg-active);
-  color: var(--text-2);
+  background: var(--rs-chip-bg, var(--bg-active));
+  color: var(--rs-chip-fg, var(--text-2));
   font-size: 10.5px;
   font-weight: 600;
   line-height: 16px;
   text-align: center;
   font-variant-numeric: tabular-nums;
-}
-.list-scroll:focus-within .row.selected .thread-count {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
 }
 
 .reader.conv {
@@ -1564,6 +1563,7 @@ body.resizing iframe {
 .segmented button.on {
   background: var(--bg-elev);
   color: var(--text);
+  font-weight: 600;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 }
 @media (prefers-color-scheme: dark) {
@@ -1579,21 +1579,17 @@ body.resizing iframe {
   height: 16px;
   line-height: 16px;
   border-radius: 4px;
-  background: var(--bg-hover);
-  color: var(--text-3);
+  background: var(--rs-chip-bg, var(--bg-hover));
+  color: var(--rs-chip-fg, var(--text-3));
   font-size: 10.5px;
   font-weight: 550;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.list-scroll:focus-within .row.selected .folder-tag {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-}
 
 .row mark {
-  background: rgba(255, 204, 0, 0.42);
+  background: var(--rs-mark, rgba(255, 204, 0, 0.42));
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
@@ -1601,11 +1597,8 @@ body.resizing iframe {
 }
 @media (prefers-color-scheme: dark) {
   .row mark {
-    background: rgba(255, 204, 0, 0.3);
+    background: var(--rs-mark, rgba(255, 204, 0, 0.3));
   }
-}
-.list-scroll:focus-within .row.selected mark {
-  background: rgba(255, 255, 255, 0.28);
 }
 
 .search-hint {
@@ -2336,21 +2329,53 @@ body.resizing iframe {
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   max-width: min(560px, calc(100% - 32px));
-  height: 36px;
-  padding: 0 8px 0 14px;
-  border-radius: 10px;
-  background: var(--bg-elev);
-  border: 1px solid var(--sep);
-  box-shadow: var(--shadow-card);
-  font-size: 12.5px;
-  color: var(--text);
+  height: 40px;
+  padding: 0 8px 0 16px;
+  border-radius: 12px;
+  /* High contrast in both themes: dark on the light app, a lighter grey on the dark one, so it
+     stands out from the content around it. Over the content: nothing moves. */
+  --toast-bg: #2a2a2e;
+  --toast-fg: #f4f4f6;
+  --toast-muted: rgba(255, 255, 255, 0.55);
+  --toast-link: #8ab8ff;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22), 0 1px 3px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
-  animation: pop-in 140ms var(--ease);
+  animation: toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.toast.error {
-  color: var(--danger);
+@media (prefers-color-scheme: dark) {
+  .toast {
+    --toast-bg: #45454c;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+/* errors: a red mark in front */
+.toast.error::before {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff5a52;
+}
+.toast .dot-sep {
+  color: var(--toast-muted);
 }
 .toast-text {
   min-width: 0;
@@ -2359,22 +2384,24 @@ body.resizing iframe {
   user-select: text;
   -webkit-user-select: text;
 }
-.toast-action {
+.toast .toast-action {
   flex: none;
-  font-size: 12.5px;
+  font-size: 13px;
+  color: var(--toast-link);
 }
 .toast-close {
   flex: none;
-  width: 20px;
-  height: 20px;
-  margin-left: 4px;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
   display: grid;
   place-items: center;
-  border-radius: 5px;
-  color: var(--text-3);
+  border-radius: 6px;
+  color: var(--toast-muted);
 }
 .toast-close:hover {
-  background: var(--bg-hover);
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--toast-fg);
 }
 
 /* ==========================================================================
@@ -3186,7 +3213,7 @@ html.macos .app.rail-mode .search-bar {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--rs-ring, inset 0 0 0 1px rgba(0, 0, 0, 0.12));
 }
 .tag-dots {
   flex: none;
@@ -3203,7 +3230,7 @@ html.macos .app.rail-mode .search-bar {
 }
 /* Tagged rows: a bar in the first tag's colour in the row's gutter (x 15–18), between the
    unread dot and the highlight, so selection never covers it; no text is recoloured. Colour is
-   the theme-adjusted tint so dark tags stay visible. */
+   the tag's own (as its dots), lightened only where it would vanish (Tags.tsx tintStyle). */
 .row-inner.tagged::before {
   content: '';
   position: absolute;
@@ -3212,15 +3239,12 @@ html.macos .app.rail-mode .search-bar {
   top: calc((var(--row-h) - 56px) / 2);
   bottom: calc((var(--row-h) - 56px) / 2);
   border-radius: 2px;
-  background: var(--tint-l);
+  background: var(--bar-l);
 }
 @media (prefers-color-scheme: dark) {
   .row-inner.tagged::before {
-    background: var(--tint-d);
+    background: var(--bar-d);
   }
-}
-.list-scroll:focus-within .row.selected .tag-dot {
-  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
 }
 
 /* reader chips: one line in the band's info row */
@@ -3297,30 +3321,119 @@ html.macos .app.rail-mode .search-bar {
 .vm-item:focus-visible .snooze-when {
   color: var(--on-accent);
 }
-.snooze-custom {
+.snz-custom {
+  padding: 2px 6px 4px;
+}
+.snz-month {
+  display: flex;
+  align-items: center;
+  height: 28px;
+}
+.snz-month-name {
+  flex: 1;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.snz-nav {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  font-size: 16px;
+  line-height: 1;
+}
+.snz-cal {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+}
+.snz-wd {
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.snz-day {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  height: 26px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  cursor: pointer;
+}
+.snz-day:hover:not(:disabled):not(.sel) {
+  background: var(--bg-hover);
+}
+/* the next month's first days: pickable, just muted */
+.snz-day.out {
+  color: var(--text-2);
+}
+.snz-day.today {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.snz-day.sel {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+/* days gone by: faint, not pickable */
+.snz-day:disabled {
+  color: var(--text-3);
+  opacity: 0.35;
+  cursor: default;
+}
+.snz-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 4px 2px 8px;
+  margin-top: 6px;
 }
-.snooze-custom input {
+.snz-time {
   flex: 1;
   min-width: 0;
-  height: 26px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--sep-strong);
+  border-radius: 6px;
+  background: var(--bg-reader);
+  color: var(--text);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
-.snooze-custom .btn {
+.snz-time.invalid {
+  border-color: var(--danger);
+}
+.snz-row .btn {
   flex: none;
-  height: 26px;
-  padding: 0 10px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 14px;
 }
+/* always one line, its space kept (no shift as it changes) */
+.snz-summary {
+  height: 18px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* list rows of snoozed mail: a clock among the markers (the time on hover) */
 .snooze-mark {
   display: inline-flex;
 }
 .row-icons .snooze-mark .marker {
-  color: var(--accent);
+  color: var(--rs-muted, var(--accent));
 }
 .act-btn:disabled {
   opacity: 0.35;
@@ -3820,10 +3933,7 @@ html.macos .app.rail-mode .search-bar {
 
 /* Replied / forwarded markers: list rows, conversation cards, reader band */
 .row-icons .marker {
-  color: var(--text-3);
-}
-.list-scroll:focus-within .row.selected .row-icons .marker {
-  color: var(--sel-muted);
+  color: var(--rs-muted, var(--text-3));
 }
 .cm-mark {
   flex: none;
@@ -4085,15 +4195,12 @@ html.macos .app.rail-mode .search-bar {
 /* our outgoing mail: in place of the date */
 .send-state {
   font-style: italic;
-  color: var(--text-3);
+  color: var(--rs-muted, var(--text-3));
 }
 .send-state.failed {
   font-style: normal;
   font-weight: 600;
-  color: var(--danger);
-}
-.list-scroll:focus-within .row.selected .send-state {
-  color: var(--sel-muted);
+  color: var(--rs-muted, var(--danger));
 }
 
 /* composer: forwarded attachments and the quoted original under the text */
@@ -4402,13 +4509,23 @@ html.inactive .sk-line {
   white-space: nowrap;
 }
 /* Reply | Reply all: the current one filled, the other a click away */
+/* A segmented switch (grey track, the chosen side raised), nothing like the blue Send button:
+   it says which kind of reply this is, it doesn't send. */
 .cmp-mode {
   display: inline-flex;
   flex: none;
   padding: 2px;
   gap: 2px;
-  border: 1px solid var(--sep);
   border-radius: 8px;
+  background: var(--seg-track);
+  --seg-track: rgba(0, 0, 0, 0.06);
+  --seg-on: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  .cmp-mode {
+    --seg-track: rgba(255, 255, 255, 0.07);
+    --seg-on: rgba(255, 255, 255, 0.16);
+  }
 }
 .cmp-mode button {
   display: inline-flex;
@@ -4419,10 +4536,10 @@ html.inactive .sk-line {
   border: none;
   border-radius: 6px;
   background: none;
-  color: var(--text-2);
+  color: var(--text-3);
   font: inherit;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -4431,8 +4548,10 @@ html.inactive .sk-line {
   color: var(--text);
 }
 .cmp-mode button.on {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--seg-on);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   cursor: default;
 }
 .cmp-mode button:disabled:not(.on) {

@@ -691,6 +691,7 @@ export function createMockBackend(): Backend {
       keywords: provider !== 'outlook',
       markLetter: null,
       markColor: null,
+      graph: false,
     };
     accounts.push(acc);
     const me: Person = { name: displayName, addr: email };
@@ -1843,6 +1844,17 @@ export function createMockBackend(): Backend {
     },
     async forget_address({ addr }) {
       forgotten.add(addr.trim().toLowerCase());
+    },
+    async enable_graph({ accountId }) {
+      await sleep(600);
+      const acc = accounts.find((x) => x.id === accountId);
+      if (acc) acc.graph = true;
+      emit('folders-changed', { accountId });
+    },
+    async disable_graph({ accountId }) {
+      const acc = accounts.find((x) => x.id === accountId);
+      if (acc) acc.graph = false;
+      emit('folders-changed', { accountId });
     },
     async take_mailto_links() {
       return [];

@@ -2822,6 +2822,7 @@ dependencies = [
  "mail-core",
  "rpassword",
  "rustls-native-certs",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tracing",

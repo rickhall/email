@@ -1,4 +1,5 @@
-import { createSignal, For, onMount, Show } from 'solid-js';
+import { createMemo, createSignal, For, onMount, Show } from 'solid-js';
+import { monthGrid, parseTime, stepTime } from '../lib/clock';
 import { Portal } from 'solid-js/web';
 import { placeNear, useDismiss } from './Actions';
 
@@ -47,11 +48,147 @@ export function fmtWake(until: number, now = new Date()): string {
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
-/** `datetime-local` value for Unix seconds (local time). */
-function localInput(t: number): string {
-  const d = new Date(t * 1000);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+/** The clock shows hours 0–23 here (else 1–12 with am/pm). */
+const H24 = (() => {
+  try {
+    const c = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
+    return c === 'h23' || c === 'h24';
+  } catch {
+    return false;
+  }
+})();
+/** The week starts on this day here (0 Sunday, 1 Monday). */
+const FIRST_DAY = (() => {
+  try {
+    const info = (new Intl.Locale(navigator.language) as Intl.Locale & { weekInfo?: { firstDay: number } }).weekInfo;
+    return info ? info.firstDay % 7 : 0;
+  } catch {
+    return 0;
+  }
+})();
+const fmtMinutes = (m: number) =>
+  new Date(2000, 0, 1, Math.floor(m / 60), m % 60).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+/** A date and time of the user's choosing: a month calendar (click a day, or arrow keys) and a
+ *  time typed ("9", "2pm", "14:15") or stepped with ↑/↓ (15 minutes; Shift: an hour). The
+ *  app's own controls: WebKitGTK's date-time field kept taking the focus back to its popup. */
+function CustomTime(props: { now: Date; onPick: (until: number) => void }) {
+  const today = new Date(props.now.getFullYear(), props.now.getMonth(), props.now.getDate());
+  const [day, setDay] = createSignal(plusDays(today, 1));
+  const [shown, setShown] = createSignal(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [minutes, setMinutes] = createSignal(8 * 60);
+  const [text, setText] = createSignal(fmtMinutes(8 * 60));
+  const [bad, setBad] = createSignal(false);
+  const until = () => Math.floor(new Date(day().getFullYear(), day().getMonth(), day().getDate(), 0, minutes()).getTime() / 1000);
+  const ok = () => !bad() && until() > Date.now() / 1000;
+  const grid = createMemo(() => monthGrid(shown().getFullYear(), shown().getMonth(), FIRST_DAY));
+  const weekdays = createMemo(() =>
+    grid().slice(0, 7).map((d) => d.toLocaleDateString(undefined, { weekday: 'narrow' })),
+  );
+  const pickDay = (d: Date) => {
+    if (d < today) return;
+    setDay(d);
+    if (d.getMonth() !== shown().getMonth() || d.getFullYear() !== shown().getFullYear()) setShown(new Date(d.getFullYear(), d.getMonth(), 1));
+  };
+  const moveMonth = (n: number) => setShown(new Date(shown().getFullYear(), shown().getMonth() + n, 1));
+  const takeText = () => {
+    const m = parseTime(text(), H24);
+    if (m == null) return setBad(text().trim() !== '');
+    setBad(false);
+    setMinutes(m);
+    setText(fmtMinutes(m));
+  };
+  const setTime = (m: number) => {
+    setBad(false);
+    setMinutes(m);
+    setText(fmtMinutes(m));
+  };
+  const summary = () =>
+    `${day().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} at ${fmtMinutes(minutes())}`;
+  let calEl: HTMLDivElement | undefined;
+  return (
+    <div class="snz-custom">
+      <div class="snz-month">
+        <button class="icon-btn snz-nav" aria-label="Previous month" disabled={shown() <= new Date(today.getFullYear(), today.getMonth(), 1)} onClick={() => moveMonth(-1)}>
+          ‹
+        </button>
+        <span class="snz-month-name">{shown().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
+        <button class="icon-btn snz-nav" aria-label="Next month" onClick={() => moveMonth(1)}>
+          ›
+        </button>
+      </div>
+      <div
+        class="snz-cal"
+        role="grid"
+        aria-label="Day"
+        ref={calEl}
+        onKeyDown={(e) => {
+          const by = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+          if (by == null) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const d = plusDays(day(), by);
+          if (d < today) return;
+          pickDay(d);
+          queueMicrotask(() => calEl?.querySelector<HTMLElement>('.snz-day.sel')?.focus());
+        }}
+      >
+        <For each={weekdays()}>{(w) => <span class="snz-wd">{w}</span>}</For>
+        <For each={grid()}>
+          {(d) => (
+            <button
+              class="snz-day"
+              classList={{
+                sel: sameDay(d, day()),
+                today: sameDay(d, today),
+                out: d.getMonth() !== shown().getMonth(),
+              }}
+              disabled={d < today}
+              tabIndex={sameDay(d, day()) ? 0 : -1}
+              aria-label={d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+              aria-selected={sameDay(d, day())}
+              onClick={() => pickDay(d)}
+            >
+              {d.getDate()}
+            </button>
+          )}
+        </For>
+      </div>
+      <div class="snz-row">
+        <input
+          class="snz-time"
+          classList={{ invalid: bad() }}
+          type="text"
+          spellcheck={false}
+          aria-label="Time (↑/↓ to change)"
+          title="Type a time (9, 2pm, 14:15) or use ↑/↓"
+          value={text()}
+          onInput={(e) => setText(e.currentTarget.value)}
+          onBlur={takeText}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              e.stopPropagation();
+              const m = parseTime(text(), H24) ?? minutes();
+              setTime(stepTime(m, (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 60 : 15)));
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              e.stopPropagation();
+              takeText();
+              if (ok()) props.onPick(until());
+            }
+          }}
+        />
+        <button class="btn primary small" disabled={!ok()} onClick={() => ok() && props.onPick(until())}>
+          Snooze
+        </button>
+      </div>
+      <div class="snz-summary" aria-live="polite">
+        {bad() ? 'Not a time: try 9, 2pm or 14:15' : ok() ? summary() : 'That time has passed'}
+      </div>
+    </div>
+  );
 }
 
 export function SnoozeMenu(props: {
@@ -65,12 +202,6 @@ export function SnoozeMenu(props: {
   let el: HTMLDivElement | undefined;
   const now = new Date();
   const choices = snoozeChoices(now);
-  const [custom, setCustom] = createSignal(localInput(at(plusDays(now, 1), 8)));
-  const customTime = () => {
-    const t = new Date(custom()).getTime();
-    return Number.isFinite(t) ? Math.floor(t / 1000) : null;
-  };
-  const customOk = () => (customTime() ?? 0) > Date.now() / 1000;
   const [pos, setPos] = createSignal(placeNear(props.anchor, MENU_W, 260));
   const reposition = () => setPos(placeNear(props.anchor, MENU_W, el?.offsetHeight || 260));
   useDismiss(() => el, props.anchor, () => props.onClose(false), reposition);
@@ -80,10 +211,6 @@ export function SnoozeMenu(props: {
       el?.querySelector<HTMLElement>('.vm-item')?.focus();
     }),
   );
-  const pickCustom = () => {
-    const t = customTime();
-    if (t != null && customOk()) props.onPick(t);
-  };
   return (
     <Portal>
       <div
@@ -99,14 +226,8 @@ export function SnoozeMenu(props: {
             props.onClose(true);
             return;
           }
-          if (e.target instanceof HTMLInputElement) {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              pickCustom();
-            }
-            return;
-          }
-          const list = [...(el?.querySelectorAll<HTMLElement>('.vm-item, .snooze-custom input') ?? [])];
+          if (e.target instanceof HTMLInputElement) return;
+          const list = [...(el?.querySelectorAll<HTMLElement>('.vm-item, .snz-time') ?? [])];
           const i = list.indexOf(document.activeElement as HTMLElement);
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
             e.preventDefault();
@@ -132,18 +253,7 @@ export function SnoozeMenu(props: {
           )}
         </For>
         <div class="vm-sep" />
-        <div class="snooze-custom">
-          <input
-            type="datetime-local"
-            aria-label="Date and time"
-            value={custom()}
-            min={localInput(Math.ceil(Date.now() / 60_000) * 60)}
-            onInput={(e) => setCustom(e.currentTarget.value)}
-          />
-          <button class="btn small" disabled={!customOk()} onClick={pickCustom}>
-            Snooze
-          </button>
-        </div>
+        <CustomTime now={now} onPick={props.onPick} />
       </div>
     </Portal>
   );

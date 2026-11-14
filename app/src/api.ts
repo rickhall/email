@@ -201,6 +201,9 @@ export const api = {
   makeDefaultMail: (): Promise<void> => call('make_default_mail', {}),
   /** Leave an address out of the suggestions from now on. */
   forgetAddress: (addr: string): Promise<void> => call('forget_address', { addr }),
+  /** Microsoft accounts: tags and snooze through Microsoft Graph (a browser sign-in). */
+  enableGraph: (accountId: number): Promise<void> => call('enable_graph', { accountId }),
+  disableGraph: (accountId: number): Promise<void> => call('disable_graph', { accountId }),
   /** mailto: links from other programs not yet taken (each opens a new message). */
   takeMailtoLinks: (): Promise<string[]> => call('take_mailto_links', {}),
   /** The order accounts are listed in, first to last. */

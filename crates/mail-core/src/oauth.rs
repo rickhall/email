@@ -25,6 +25,13 @@ const MICROSOFT_TOKEN_PATH: &str = "/common/oauth2/v2.0/token";
 const MICROSOFT_SCOPES: &str =
     "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid email";
 
+/// Microsoft Graph, for what IMAP can't keep on Exchange: tags as Outlook categories (on the
+/// messages, and the account's list of them with their colours) and the app's own markers
+/// (snooze times) in a property of its own. Consented together with the mail scopes at
+/// sign-in; tokens for it come from the same refresh token.
+pub const GRAPH_SCOPES: &str =
+    "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/MailboxSettings.ReadWrite offline_access";
+
 /// How long the browser sign-in may take before the app stops waiting.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Renew an access token this long before it expires.
@@ -84,13 +91,16 @@ impl Default for Pkce {
 // ------------------------------------------------------------- the browser sign-in
 
 /// Microsoft's sign-in page for this attempt. `login_hint` fills in the address.
-pub fn microsoft_authorize_url(redirect: &str, state: &str, challenge: &str, login_hint: Option<&str>) -> String {
+/// `graph`: also ask for Microsoft Graph (`GRAPH_SCOPES`), consented together with the mail
+/// scopes so the one refresh token serves both.
+pub fn microsoft_authorize_url(redirect: &str, state: &str, challenge: &str, login_hint: Option<&str>, graph: bool) -> String {
+    let scopes = if graph { format!("{MICROSOFT_SCOPES} {GRAPH_SCOPES}") } else { MICROSOFT_SCOPES.to_string() };
     let mut q = form_urlencoded::Serializer::new(String::new());
     q.append_pair("client_id", MICROSOFT_CLIENT_ID)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", redirect)
         .append_pair("response_mode", "query")
-        .append_pair("scope", MICROSOFT_SCOPES)
+        .append_pair("scope", &scopes)
         .append_pair("state", state)
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
@@ -208,11 +218,16 @@ pub async fn microsoft_exchange(code: &str, verifier: &str, redirect: &str) -> R
 
 /// A new access token from a refresh token.
 pub async fn microsoft_refresh(refresh_token: &str) -> Result<Tokens> {
+    microsoft_refresh_for(refresh_token, MICROSOFT_SCOPES).await
+}
+
+/// A new access token for `scopes` (one resource: mail, or Graph) from a refresh token.
+pub async fn microsoft_refresh_for(refresh_token: &str, scopes: &str) -> Result<Tokens> {
     token_request(&[
         ("client_id", MICROSOFT_CLIENT_ID),
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
-        ("scope", MICROSOFT_SCOPES),
+        ("scope", scopes),
     ])
     .await
 }
@@ -241,21 +256,34 @@ async fn token_request(form: &[(&str, &str)]) -> Result<Tokens> {
 
 /// POST a form over HTTPS (one request, then the connection closes): (status, body).
 async fn post_form(host: &str, path: &str, body: &str) -> Result<(u16, String)> {
+    https(host, "POST", path, &[("Content-Type", "application/x-www-form-urlencoded")], body).await
+}
+
+/// GET a Graph path (`/v1.0/...`) with `auth` ("Bearer …").
+pub async fn graph_get(auth: &str, path: &str) -> Result<(u16, String)> {
+    https("graph.microsoft.com", "GET", path, &[("Authorization", auth)], "").await
+}
+
+/// One HTTPS request (HTTP/1.1, a new connection each time); its status and body.
+pub(crate) async fn https(host: &str, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Result<(u16, String)> {
     let tcp = tokio::time::timeout(Duration::from_secs(20), TcpStream::connect((host, 443)))
         .await
         .map_err(|_| anyhow!("connecting to {host} timed out"))?
         .with_context(|| format!("connecting to {host}"))?;
     let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())?;
     let mut tls = tokio_rustls::TlsConnector::from(crate::imap::tls_config()).connect(name, tcp).await?;
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\n\
-         Content-Length: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: Email\r\n\r\n{body}",
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str(&format!(
+        "Content-Length: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: Email\r\n\r\n{body}",
         body.len()
-    );
+    ));
     tls.write_all(request.as_bytes()).await?;
     let mut raw = Vec::new();
     // A server may close without TLS close_notify once it has sent everything.
-    let _ = tokio::time::timeout(Duration::from_secs(30), tls.read_to_end(&mut raw)).await.map_err(|_| anyhow!("{host} didn't answer"))?;
+    let _ = tokio::time::timeout(Duration::from_secs(60), tls.read_to_end(&mut raw)).await.map_err(|_| anyhow!("{host} didn't answer"))?;
     parse_response(&raw)
 }
 
@@ -313,6 +341,8 @@ pub trait TokenStore: Send + Sync {
 /// Current access tokens for one Microsoft account, renewed when they're about to expire.
 pub struct MicrosoftSession {
     email: String,
+    /// What its tokens are for: mail (IMAP, SMTP) or Graph.
+    scopes: &'static str,
     store: Arc<dyn TokenStore>,
     /// The access token and when it expires, by the wall clock: the monotonic clock stops
     /// while the computer sleeps, so after a night asleep a token would look fresh when it
@@ -324,7 +354,16 @@ pub struct MicrosoftSession {
 
 impl MicrosoftSession {
     pub fn new(email: &str, store: Arc<dyn TokenStore>) -> MicrosoftSession {
-        MicrosoftSession { email: email.to_string(), store, current: tokio::sync::Mutex::new(None), refused: Mutex::new(None) }
+        Self::for_scopes(email, store, MICROSOFT_SCOPES)
+    }
+
+    /// Tokens for Microsoft Graph (`GRAPH_SCOPES`), from the account's same refresh token.
+    pub fn graph(email: &str, store: Arc<dyn TokenStore>) -> MicrosoftSession {
+        Self::for_scopes(email, store, GRAPH_SCOPES)
+    }
+
+    fn for_scopes(email: &str, store: Arc<dyn TokenStore>, scopes: &'static str) -> MicrosoftSession {
+        MicrosoftSession { email: email.to_string(), scopes, store, current: tokio::sync::Mutex::new(None), refused: Mutex::new(None) }
     }
 
     /// A token good for at least a few more minutes.
@@ -339,7 +378,7 @@ impl MicrosoftSession {
             }
         }
         let refresh = self.store.refresh_token(&self.email)?;
-        let tokens = match microsoft_refresh(&refresh).await {
+        let tokens = match microsoft_refresh_for(&refresh, self.scopes).await {
             Ok(t) => t,
             Err(e) => {
                 if let Some(s) = e.downcast_ref::<SignInNeeded>() {
@@ -400,7 +439,7 @@ mod tests {
 
     #[test]
     fn authorize_url_carries_the_request() {
-        let url = microsoft_authorize_url("http://localhost:4321", "st", "ch", Some("john@example.com"));
+        let url = microsoft_authorize_url("http://localhost:4321", "st", "ch", Some("john@example.com"), false);
         assert!(url.starts_with(MICROSOFT_AUTHORIZE));
         for part in ["client_id=63148c30", "redirect_uri=http%3A%2F%2Flocalhost%3A4321", "code_challenge=ch", "code_challenge_method=S256", "state=st", "login_hint=john%40example.com", "offline_access"] {
             assert!(url.contains(part), "{part} in {url}");

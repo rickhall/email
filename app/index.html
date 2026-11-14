@@ -5,8 +5,37 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Email</title>
+    <!-- A compose window: its outline at once, from here, before the app's code has loaded
+         (components/ComposeWindow.tsx takes it away once the composer is drawn in its place).
+         Same layout and colours as the composer's top (styles.css: .cmp-bar, .cmp-row). -->
+    <script>
+      if (window.__EMAIL_WINDOW === 'compose' || /[?&]compose=/.test(location.search))
+        document.documentElement.classList.add('booting-compose');
+    </script>
+    <style>
+      #boot { display: none; }
+      html.booting-compose, html.booting-compose body { margin: 0; background: #fff; }
+      html.booting-compose #boot {
+        display: block; position: fixed; inset: 0; z-index: 1; background: #fff; color: #8a8a90;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      #boot .boot-bar { height: 52px; box-sizing: border-box; border-bottom: 1px solid rgba(0, 0, 0, 0.085); }
+      #boot .boot-rows { padding: 0 28px; }
+      #boot .boot-tools { height: 40px; }
+      #boot .boot-row { height: 40px; box-sizing: border-box; display: flex; align-items: center; border-bottom: 1px solid rgba(0, 0, 0, 0.085); }
+      @media (prefers-color-scheme: dark) {
+        html.booting-compose, html.booting-compose body, html.booting-compose #boot { background: #1f1f22; color: #7f7f88; }
+        #boot .boot-bar, #boot .boot-row { border-color: rgba(255, 255, 255, 0.075); }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot" aria-hidden="true">
+      <div class="boot-bar"></div>
+      <div class="boot-rows"><div class="boot-row">From</div><div class="boot-row">To</div><div class="boot-row">Subject</div></div>
+      <div class="boot-bar boot-tools"></div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/index.tsx"></script>
   </body>

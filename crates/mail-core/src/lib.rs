@@ -4,6 +4,7 @@ pub mod imap;
 pub mod actions;
 pub mod compose;
 pub mod contacts;
+pub mod graph;
 pub mod mime;
 pub mod oauth;
 pub mod model;
@@ -161,18 +162,22 @@ impl Core {
 
     /// Where and how an account signs in: its password, or (Microsoft) a session that supplies
     /// current access tokens.
-    fn server_config(&self, account: &Account) -> Result<(ServerConfig, Option<Arc<oauth::MicrosoftSession>>)> {
-        let (credentials, session) = match account.auth {
-            AuthKind::Password => (Credentials::Password(self.secrets.get(&account.email)?), None),
+    /// With Graph allowed (`Account::graph`), also a Graph client for its tags and snooze.
+    fn server_config(&self, account: &Account) -> Result<(ServerConfig, Option<Arc<oauth::MicrosoftSession>>, Option<Arc<graph::Graph>>)> {
+        let (credentials, session, graph) = match account.auth {
+            AuthKind::Password => (Credentials::Password(self.secrets.get(&account.email)?), None, None),
             AuthKind::Microsoft => {
                 // The token itself must be there; it's read again at each renewal.
                 self.secrets.get(&account.email)?;
                 let store: Arc<dyn oauth::TokenStore> = self.secrets.clone();
+                let graph = account
+                    .graph
+                    .then(|| Arc::new(graph::Graph::new(Arc::new(oauth::MicrosoftSession::graph(&account.email, store.clone())))));
                 // Placeholder until the session supplies a token for each connection.
-                (Credentials::OAuth2 { access_token: String::new() }, Some(Arc::new(oauth::MicrosoftSession::new(&account.email, store))))
+                (Credentials::OAuth2 { access_token: String::new() }, Some(Arc::new(oauth::MicrosoftSession::new(&account.email, store))), graph)
             }
         };
-        Ok((ServerConfig { host: account.imap_host.clone(), port: account.imap_port, user: account.email.clone(), credentials }, session))
+        Ok((ServerConfig { host: account.imap_host.clone(), port: account.imap_port, user: account.email.clone(), credentials }, session, graph))
     }
 
     /// Start syncing every stored account. Accounts whose secret is missing are skipped.
@@ -189,12 +194,13 @@ impl Core {
     }
 
     fn start_account(&self, account: Account) -> Result<()> {
-        let (server, microsoft) = self.server_config(&account)?;
+        let (server, microsoft, graph) = self.server_config(&account)?;
         let sync = AccountSync::start(
             self.store.clone(),
             account.clone(),
             server,
             microsoft,
+            graph,
             self.strategy.clone(),
             self.events.clone(),
             self.options.clone(),
@@ -281,7 +287,7 @@ impl Core {
     /// Waits for the browser (up to 5 minutes, or `cancel_sign_in`), checks the account against
     /// Microsoft's IMAP server, then saves it and starts syncing.
     pub async fn add_microsoft_account(&self, login_hint: Option<String>, display_name: Option<String>, open: impl FnOnce(String)) -> Result<Account> {
-        let (email, refresh) = self.microsoft_sign_in(login_hint.as_deref(), open).await?;
+        let (email, refresh) = self.microsoft_sign_in(login_hint.as_deref(), open, false).await?;
         let host = "outlook.office365.com";
         self.secrets.set(&email, &refresh)?;
         let display_name = display_name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| email.clone());
@@ -302,16 +308,55 @@ impl Core {
     /// and restart its sync.
     pub async fn microsoft_sign_in_again(&self, account_id: i64, open: impl FnOnce(String)) -> Result<()> {
         let account = self.store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
-        let (email, refresh) = self.microsoft_sign_in(Some(&account.email), open).await?;
+        let (email, refresh) = self.microsoft_sign_in(Some(&account.email), open, false).await?;
         if !email.eq_ignore_ascii_case(&account.email) {
             bail!("You signed in as {email}, not {}. Sign in with that account instead.", account.email);
         }
         self.secrets.set(&account.email, &refresh)?;
+        self.restart_account(account_id)
+    }
+
+    fn restart_account(&self, account_id: i64) -> Result<()> {
+        let account = self.account(account_id)?;
         if let Some(old) = self.running.lock().unwrap().remove(&account_id) {
             old.stop();
         }
         self.needs_password.lock().unwrap().remove(&account_id);
         self.start_account(account)?;
+        Ok(())
+    }
+
+    /// Let a Microsoft account keep tags and snooze through Microsoft Graph (`graph`): a sign-in
+    /// in the browser that also asks for Graph, checked against Graph, then the account starts
+    /// over with it. A work account whose organisation needs an administrator's consent fails
+    /// at Microsoft's page, and the account stays as it was.
+    pub async fn enable_graph(&self, account_id: i64, open: impl FnOnce(String)) -> Result<()> {
+        let account = self.account(account_id)?;
+        if account.auth != AuthKind::Microsoft {
+            bail!("Only Microsoft accounts need this.");
+        }
+        let (email, refresh) = self.microsoft_sign_in(Some(&account.email), open, true).await?;
+        if !email.eq_ignore_ascii_case(&account.email) {
+            bail!("You signed in as {email}, not {}. Sign in with that account instead.", account.email);
+        }
+        self.secrets.set(&account.email, &refresh)?;
+        let store: Arc<dyn oauth::TokenStore> = self.secrets.clone();
+        let check = graph::Graph::new(Arc::new(oauth::MicrosoftSession::graph(&account.email, store)));
+        if let Err(e) = check.check().await {
+            bail!("Signed in, but Microsoft Graph isn't available for this account: {e:#}");
+        }
+        self.store.set_account_graph(account_id, true)?;
+        tracing::info!(account = account.email, "tags and snooze through Microsoft Graph");
+        self.restart_account(account_id)?;
+        let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
+        Ok(())
+    }
+
+    /// Stop keeping tags and snooze through Graph (they stay on the messages in Outlook).
+    pub fn disable_graph(&self, account_id: i64) -> Result<()> {
+        self.store.set_account_graph(account_id, false)?;
+        self.restart_account(account_id)?;
+        let _ = self.events.send(CoreEvent::FoldersChanged { account_id });
         Ok(())
     }
 
@@ -327,11 +372,11 @@ impl Core {
     }
 
     /// The browser sign-in: (address, refresh token), checked by signing in to IMAP with it.
-    async fn microsoft_sign_in(&self, login_hint: Option<&str>, open: impl FnOnce(String)) -> Result<(String, String)> {
+    async fn microsoft_sign_in(&self, login_hint: Option<&str>, open: impl FnOnce(String), graph: bool) -> Result<(String, String)> {
         let redirect = oauth::Redirect::listen().await?;
         let pkce = oauth::Pkce::new();
         let uri = redirect.uri.clone();
-        open(oauth::microsoft_authorize_url(&uri, redirect.state(), &pkce.challenge, login_hint.map(str::trim).filter(|h| !h.is_empty())));
+        open(oauth::microsoft_authorize_url(&uri, redirect.state(), &pkce.challenge, login_hint.map(str::trim).filter(|h| !h.is_empty()), graph));
         let code = tokio::select! {
             code = redirect.code() => code?,
             _ = self.sign_in_cancel.notified() => bail!("Sign-in cancelled."),
@@ -1016,7 +1061,8 @@ pub(crate) fn queue_action(
 ) -> Result<ActionResult> {
     let (account_id, _) = store.folder(folder_id)?.ok_or_else(|| anyhow!("unknown folder"))?;
     let account = store.accounts()?.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no such account"))?;
-    if action.needs_keywords() && account.keywords == Some(false) {
+    // Exchange keeps no keywords; with Graph allowed, tags and snooze go there instead.
+    if action.needs_keywords() && account.keywords == Some(false) && !account.graph {
         bail!("This account's mail server doesn't keep tags or snooze times.");
     }
     let gmail = account.provider == Provider::Gmail;

@@ -20,18 +20,13 @@ export const windowLabel: string = isTauri
 export const composeDraftId: number | null = windowLabel.startsWith('compose-') ? Number(windowLabel.slice(8)) : null;
 export const isComposeWindow = composeDraftId != null;
 
-/** Open draft `id` in its compose window (or bring that window forward). */
-/** Show this window (created hidden) once its first frame with content is drawn. */
-export function revealWhenDrawn(): void {
-  if (!isTauri) return;
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      const w = getCurrentWindow();
-      void w.show().then(() => w.setFocus());
-    }),
-  );
+/** The compose outline index.html shows while the app loads: gone (the composer is drawn). */
+export function endBoot(): void {
+  document.getElementById('boot')?.remove();
+  document.documentElement.classList.remove('booting-compose');
 }
 
+/** Open draft `id` in its compose window (or bring that window forward). */
 export async function openComposeWindow(id: number): Promise<void> {
   if (isTauri) return api.openCompose(id);
   window.open(`${location.pathname}?compose=${id}`, `compose-${id}`, 'width=760,height=720');

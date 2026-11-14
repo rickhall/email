@@ -49,6 +49,9 @@ pub struct Account {
     /// Whether its server keeps keywords we make up (tags, snooze times): `\*` in the Inbox's
     /// PERMANENTFLAGS. None until the first sync has seen it. Exchange (Outlook) doesn't.
     pub keywords: Option<bool>,
+    /// A Microsoft account whose tags and snooze go through Microsoft Graph (the user allowed
+    /// it): what IMAP can't keep there.
+    pub graph: bool,
     /// Its marker (the tinted letter in the sidebar) as the user set it; None: automatic.
     pub mark_letter: Option<String>,
     /// A colour name from the app's palette; None: automatic.

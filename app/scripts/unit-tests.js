@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { switchRecipients } from '../src/lib/recipients.ts';
 import { accountMarks, hash } from '../src/lib/accountMarks.ts';
 import { parseMailto } from '../src/lib/mailto.ts';
+import { monthGrid, parseTime, stepTime } from '../src/lib/clock.ts';
 
 const a = (addr, name = null) => ({ name, addr });
 const addrs = (list) => list.map((x) => x.addr);
@@ -106,4 +107,38 @@ test('a browser\'s "email link": no recipient, a plus kept, markup escaped', () 
   assert.equal(m.subject, 'C++ <tips>');
   assert.equal(m.html, '<p>1+1</p>');
   assert.equal(parseMailto('https://example.com'), null);
+});
+
+// ------------------------------------------------------------- snooze picker
+
+test('times typed by hand', () => {
+  assert.equal(parseTime('9'), 9 * 60);
+  assert.equal(parseTime('9:30'), 9 * 60 + 30);
+  assert.equal(parseTime('2pm'), 14 * 60);
+  assert.equal(parseTime('2'), 14 * 60, 'an afternoon hour without am/pm');
+  assert.equal(parseTime('2', true), 2 * 60, 'unless the clock is 24-hour');
+  assert.equal(parseTime('12am'), 0);
+  assert.equal(parseTime('12:15 p.m.'), 12 * 60 + 15);
+  assert.equal(parseTime('14:15'), 14 * 60 + 15);
+  assert.equal(parseTime('noon'), 12 * 60);
+  assert.equal(parseTime('25'), null);
+  assert.equal(parseTime('9:75'), null);
+  assert.equal(parseTime('soon'), null);
+});
+
+test('arrow keys step the time on a 15-minute grid', () => {
+  assert.equal(stepTime(9 * 60, 15), 9 * 60 + 15);
+  assert.equal(stepTime(9 * 60 + 7, 15), 9 * 60 + 15, 'onto the grid first');
+  assert.equal(stepTime(9 * 60 + 7, -15), 9 * 60);
+  assert.equal(stepTime(23 * 60 + 45, 15), 0, 'round the day');
+  assert.equal(stepTime(0, -60), 23 * 60);
+});
+
+test('a month grid starts on the week of the 1st', () => {
+  const g = monthGrid(2026, 10); // November 2026: the 1st is a Sunday
+  assert.equal(g.length, 42);
+  assert.equal(g[0].getDate(), 1);
+  const m = monthGrid(2026, 10, 1); // weeks from Monday
+  assert.equal(m[0].getMonth(), 9);
+  assert.equal(m[0].getDate(), 26);
 });
