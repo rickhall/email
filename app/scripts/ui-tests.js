@@ -311,6 +311,52 @@ describe('reader', () => {
     }
   });
 
+  test('the reader\u2019s head stays at the top while the message scrolls, unless turned off in Settings', async () => {
+    const { page, errors, close } = await open({ threaded: false });
+    try {
+      await page.locator('.folder-layer .row').first().click();
+      await page.locator('.reader .reader-body .card-frame-wrap').waitFor();
+      // A long message, whatever the demo's is.
+      await page.evaluate(() => (document.querySelector('.reader .reader-body').style.minHeight = '4000px'));
+      const head = page.locator('.reader .reader-head');
+      const top = async () => (await head.boundingBox()).y - (await page.locator('.reader-scroll').boundingBox()).y;
+      const scrollDown = async () => {
+        await page.evaluate(() => {
+          const s = document.querySelector('.reader-scroll');
+          s.scrollTop = 0;
+          s.scrollTop = 1500;
+        });
+        await page.waitForTimeout(50);
+        assert.ok((await page.evaluate(() => document.querySelector('.reader-scroll').scrollTop)) > 1000, 'the message scrolled');
+      };
+      await scrollDown();
+      assert.ok(Math.abs(await top()) < 2, `pinned: still at the top (${await top()})`);
+      // Opaque, so the message doesn't show through it.
+      assert.notEqual(await head.evaluate((e) => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)');
+      // Too tall to pin (a long recipient list): it scrolls away rather than cover the message.
+      await head.evaluate((e) => (e.style.minHeight = '900px'));
+      await page.waitForFunction(() => !document.querySelector('.reader .reader-head').classList.contains('pinned'));
+      await scrollDown();
+      assert.ok((await top()) < -500, 'a tall head scrolls away');
+      assert.equal(await head.evaluate((e) => getComputedStyle(e).overflowY), 'visible', 'and never scrolls within itself');
+      await head.evaluate((e) => (e.style.minHeight = ''));
+      await page.waitForFunction(() => document.querySelector('.reader .reader-head').classList.contains('pinned'));
+      // Settings \u203a General \u203a Appearance \u203a Message header: off, and it scrolls away with the message.
+      await page.keyboard.press('ControlOrMeta+,');
+      await page.locator('.st-nav-item', { hasText: 'General' }).click();
+      const pin = page.locator('.st-field', { hasText: 'Message header' }).locator('input[type=checkbox]');
+      assert.equal(await pin.isChecked(), true, 'on to begin with');
+      await pin.uncheck();
+      assert.equal(await page.evaluate(() => localStorage.getItem('ui.pinReaderHead')), 'false');
+      await page.keyboard.press('Escape');
+      await scrollDown();
+      assert.ok((await top()) < -1000, 'not pinned: scrolled out of view');
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
   test('a picture wider than the reader shrinks and keeps its shape', async () => {
     const { page, errors, close } = await open({ threaded: false, query: '&picture' });
     try {

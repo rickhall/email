@@ -2283,9 +2283,17 @@ body.resizing iframe {
   gap: 3px;
 }
 
-/* single-message: sender / recipients / chips just below the line, scrolling with the message */
+/* single-message: sender / recipients / chips just below the line; pinned (Settings › General
+   › Appearance, on by default) they stay at the top of the page while the message scrolls under
+   them, as long as they're short (Reader.tsx: a long recipient list scrolls away instead) */
 .reader-head {
   padding: 14px 28px 12px;
+}
+.reader-head.pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-reader);
 }
 .reader-head + .remote-banner {
   margin-top: 0;

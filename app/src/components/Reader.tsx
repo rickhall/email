@@ -20,6 +20,7 @@ import { bodyMenu } from './BodyMenu';
 import { keepImageShapes, ZOOM_CSS } from '../lib/images';
 import { isDraftMessage, openDraftSummary } from '../lib/compose';
 import { allKeys, label, MOD } from '../lib/shortcuts';
+import { pinReaderHead } from '../lib/readerHead';
 
 // ------------------------------------------------------------- srcdoc
 
@@ -245,6 +246,21 @@ const PAGE_FRAME_CSS = 'html{overflow:hidden}';
 
 export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   let scrollEl: HTMLDivElement | undefined;
+  // The head is pinned (Settings) only while it's short: one taller than 40% of the reader (a
+  // long recipient list, every attachment shown) scrolls away with the message instead of
+  // covering it, and never scrolls within itself.
+  const [headFits, setHeadFits] = createSignal(true);
+  let headObserver: ResizeObserver | undefined;
+  const watchHead = (head: HTMLDivElement) => {
+    headObserver?.disconnect();
+    const check = () => {
+      if (scrollEl) setHeadFits(head.offsetHeight <= scrollEl.clientHeight * 0.4);
+    };
+    headObserver = new ResizeObserver(check);
+    headObserver.observe(head);
+    queueMicrotask(() => scrollEl && headObserver?.observe(scrollEl));
+  };
+  onCleanup(() => headObserver?.disconnect());
   // Another message: back to its top (and its own width, after a wide one).
   createEffect(
     on(readerMessageId, () => {
@@ -443,7 +459,7 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
                 message together, each as tall as it is (an expanded list just makes it longer). */}
             <div class="reader-scroll" tabIndex={-1} ref={scrollEl}>
             <div class="reader-page">
-            <div class="reader-head">
+            <div class="reader-head" ref={watchHead} classList={{ pinned: pinReaderHead() && headFits() }}>
               <div class="reader-from">
                 <Avatar name={h().from.name} addr={h().from.addr} size={40} />
                 <div class="reader-from-text">

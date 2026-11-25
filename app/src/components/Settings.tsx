@@ -5,6 +5,7 @@ import { GoogleClientNote, GoogleContactsField } from './GoogleContacts';
 import { pictureLevel, setPictureLevel, type PictureLevel } from '../lib/senderIcons';
 import { setTheme, theme, THEMES } from '../lib/theme';
 import { pinFavorites, setPinFavorites } from '../lib/favorites';
+import { pinReaderHead, setPinReaderHead } from '../lib/readerHead';
 import { accountLogo, logoFromFile, setAccountLogo } from '../lib/accountLogos';
 import {
   bindKey,
@@ -896,6 +897,12 @@ function GeneralSection() {
           <label class="st-check">
             <input type="checkbox" checked={pinFavorites()} onChange={(e) => setPinFavorites(e.currentTarget.checked)} />
             Keep them at the top of the sidebar while the folders scroll
+          </label>
+        </Field>
+        <Field label="Message header">
+          <label class="st-check">
+            <input type="checkbox" checked={pinReaderHead()} onChange={(e) => setPinReaderHead(e.currentTarget.checked)} />
+            Keep the sender, recipients and attachments in view while the message scrolls
           </label>
         </Field>
       </SettingsGroup>
