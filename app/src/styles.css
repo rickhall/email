@@ -7108,15 +7108,18 @@ body.dragging-message iframe {
   position: relative;
   display: inline-flex;
 }
+/* The letter (or marker) centered like its neighbors; the color's bar under it, at the foot */
 .fmt-color-btn {
-  flex-direction: column;
-  gap: 1px;
+  position: relative;
 }
 .fmt-color-glyph {
   line-height: 1;
   font-weight: 600;
 }
 .fmt-color-bar {
+  position: absolute;
+  left: 7px;
+  bottom: 3px;
   width: 14px;
   height: 3px;
   border-radius: 1px;
