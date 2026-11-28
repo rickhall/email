@@ -988,6 +988,8 @@ export function createMockBackend(): Backend {
       const cur = draftCopies.get(did);
       if (cur) {
         Object.assign(cur.m, { subject: req.subject || '(no subject)', snippet, date: Math.floor(Date.now() / 1000) });
+        // As the core: its body changed under the same id.
+        emit('message-ready', { id: cur.m.id });
       } else {
         const m: MessageSummary = {
           id: nextMsgId++,

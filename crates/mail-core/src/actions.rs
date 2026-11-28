@@ -1003,22 +1003,28 @@ mod tests {
             crate::compose::build(&msg, "d1@example.com", 3_000).unwrap()
         };
         let id = s.create_draft(env.acct, r#"{"subject":"Plans"}"#, "d1@example.com").unwrap();
-        assert_eq!(s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans")).unwrap(), vec![drafts]);
+        assert_eq!(s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans")).unwrap(), (vec![drafts], None));
         let first = s.list_messages(drafts, 0, 10).unwrap().messages;
         assert_eq!(first.len(), 1);
         assert_eq!((first[0].subject.as_str(), first[0].draft_id), ("Plans", Some(id)));
 
         // Saving again updates the same row (no flicker in the list).
         s.update_draft(id, env.acct, r#"{"subject":"Plans for Monday"}"#).unwrap();
-        s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans for Monday")).unwrap();
+        let (_, rewritten) = s.upsert_draft_copy(id, env.acct, drafts, &raw("Plans for Monday")).unwrap();
         let again = s.list_messages(drafts, 0, 10).unwrap().messages;
         assert_eq!((again.len(), again[0].id, again[0].subject.as_str()), (1, first[0].id, "Plans for Monday"));
+        assert_eq!(rewritten, Some(first[0].id), "its body changed under the same id: shown again");
         assert_eq!(s.draft(id).unwrap().unwrap().1, r#"{"subject":"Plans for Monday"}"#);
 
         // Discarded (or sent): draft and copy gone.
         assert_eq!(s.delete_draft(id).unwrap(), vec![drafts]);
         assert!(s.list_messages(drafts, 0, 10).unwrap().messages.is_empty());
         assert!(s.draft(id).unwrap().is_none());
+
+        // The copy was the newest message; what comes next (its sent copy) doesn't get its id,
+        // which the app may still have its body under.
+        let sent = s.insert_local_copy(env.acct, drafts, &raw("Plans for Monday"), 1).unwrap();
+        assert!(sent > first[0].id, "{sent} after {}", first[0].id);
     }
 
     #[test]

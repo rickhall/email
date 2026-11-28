@@ -3556,6 +3556,47 @@ describe('drafts', () => {
       await close();
     }
   });
+
+  test('a draft saved again shows its new text in the reader, without choosing it again', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      let popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      let w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      await w.locator('input.cmp-subject').fill('Saved twice');
+      await w.locator('.cmp-editor .ProseMirror').click();
+      await w.keyboard.type('First version');
+      await page.bringToFront();
+      await page.locator('.sidebar .account .folder', { hasText: 'Drafts' }).first().click();
+      const row = page.locator('.folder-layer .row', { hasText: 'Saved twice' });
+      await row.waitFor({ timeout: 5000 });
+      await row.click();
+      // The reader's text, its frame's too (HTML is shown in one).
+      const shows = (text) =>
+        page.waitForFunction(
+          (text) => {
+            const r = document.querySelector('.reader');
+            const frames = [...(r?.querySelectorAll('iframe') ?? [])].map((f) => f.contentDocument?.body?.innerText ?? '');
+            return [r?.innerText ?? '', ...frames].some((t) => t.includes(text));
+          },
+          text,
+          { timeout: 5000 },
+        );
+      await shows('First version');
+      // Written on in the composer (saved as typed): the reader follows.
+      await w.bringToFront();
+      await w.locator('.cmp-editor .ProseMirror').click();
+      await w.keyboard.press('End');
+      await w.keyboard.type(', then more');
+      await page.bringToFront();
+      await shows('First version, then more');
+      await w.close();
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
 });
 
 describe('writing help', () => {

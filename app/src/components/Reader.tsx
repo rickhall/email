@@ -309,7 +309,9 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
     api.setAllowRemote(id, true).catch(() => {});
   }
 
-  async function load(id: number, remote: boolean) {
+  /** `quiet`: the message shown changed (a draft saved again): read it again, keeping what's
+   *  shown until the new one is in. */
+  async function load(id: number, remote: boolean, quiet = false) {
     const my = ++token;
     clearTimeout(retryTimer);
     setError(null);
@@ -324,8 +326,10 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
       return;
     }
     // Keep showing the previous body while toggling remote images for the same message.
-    if (detail()?.id !== id) setShown(null);
-    if (phase() !== 'downloading' || detail()?.id !== id) setPhase('loading');
+    if (!quiet) {
+      if (detail()?.id !== id) setShown(null);
+      if (phase() !== 'downloading' || detail()?.id !== id) setPhase('loading');
+    }
     const started = performance.now();
     try {
       const d = await api.getMessage(id, remote);
@@ -377,7 +381,10 @@ export function Reader(props: { ref?: (el: HTMLElement) => void }) {
   });
 
   onMessageReady((id) => {
-    if (id === readerMessageId() && phase() === 'downloading') void load(id, allowRemote());
+    if (id !== readerMessageId()) return;
+    // Downloaded at last; or changed while shown (a draft saved again: its cached copy is gone).
+    if (phase() === 'downloading') void load(id, allowRemote());
+    else if (phase() === 'ready') void load(id, allowRemote(), true);
   });
   onCleanup(() => clearTimeout(retryTimer));
 

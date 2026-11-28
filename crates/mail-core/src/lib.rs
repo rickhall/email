@@ -1421,7 +1421,12 @@ impl Core {
             let folders = if empty {
                 self.store.delete_draft_copy(id)?
             } else {
-                self.store.upsert_draft_copy(id, account.id, drafts.id, &raw)?
+                let (folders, rewritten) = self.store.upsert_draft_copy(id, account.id, drafts.id, &raw)?;
+                // Its new text, for windows showing (or keeping) the one saved before.
+                if let Some(copy) = rewritten {
+                    let _ = self.events.send(CoreEvent::MessageReady { id: copy });
+                }
+                folders
             };
             let _ = self.events.send(CoreEvent::MessagesChanged { folder_ids: folders });
             let _ = self.events.send(CoreEvent::FoldersChanged { account_id: account.id });

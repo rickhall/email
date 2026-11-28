@@ -45,6 +45,9 @@ export function cacheMarkRemoteAllowed(id: number): void {
 export const readyAt = new Map<number, number>();
 const readyListeners = new Set<(id: number) => void>();
 void events.onMessageReady(({ id }) => {
+  // Its body came, or changed (a draft saved again): a copy kept from before is out of date.
+  cache.delete(cacheKey(id, false));
+  cache.delete(cacheKey(id, true));
   readyAt.set(id, performance.now());
   if (readyAt.size > 500) readyAt.clear();
   readyListeners.forEach((fn) => fn(id));
@@ -123,7 +126,9 @@ export function createMessageBody(id: number) {
   }
 
   onMessageReady((rid) => {
-    if (rid === id && phase() === 'downloading') void load();
+    // Downloaded at last, or changed while shown (a draft saved again): read it (again). What's
+    // shown stays until the new one is in.
+    if (rid === id && (phase() === 'downloading' || phase() === 'ready')) void load();
   });
   onCleanup(() => {
     disposed = true;

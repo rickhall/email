@@ -375,7 +375,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS file_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS file_fts_del AFTER DELETE ON messages BEGIN
     DELETE FROM file_fts WHERE rowid = OLD.id;
 END;
+
+-- The highest message id used yet: a new message's id counts on from it (`NEXT_MESSAGE_ID`), so
+-- no id is used twice. (SQLite would reuse the newest one's id once it's deleted: a sent
+-- message taking its draft's, and the app, which remembers bodies by id, showing the draft.)
+-- What AUTOINCREMENT does, without rebuilding the table.
+CREATE TABLE IF NOT EXISTS message_id_floor (id INTEGER NOT NULL);
+INSERT INTO message_id_floor (id)
+    SELECT coalesce(max(id), 0) FROM messages WHERE NOT EXISTS (SELECT 1 FROM message_id_floor);
+CREATE TRIGGER IF NOT EXISTS messages_id_floor AFTER INSERT ON messages BEGIN
+    UPDATE message_id_floor SET id = NEW.id WHERE id < NEW.id;
+END;
 "#;
+
+/// A new message's id, in an INSERT: past every id used before (see `message_id_floor`).
+const NEXT_MESSAGE_ID: &str = "(SELECT id + 1 FROM message_id_floor)";
 
 /// Schema versions (`PRAGMA user_version`). `SCHEMA` is always the current schema, whole:
 /// a new database gets it directly. A database at `BASE_VERSION` or later is brought up to
@@ -1320,11 +1334,11 @@ impl Store {
             )?;
             let mut by_uid =
                 tx.prepare_cached("SELECT message_id FROM entries WHERE folder_id=?1 AND uid=?2")?;
-            let mut insert = tx.prepare_cached(
-                "INSERT INTO messages (account_id, gm_msgid, message_id, in_reply_to, refs, subject,
+            let mut insert = tx.prepare_cached(&format!(
+                "INSERT INTO messages (id, account_id, gm_msgid, message_id, in_reply_to, refs, subject,
                     from_name, from_addr, to_addrs, date, size, flags, has_attachments, identity, keywords)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-            )?;
+                 VALUES ({NEXT_MESSAGE_ID},?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+            ))?;
             let mut update_flags = tx.prepare_cached("UPDATE messages SET flags=?2, keywords=?3 WHERE id=?1")?;
             // Our local copy of a message we sent: the server's copy takes it over (same row, so
             // no duplicate and the conversation keeps its place).
@@ -3685,9 +3699,11 @@ impl Store {
             let mut db = self.db();
             let tx = db.transaction()?;
             tx.execute(
-                "INSERT INTO messages (account_id, message_id, in_reply_to, refs, subject, from_name, from_addr,
+                &format!(
+                    "INSERT INTO messages (id, account_id, message_id, in_reply_to, refs, subject, from_name, from_addr,
                     to_addrs, date, size, flags, has_attachments, identity, keywords, local_copy, pending_send, draft_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'',1,?14,?15)",
+                 VALUES ({NEXT_MESSAGE_ID},?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'',1,?14,?15)"
+                ),
                 params![
                     account_id,
                     rec.message_id,
@@ -3746,7 +3762,9 @@ impl Store {
 
     /// The draft's copy in `folder_id` (Drafts): updated in place, so its row doesn't flicker
     /// while being written; created the first time. Returns the folders it's in.
-    pub fn upsert_draft_copy(&self, draft_id: i64, account_id: i64, folder_id: i64, raw: &[u8]) -> Result<Vec<i64>> {
+    /// Returns the folders it's in, and the copy's id when it was there already (its body
+    /// rewritten under the same id: what's shown of it has to be read again).
+    pub fn upsert_draft_copy(&self, draft_id: i64, account_id: i64, folder_id: i64, raw: &[u8]) -> Result<(Vec<i64>, Option<i64>)> {
         let existing: Option<i64> =
             self.rdb().query_row("SELECT id FROM messages WHERE draft_id=?1", [draft_id], |r| r.get(0)).optional()?;
         let id = match existing {
@@ -3764,10 +3782,10 @@ impl Store {
                 }
                 let (snippet, has_attachments) = crate::mime::body_summary(raw);
                 self.store_body(id, raw, snippet.as_deref(), has_attachments, None)?;
-                id
+                return Ok((self.message_folder_ids(id)?, Some(id)));
             }
         };
-        self.message_folder_ids(id)
+        Ok((self.message_folder_ids(id)?, None))
     }
 
     /// Every draft's and every queued message's composer state (to see which files they use).
