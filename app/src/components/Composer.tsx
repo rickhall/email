@@ -469,7 +469,7 @@ function Toolbar(props: {
         <B label="Underline" key={keyText('U')} name="underline" onClick={run((e) => e.chain().focus().toggleUnderline().run())}>
           U
         </B>
-        <ColorButton which="color" label="Text colour" glyph="A" />
+        <ColorButton which="color" label="Text color" glyph="A" />
         <ColorButton which="highlight" label="Highlight" key={keyText('H', { shift: true })} glyph="🖍" />
         <B label="Link" key={keyText('K')} name="link" onClick={openLink}>
           🔗
@@ -598,6 +598,21 @@ const HIGHLIGHTS: { name: string; value: string | null }[] = [
   { name: 'Gray', value: '#e5e7eb' },
 ];
 
+/** Pasted HTML without its text and background colors, unless it was copied in the editor
+ *  itself (ProseMirror marks its own with `data-pm-slice`). */
+function withoutPastedColors(html: string): string {
+  if (html.includes('data-pm-slice')) return html;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  for (const el of doc.body.querySelectorAll<HTMLElement>('[style]')) {
+    el.style.removeProperty('color');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('background');
+  }
+  for (const el of doc.body.querySelectorAll('font[color]')) el.removeAttribute('color');
+  for (const el of doc.body.querySelectorAll('mark')) el.replaceWith(...el.childNodes);
+  return doc.body.innerHTML;
+}
+
 /** A shortcut as the platform writes it: ⌥⇧⌘8 on a Mac, Ctrl+Shift+8 elsewhere. */
 function keyText(key: string, mods: { shift?: boolean; alt?: boolean } = {}): string {
   if (platform === 'macos') return `${mods.alt ? '⌥' : ''}${mods.shift ? '⇧' : ''}⌘${key}`;
@@ -677,6 +692,10 @@ export function Composer() {
         }),
       ],
       editorProps: {
+        // Text pasted from elsewhere comes without its colors: a dark page's or editor's light
+        // text would be unreadable on the white mail is read on. What's copied within the
+        // message keeps them.
+        transformPastedHTML: withoutPastedColors,
         // A picture on the clipboard (a screenshot, an image copied from a page): into the
         // message where the cursor is, not attached. Files dropped on the window still attach.
         handlePaste: (_view, event) => {

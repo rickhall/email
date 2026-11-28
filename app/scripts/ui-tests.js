@@ -340,7 +340,7 @@ describe('compose', () => {
     }
   });
 
-  test('text colour and highlight from their palettes (and None), styled inline as sent', async () => {
+  test('text color and highlight from their palettes (and None), styled inline as sent', async () => {
     const { page, errors, context, close } = await open({ threaded: false });
     try {
       const popup = context.waitForEvent('page');
@@ -371,7 +371,7 @@ describe('compose', () => {
       for (let i = 0; i < 'and marked ones'.length; i++) await w.keyboard.press('ArrowLeft');
       await w.keyboard.press('ArrowLeft');
       await select('Red words'.length);
-      await choose('Text colour', 'Red');
+      await choose('Text color', 'Red');
       await editor.locator('span[style*="color"]', { hasText: 'Red words' }).waitFor();
       await w.waitForTimeout(900);
       const saved = () => w.evaluate(() => Object.values(JSON.parse(localStorage.getItem('mock.drafts') ?? '{}')).map((d) => d.html).join(''));
@@ -379,8 +379,39 @@ describe('compose', () => {
       assert.match(html, /<span style="color: ?(#d1242f|rgb\(209, 36, 47\));?">Red words<\/span>/, html);
       assert.match(html, /<mark [^>]*style="background-color: ?(#fff3a3|rgb\(255, 243, 163\))[^"]*">marked ones<\/mark>/, html);
       // Default takes the colour off again.
-      await choose('Text colour', 'Default');
+      await choose('Text color', 'Default');
       assert.equal(await editor.locator('span[style*="color"]').count(), 0);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
+  test('text pasted from elsewhere comes without its colors; copied within the message, with them', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const editor = w.locator('.cmp-editor .ProseMirror');
+      await editor.waitFor();
+      await editor.click();
+      const paste = (html) =>
+        w.evaluate((html) => {
+          const data = new DataTransfer();
+          data.setData('text/html', html);
+          data.setData('text/plain', 'x');
+          document.querySelector('.cmp-editor .ProseMirror').dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+        }, html);
+      // From a dark page: light text, a background, a <font>, a <mark>; bold stays.
+      await paste('<p><span style="color:#eeeeee;background-color:#111;font-weight:bold">Light text</span> <font color="#ffffff">and font</font> <mark>marked</mark></p>');
+      await editor.getByText('Light text').waitFor();
+      assert.equal(await editor.locator('span[style*="color"], mark').count(), 0, await editor.innerHTML());
+      assert.equal(await editor.locator('strong', { hasText: 'Light text' }).count(), 1, 'other formatting is kept');
+      // Copied in the editor itself (ProseMirror marks it): the color stays.
+      await paste('<p data-pm-slice="1 1 []"><span style="color: #d1242f">Our red</span></p>');
+      await editor.locator('span[style*="color"]', { hasText: 'Our red' }).waitFor();
       assert.deepEqual(errors, []);
     } finally {
       await close();
