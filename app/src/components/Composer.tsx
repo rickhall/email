@@ -598,6 +598,16 @@ const HIGHLIGHTS: { name: string; value: string | null }[] = [
   { name: 'Gray', value: '#e5e7eb' },
 ];
 
+/** Highlights that start in the palette's yellow: `==text==` and ⇧⌘H give no color, which
+ *  would show the browser's own yellow here, "None" in the palette, and be sent with no style
+ *  (some mail apps show a bare <mark> as plain text). */
+const PaletteHighlight = Highlight.extend({
+  addAttributes() {
+    const parent = this.parent?.() ?? {};
+    return { ...parent, color: { ...parent.color, default: HIGHLIGHTS[1]!.value } };
+  },
+});
+
 /** Pasted HTML without its text and background colors, unless it was copied in the editor
  *  itself (ProseMirror marks its own with `data-pm-slice`). */
 function withoutPastedColors(html: string): string {
@@ -680,7 +690,7 @@ export function Composer() {
         // and ⇧⌘H highlight in yellow.
         TextStyle,
         Color,
-        Highlight.configure({ multicolor: true }),
+        PaletteHighlight.configure({ multicolor: true }),
         // `# `, `## `, `### ` (⌥⌘1–3): headings, sized for a message, not a page.
         SizedHeading.configure({ levels: [1, 2, 3] }),
         Placeholder.configure({ placeholder: 'Write your message…' }),

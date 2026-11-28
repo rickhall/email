@@ -381,6 +381,15 @@ describe('compose', () => {
       // Default takes the colour off again.
       await choose('Text color', 'Default');
       assert.equal(await editor.locator('span[style*="color"]').count(), 0);
+      // ==text== (and ⇧⌘H) highlight in the palette's yellow, which the button shows.
+      await editor.press('End');
+      await w.keyboard.type(' ==typed==');
+      const typed = editor.locator('mark', { hasText: 'typed' });
+      await typed.waitFor();
+      assert.match((await typed.getAttribute('style')) ?? '', /background-color: ?(#fff3a3|rgb\(255, 243, 163\))/);
+      await w.locator('.fmt-btn[aria-label="Highlight"]').click();
+      assert.equal(await w.locator('.fmt-swatch[aria-checked="true"]').getAttribute('aria-label'), 'Yellow');
+      await w.keyboard.press('Escape');
       assert.deepEqual(errors, []);
     } finally {
       await close();
