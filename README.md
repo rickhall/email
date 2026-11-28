@@ -70,7 +70,8 @@ mail in the background; you can read and write while it runs.
 side. The list scrolls through tens of thousands of messages without waiting, and new mail
 arrives as it's delivered. Conversations are grouped together, even across folders.
 
-**Writing mail** happens in its own window: rich text, pictures pasted into the text,
+**Writing mail** happens in its own window: rich text (with colours, highlights, code, code blocks and headings, and
+Markdown as you type), pictures pasted into the text,
 attachments by drag and drop, replies quoted below your text, and a switch between Reply and
 Reply all. Addresses are suggested from the people you write to most. Signatures (Settings ›
 Signatures, with pictures pasted in) go under your text, a default per address for new messages

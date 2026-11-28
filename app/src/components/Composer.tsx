@@ -4,6 +4,12 @@ import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import Image from '@tiptap/extension-image';
+import CodeBlock from '@tiptap/extension-code-block';
+import Heading from '@tiptap/extension-heading';
+import { Color, TextStyle } from '@tiptap/extension-text-style';
+import Highlight from '@tiptap/extension-highlight';
+import { mergeAttributes } from '@tiptap/core';
+import { TextSelection } from '@tiptap/pm/state';
 import { pastedPictures, scalePicture } from '../lib/pictures';
 import type { Addr } from '../api';
 import { accounts } from '../state';
@@ -26,7 +32,7 @@ import { api } from '../api';
 import { composeDraftId, onCloseRequested, onFileDrop, pickFiles, setWindowTitle } from '../lib/windows';
 import { GMAIL_LIMIT } from '../lib/compose';
 import { MOD } from '../lib/shortcuts';
-import { DRAG } from '../lib/platform';
+import { DRAG, platform } from '../lib/platform';
 import { confirmDialog } from './Actions';
 import { CloseIcon, ForwardIcon, MailIcon, PaperclipIcon, ReplyAllIcon, ReplyIcon, TrashIcon } from './Icons';
 import { AutoHeightFrame } from './AutoHeightFrame';
@@ -312,6 +318,82 @@ function Toolbar(props: {
     const ed = props.editor();
     if (ed) f(ed);
   };
+  // The colour palettes (text, highlight): one open at a time, under its button.
+  const [palette, setPalette] = createSignal<'color' | 'highlight' | null>(null);
+  let paletteEl: HTMLDivElement | undefined;
+  createEffect(() => {
+    if (!palette()) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element;
+      if (!paletteEl?.contains(t) && !t.closest?.('.fmt-color-btn')) setPalette(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setPalette(null);
+        props.editor()?.commands.focus();
+      }
+    };
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    onCleanup(() => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+    });
+  });
+  const current = (which: 'color' | 'highlight'): string | null => {
+    props.tick();
+    const ed = props.editor();
+    if (!ed) return null;
+    return (which === 'color' ? ed.getAttributes('textStyle').color : ed.getAttributes('highlight').color) ?? null;
+  };
+  const pick = (which: 'color' | 'highlight', value: string | null) => {
+    setPalette(null);
+    const ed = props.editor();
+    if (!ed) return;
+    const chain = ed.chain().focus();
+    if (which === 'color') (value ? chain.setColor(value) : chain.unsetColor()).run();
+    else (value ? chain.setHighlight({ color: value }) : chain.unsetHighlight()).run();
+  };
+  const ColorButton = (p: { which: 'color' | 'highlight'; label: string; key?: string; glyph: string }) => (
+    <span class="fmt-color">
+      <button
+        class="fmt-btn fmt-color-btn"
+        tabIndex={-1}
+        classList={{ on: palette() === p.which }}
+        title={`${p.label}${p.key ? ` (${p.key})` : ''}`}
+        aria-label={p.label}
+        aria-haspopup="menu"
+        aria-expanded={palette() === p.which}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setPalette(palette() === p.which ? null : p.which)}
+      >
+        <span class="fmt-color-glyph">{p.glyph}</span>
+        {/* the colour now: under the letter, or the marker's tip */}
+        <span class="fmt-color-bar" style={{ background: current(p.which) ?? (p.which === 'color' ? 'currentColor' : 'transparent') }} />
+      </button>
+      <Show when={palette() === p.which}>
+        <div ref={paletteEl} class="fmt-palette" role="menu" aria-label={p.label}>
+          <For each={p.which === 'color' ? TEXT_COLORS : HIGHLIGHTS}>
+            {(c) => (
+              <button
+                class="fmt-swatch"
+                role="menuitemradio"
+                aria-checked={current(p.which) === c.value}
+                aria-label={c.name}
+                title={c.name}
+                classList={{ none: !c.value }}
+                style={c.value ? { background: c.value } : undefined}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => pick(p.which, c.value)}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
+    </span>
+  );
   const openLink = () => setLinking(true);
   // Opened from the button or ⌘K: start from the link under the cursor, if any.
   createEffect(() => {
@@ -378,27 +460,38 @@ function Toolbar(props: {
           </span>
         }
       >
-        <B label="Bold" key={`${MOD}B`} name="bold" onClick={run((e) => e.chain().focus().toggleBold().run())}>
+        <B label="Bold" key={keyText('B')} name="bold" onClick={run((e) => e.chain().focus().toggleBold().run())}>
           B
         </B>
-        <B label="Italic" key={`${MOD}I`} name="italic" onClick={run((e) => e.chain().focus().toggleItalic().run())}>
+        <B label="Italic" key={keyText('I')} name="italic" onClick={run((e) => e.chain().focus().toggleItalic().run())}>
           I
         </B>
-        <B label="Underline" key={`${MOD}U`} name="underline" onClick={run((e) => e.chain().focus().toggleUnderline().run())}>
+        <B label="Underline" key={keyText('U')} name="underline" onClick={run((e) => e.chain().focus().toggleUnderline().run())}>
           U
         </B>
-        <B label="Link" key={`${MOD}K`} name="link" onClick={openLink}>
+        <ColorButton which="color" label="Text colour" glyph="A" />
+        <ColorButton which="highlight" label="Highlight" key={keyText('H', { shift: true })} glyph="🖍" />
+        <B label="Link" key={keyText('K')} name="link" onClick={openLink}>
           🔗
         </B>
+        <B label="Code" key={keyText('E')} name="code" onClick={run((e) => e.chain().focus().toggleCode().run())}>
+          {'</>'}
+        </B>
         <span class="fmt-sep" />
-        <B label="Bulleted list" key="" name="bulletList" onClick={run((e) => e.chain().focus().toggleBulletList().run())}>
+        <B label="Heading" key={keyText('1', { alt: true })} name="heading" onClick={run((e) => e.chain().focus().toggleHeading({ level: 1 }).run())}>
+          H
+        </B>
+        <B label="Bulleted list" key={keyText('8', { shift: true })} name="bulletList" onClick={run((e) => e.chain().focus().toggleBulletList().run())}>
           •
         </B>
-        <B label="Numbered list" key="" name="orderedList" onClick={run((e) => e.chain().focus().toggleOrderedList().run())}>
+        <B label="Numbered list" key={keyText('7', { shift: true })} name="orderedList" onClick={run((e) => e.chain().focus().toggleOrderedList().run())}>
           1.
         </B>
-        <B label="Quote" key="" name="blockquote" onClick={run((e) => e.chain().focus().toggleBlockquote().run())}>
+        <B label="Quote" key={keyText('B', { shift: true })} name="blockquote" onClick={run((e) => e.chain().focus().toggleBlockquote().run())}>
           ❝
+        </B>
+        <B label="Code block" key={keyText('C', { alt: true })} name="codeBlock" onClick={run((e) => e.chain().focus().toggleCodeBlock().run())}>
+          {'{ }'}
         </B>
         <span class="fmt-fill" />
         <button
@@ -420,6 +513,99 @@ function Toolbar(props: {
     </div>
   );
 }
+
+/** How code looks in the message sent (and in the editor, adjusted to the theme there). */
+const MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace";
+const RULE_STYLE = 'border:0;border-top:1px solid #d0d7de;margin:14px 0';
+
+/** Code blocks that take several lines as one: with lines (paragraphs, list items…) selected,
+ *  the toolbar's button or ⌥⌘C makes one block of them all, each a line of it, as Slack and
+ *  GitHub do (TipTap's own makes a block of each). In a code block it turns back into text,
+ *  a paragraph per line. */
+const CodeBlockLines = CodeBlock.extend({
+  addCommands() {
+    return {
+      ...this.parent?.(),
+      toggleCodeBlock:
+        (attributes) =>
+        ({ state, dispatch, commands }) => {
+          const { $from, $to } = state.selection;
+          const type = state.schema.nodes[this.name]!;
+          const para = state.schema.nodes.paragraph!;
+          // In a code block: its lines back as paragraphs.
+          if ($from.parent.type === type && $from.sameParent($to)) {
+            const block = $from.parent;
+            const start = $from.before();
+            const lines = block.textContent.split('\n');
+            if (dispatch) {
+              const nodes = lines.map((l) => para.create(null, l ? state.schema.text(l) : null));
+              const tr = state.tr.replaceWith(start, start + block.nodeSize, nodes);
+              tr.setSelection(TextSelection.near(tr.doc.resolve(start + 1)));
+              dispatch(tr.scrollIntoView());
+            }
+            return true;
+          }
+          // Within one line: as TipTap does.
+          if ($from.sameParent($to)) return commands.toggleNode(this.name, 'paragraph', attributes);
+          // Several: the top-level blocks they're in, as one block, a line each.
+          const from = $from.before(1);
+          const to = $to.after(1);
+          const text = state.doc.textBetween(from, to, '\n', '\n');
+          if (dispatch) {
+            const tr = state.tr.replaceWith(from, to, type.create(attributes, text ? state.schema.text(text) : null));
+            tr.setSelection(TextSelection.near(tr.doc.resolve(from + 1)));
+            dispatch(tr.scrollIntoView());
+          }
+          return true;
+        },
+    };
+  },
+});
+
+/** Headings styled inline per level (the recipient's mail app has none of the app's CSS):
+ *  sized for a message, not a web page. */
+const HEADING_STYLES: Record<number, string> = {
+  1: 'font-size:20px;line-height:1.3;font-weight:600;margin:16px 0 8px',
+  2: 'font-size:17px;line-height:1.35;font-weight:600;margin:14px 0 6px',
+  3: 'font-size:15px;line-height:1.4;font-weight:600;margin:12px 0 4px',
+};
+const SizedHeading = Heading.extend({
+  renderHTML({ node, HTMLAttributes }) {
+    const level = this.options.levels.includes(node.attrs.level) ? node.attrs.level : this.options.levels[0];
+    return [`h${level}`, mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, { style: HEADING_STYLES[level] ?? '' }), 0];
+  },
+});
+
+/** The colours offered: readable on the white a message is read on (and the theme's own). */
+const TEXT_COLORS: { name: string; value: string | null }[] = [
+  { name: 'Default', value: null },
+  { name: 'Gray', value: '#6b7280' },
+  { name: 'Red', value: '#d1242f' },
+  { name: 'Orange', value: '#c2570c' },
+  { name: 'Green', value: '#1a7f37' },
+  { name: 'Blue', value: '#0969da' },
+  { name: 'Purple', value: '#8250df' },
+  { name: 'Pink', value: '#bf3989' },
+];
+const HIGHLIGHTS: { name: string; value: string | null }[] = [
+  { name: 'None', value: null },
+  { name: 'Yellow', value: '#fff3a3' },
+  { name: 'Green', value: '#c6f0c2' },
+  { name: 'Blue', value: '#cfe3ff' },
+  { name: 'Pink', value: '#ffd6e8' },
+  { name: 'Orange', value: '#ffdcb8' },
+  { name: 'Purple', value: '#e4d8ff' },
+  { name: 'Gray', value: '#e5e7eb' },
+];
+
+/** A shortcut as the platform writes it: ⌥⇧⌘8 on a Mac, Ctrl+Shift+8 elsewhere. */
+function keyText(key: string, mods: { shift?: boolean; alt?: boolean } = {}): string {
+  if (platform === 'macos') return `${mods.alt ? '⌥' : ''}${mods.shift ? '⇧' : ''}⌘${key}`;
+  return ['Ctrl', mods.alt && 'Alt', mods.shift && 'Shift', key].filter(Boolean).join('+');
+}
+
+const CODE_STYLE = `font-family:${MONO};font-size:90%;background:#f3f4f6;border:1px solid #e1e4e8;border-radius:4px;padding:1px 4px`;
+const CODE_BLOCK_STYLE = `font-family:${MONO};font-size:90%;line-height:1.45;background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere`;
 
 // ------------------------------------------------------------- composer
 
@@ -466,10 +652,22 @@ export function Composer() {
       extensions: [
         StarterKit.configure({
           heading: false,
+          // Code (`text`, ⌘E) and code blocks (```, ⌥⌘C): styled inline, as sent, since the
+          // recipient's mail app has none of the app's CSS.
+          code: { HTMLAttributes: { style: CODE_STYLE } },
           codeBlock: false,
-          horizontalRule: false,
+          // `---`: a line across.
+          horizontalRule: { HTMLAttributes: { style: RULE_STYLE } },
           link: { openOnClick: false, autolink: true, defaultProtocol: 'https' },
         }),
+        CodeBlockLines.configure({ HTMLAttributes: { style: CODE_BLOCK_STYLE } }),
+        // Text and highlight colours, as inline styles (span color, mark background); `==text==`
+        // and ⇧⌘H highlight in yellow.
+        TextStyle,
+        Color,
+        Highlight.configure({ multicolor: true }),
+        // `# `, `## `, `### ` (⌥⌘1–3): headings, sized for a message, not a page.
+        SizedHeading.configure({ levels: [1, 2, 3] }),
         Placeholder.configure({ placeholder: 'Write your message…' }),
         // Pictures pasted in sit in the text (sized by dragging a corner); sent as inline parts.
         Image.configure({

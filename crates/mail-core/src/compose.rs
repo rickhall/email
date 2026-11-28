@@ -121,6 +121,140 @@ pub struct InlineImage {
     pub data: Vec<u8>,
 }
 
+/// The plain-text version of a message's HTML: as the parser makes it, except code and lines.
+/// A code block keeps its lines and indentation, fenced with ``` (as in Markdown, and as the
+/// composer takes it), inline code is in backticks, and a horizontal line is `---`.
+pub fn plain_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<pre").map(|i| at + i) {
+        // `<pre>` or `<pre ...>`, not `<prefix…>`
+        if !matches!(lower.as_bytes().get(start + 4), Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')) {
+            out.push_str(&inline_code_marks(&html[at..start + 4], &lower[at..start + 4]));
+            at = start + 4;
+            continue;
+        }
+        let Some(open_end) = lower[start..].find('>').map(|i| start + i + 1) else { break };
+        let Some(close) = lower[open_end..].find("</pre>").map(|i| open_end + i) else { break };
+        out.push_str(&inline_code_marks(&html[at..start], &lower[at..start]));
+        out.push_str(&format!("<p>\u{1}CODEBLOCK{}\u{1}</p>", blocks.len()));
+        blocks.push(code_text(&html[open_end..close]));
+        at = close + "</pre>".len();
+    }
+    out.push_str(&inline_code_marks(&html[at..], &lower[at..]));
+    let out = rules_as_dashes(&out);
+    let mut text = mail_parser::decoders::html::html_to_text(&out);
+    for (i, code) in blocks.iter().enumerate() {
+        text = text.replace(&format!("\u{1}CODEBLOCK{i}\u{1}"), &format!("```\n{}\n```", code.trim_end_matches('\n')));
+    }
+    text
+}
+
+/// `<hr>` as a paragraph of `---`, for the plain-text version.
+fn rules_as_dashes(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<hr").map(|i| at + i) {
+        let Some(end) = lower[i..].find('>').map(|e| i + e + 1) else { break };
+        out.push_str(&html[at..i]);
+        if matches!(lower.as_bytes().get(i + 3), Some(b'>' | b' ' | b'/' | b'\t' | b'\n' | b'\r')) {
+            out.push_str("<p>---</p>");
+        } else {
+            out.push_str(&html[i..end]);
+        }
+        at = end;
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
+/// Backticks around inline code (`<code>`), for the plain-text version.
+fn inline_code_marks(html: &str, lower: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 8);
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<code").map(|i| at + i) {
+        let tag_end = match lower[i..].find('>') {
+            Some(e) => i + e + 1,
+            None => break,
+        };
+        if !matches!(lower.as_bytes().get(i + 5), Some(b'>' | b' ' | b'\t' | b'\n' | b'\r')) {
+            out.push_str(&html[at..tag_end]);
+            at = tag_end;
+            continue;
+        }
+        out.push_str(&html[at..i]);
+        out.push('`');
+        at = tag_end;
+        if let Some(c) = lower[at..].find("</code>").map(|c| at + c) {
+            out.push_str(&html[at..c]);
+            out.push('`');
+            at = c + "</code>".len();
+        }
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
+/// A code block's text as written: tags dropped (`<br>` a line break), entities decoded,
+/// spaces and line breaks kept.
+fn code_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&decode_entities(&rest[..lt]));
+        let Some(gt) = rest[lt..].find('>') else {
+            rest = "";
+            break;
+        };
+        if rest[lt..lt + gt].to_ascii_lowercase().starts_with("<br") {
+            out.push('\n');
+        }
+        rest = &rest[lt + gt + 1..];
+    }
+    out.push_str(&decode_entities(rest));
+    out
+}
+
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let end = after.find(';').filter(|&e| e <= 10);
+        let decoded = end.and_then(|e| {
+            let name = &after[..e];
+            let c = match name {
+                "lt" => '<',
+                "gt" => '>',
+                "amp" => '&',
+                "quot" => '"',
+                "apos" => '\'',
+                "nbsp" => ' ',
+                _ if name.starts_with("#x") || name.starts_with("#X") => char::from_u32(u32::from_str_radix(&name[2..], 16).ok()?)?,
+                _ if name.starts_with('#') => char::from_u32(name[1..].parse().ok()?)?,
+                _ => return None,
+            };
+            Some((c, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &after[e + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The HTML with its `data:` images taken out into [`InlineImage`]s (one per distinct image),
 /// the `src`s pointing at their `cid:`. `tag` makes the Content-IDs unique (a Message-ID).
 pub fn inline_images(html: &str, tag: &str) -> (String, Vec<InlineImage>) {
@@ -173,7 +307,7 @@ pub fn inline_images(html: &str, tag: &str) -> (String, Vec<InlineImage>) {
 pub fn build(msg: &Outgoing, message_id: &str, date: i64) -> Result<Vec<u8>> {
     use mail_builder::mime::MimePart;
     let (html, images) = inline_images(&msg.html, message_id);
-    let text = mail_parser::decoders::html::html_to_text(&html);
+    let text = plain_text(&html);
     let mut b = MessageBuilder::new().message_id(message_id).date(date).subject(msg.subject.as_str());
     if let Some(from) = &msg.from {
         b = b.from(address(std::slice::from_ref(from)));
@@ -352,6 +486,29 @@ pub fn reply_threading(orig: &Original) -> (Option<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_keeps_code() {
+        let html = "<p>Run <code style=\"font-family:monospace\">age &lt;file&gt;</code> first:</p>\
+                    <pre style=\"background:#f6f8fa\"><code>age() {\n    local t\n    [[ \"$t\" =~ ^[0-9]+$ ]] &amp;&amp; echo $((now - t))\n}</code></pre>\
+                    <p>Then <b>bold</b> as usual.</p><p>A <code>&lt;pre&gt;</code> and a <prefix>tag</prefix>.</p>";
+        let text = plain_text(html);
+        assert!(text.contains("Run `age <file>` first:"), "{text}");
+        assert!(
+            text.contains("```\nage() {\n    local t\n    [[ \"$t\" =~ ^[0-9]+$ ]] && echo $((now - t))\n}\n```"),
+            "lines and indentation kept, fenced: {text}"
+        );
+        assert!(text.contains("Then bold as usual."), "{text}");
+        assert!(text.contains("A `<pre>` and a tag."), "{text}");
+        // A horizontal line.
+        let ruled = plain_text("<p>Above</p><hr style=\"border:0\"><p>Below</p><hr/>");
+        assert!(ruled.contains("Above") && ruled.contains("---") && ruled.find("---") < ruled.find("Below"), "{ruled}");
+        // A code block written with line breaks (<br>) and nothing else.
+        assert_eq!(plain_text("<pre>a<br>  b</pre>").trim(), "```\na\n  b\n```");
+        // No code: as the parser makes it.
+        let plain = "<p>Hi &amp; bye</p><ul><li>one</li></ul>";
+        assert_eq!(plain_text(plain), mail_parser::decoders::html::html_to_text(plain));
+    }
     use mail_parser::MimeHeaders;
 
     fn a(addr: &str) -> Addr {
@@ -556,3 +713,4 @@ mod tests {
         assert_eq!(reply_threading(&first).1, vec!["a@x".to_string(), "b@x".to_string()]);
     }
 }
+

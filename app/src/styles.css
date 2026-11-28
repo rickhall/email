@@ -4541,6 +4541,41 @@ html.macos .app.rail-mode .search-bar {
 .cmp-editor .ProseMirror a {
   color: var(--accent);
 }
+/* Code as the theme has it here (the inline style is what's sent) */
+.cmp-editor .ProseMirror code {
+  background: var(--bg-hover) !important;
+  border-color: var(--sep-strong) !important;
+  color: inherit;
+}
+.cmp-editor .ProseMirror pre {
+  margin: 0 0 0.7em;
+  background: var(--bg-hover) !important;
+  border-color: var(--sep-strong) !important;
+}
+.cmp-editor .ProseMirror h1,
+.cmp-editor .ProseMirror h2,
+.cmp-editor .ProseMirror h3 {
+  color: var(--text);
+}
+.cmp-editor .ProseMirror hr {
+  border-top-color: var(--sep-strong) !important;
+}
+.cmp-editor .ProseMirror hr.ProseMirror-selectednode {
+  outline: 2px solid var(--accent);
+}
+.cmp-editor .ProseMirror pre code {
+  /* the block's own box only */
+  background: none !important;
+  border: 0 !important;
+  padding: 0 !important;
+  font-size: inherit !important;
+}
+.cmp-toolbar .fmt-btn[aria-label='Code'],
+.cmp-toolbar .fmt-btn[aria-label='Code block'] {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+}
 .cmp-editor .ProseMirror p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;
@@ -7066,4 +7101,59 @@ body.dragging-message iframe {
 }
 .st-tab-panel {
   margin-bottom: 20px;
+}
+
+/* Composer: text and highlight colour buttons and their palettes */
+.fmt-color {
+  position: relative;
+  display: inline-flex;
+}
+.fmt-color-btn {
+  flex-direction: column;
+  gap: 1px;
+}
+.fmt-color-glyph {
+  line-height: 1;
+  font-weight: 600;
+}
+.fmt-color-bar {
+  width: 14px;
+  height: 3px;
+  border-radius: 1px;
+  box-shadow: inset 0 0 0 1px var(--sep);
+}
+.fmt-palette {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(4, 22px);
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--sep);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-card);
+}
+.fmt-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--sep-strong);
+  padding: 0;
+  cursor: pointer;
+}
+.fmt-swatch[aria-checked='true'] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Default / None: white with a slash */
+.fmt-swatch.none {
+  background: linear-gradient(to top right, transparent 45%, #d1242f 46%, #d1242f 54%, transparent 55%), #fff;
+}
+/* A highlight is light: its text stays dark here too, as on the white it's read on. */
+.cmp-editor .ProseMirror mark {
+  color: #1d1d1f !important;
+  border-radius: 2px;
 }

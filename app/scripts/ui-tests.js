@@ -254,6 +254,174 @@ describe('conversation view: the message asked for', () => {
 });
 
 describe('compose', () => {
+  test('code: `text` and ``` as in Markdown, the toolbar and keys; styled inline in what is saved and sent', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const editor = w.locator('.cmp-editor .ProseMirror');
+      await editor.waitFor();
+      await editor.click();
+      // `text`: inline code, as typed.
+      await w.keyboard.type('Run `age` first.');
+      await editor.locator('code', { hasText: 'age' }).waitFor();
+      // ``` and Enter: a code block, keeping lines and indentation.
+      await w.keyboard.press('Enter');
+      await w.keyboard.type('```');
+      await w.keyboard.press('Enter');
+      await w.keyboard.type('age() {');
+      await w.keyboard.press('Enter');
+      await w.keyboard.type('    local t');
+      const block = editor.locator('pre');
+      await block.waitFor();
+      assert.equal(await block.innerText(), 'age() {\n    local t');
+      assert.equal(await w.locator('.fmt-btn[aria-label="Code block"]').getAttribute('aria-pressed'), 'true', 'shown as on');
+      // Out of the block (three Enters end it), then the buttons on a selection.
+      await w.keyboard.press('Enter');
+      await w.keyboard.press('Enter');
+      await w.keyboard.press('Enter');
+      await w.keyboard.type('plain words');
+      for (let i = 0; i < 'plain words'.length; i++) await w.keyboard.press('Shift+ArrowLeft');
+      await w.locator('.fmt-btn[aria-label="Code"]').click();
+      await editor.locator('code', { hasText: 'plain words' }).waitFor();
+      assert.equal(await w.locator('.fmt-btn[aria-label="Code"]').getAttribute('aria-pressed'), 'true');
+      await w.locator('.fmt-btn[aria-label="Code block"]').click();
+      await editor.locator('pre', { hasText: 'plain words' }).waitFor();
+      // What's kept (and sent) carries its own styles: the recipient's mail app has none of ours.
+      await w.waitForTimeout(900);
+      const html = await w.evaluate(() => Object.values(JSON.parse(localStorage.getItem('mock.drafts') ?? '{}')).map((d) => d.html).join(''));
+      // (The browser writes the styles its own way: rgb() colours, spaces.)
+      assert.match(html, /<p>Run <code style="[^"]*font-family:[^"]*monospace[^"]*">age<\/code> first\.<\/p>/, html);
+      assert.match(html, /<pre style="[^"]*background:[^"]*white-space: ?pre-wrap[^"]*"><code>age\(\) \{\n    local t<\/code><\/pre>/, html);
+      assert.match(html, /<pre style="[^"]*"><code>plain words<\/code><\/pre>/, html);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
+  test('several lines selected › Code block: one block, a line each, and back', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const editor = w.locator('.cmp-editor .ProseMirror');
+      await editor.waitFor();
+      await editor.click();
+      for (const [i, line] of ['Intro', 'one()', '  two()', 'three()'].entries()) {
+        if (i) await w.keyboard.press('Enter');
+        await w.keyboard.type(line);
+      }
+      // From the end of "three()" up into "one()", part-way: the whole lines.
+      for (let i = 0; i < 3; i++) await w.keyboard.press('ArrowLeft');
+      await w.keyboard.press('Shift+ArrowUp');
+      await w.keyboard.press('Shift+ArrowUp');
+      await w.locator('.fmt-btn[aria-label="Code block"]').click();
+      assert.equal(await editor.locator('pre').count(), 1, 'one block');
+      assert.equal(await editor.locator('pre').innerText(), 'one()\n  two()\nthree()');
+      // (The editor keeps an empty line after a block at the end.)
+      const lines = async () => (await editor.locator('p').allInnerTexts()).map((t) => t.trim()).filter(Boolean);
+      assert.deepEqual(await lines(), ['Intro'], 'the line before stays');
+      // Again: back to a paragraph per line.
+      await w.locator('.fmt-btn[aria-label="Code block"]').click();
+      assert.equal(await editor.locator('pre').count(), 0);
+      assert.deepEqual(await editor.locator('p').evaluateAll((ps) => ps.map((p) => p.textContent).filter(Boolean)), ['Intro', 'one()', '  two()', 'three()']);
+      // Every button with a key says it when pointed at.
+      for (const [label, key] of [['Bulleted list', '8'], ['Numbered list', '7'], ['Quote', 'B'], ['Code', 'E'], ['Code block', 'C'], ['Heading', '1']]) {
+        assert.match(await w.locator(`.fmt-btn[aria-label="${label}"]`).getAttribute('title'), new RegExp(`\\(.*${key}\\)$`), label);
+      }
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
+  test('text colour and highlight from their palettes (and None), styled inline as sent', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const editor = w.locator('.cmp-editor .ProseMirror');
+      await editor.waitFor();
+      await editor.click();
+      await w.keyboard.type('Red words and marked ones');
+      const select = async (n) => {
+        for (let i = 0; i < n; i++) await w.keyboard.press('Shift+ArrowLeft');
+      };
+      const choose = async (button, swatch) => {
+        await w.locator(`.fmt-btn[aria-label="${button}"]`).click();
+        await w.locator(`.fmt-palette .fmt-swatch[aria-label="${swatch}"]`).click();
+        assert.equal(await w.locator('.fmt-palette').count(), 0, 'the palette closes');
+      };
+      await select('marked ones'.length);
+      await choose('Highlight', 'Yellow');
+      await editor.locator('mark', { hasText: 'marked ones' }).waitFor();
+      // The palette shows the colour now on; Esc closes it.
+      await w.locator('.fmt-btn[aria-label="Highlight"]').click();
+      assert.equal(await w.locator('.fmt-swatch[aria-checked="true"]').getAttribute('aria-label'), 'Yellow');
+      await w.keyboard.press('Escape');
+      assert.equal(await w.locator('.fmt-palette').count(), 0);
+      await w.keyboard.press('ArrowRight');
+      for (let i = 0; i < 'and marked ones'.length; i++) await w.keyboard.press('ArrowLeft');
+      await w.keyboard.press('ArrowLeft');
+      await select('Red words'.length);
+      await choose('Text colour', 'Red');
+      await editor.locator('span[style*="color"]', { hasText: 'Red words' }).waitFor();
+      await w.waitForTimeout(900);
+      const saved = () => w.evaluate(() => Object.values(JSON.parse(localStorage.getItem('mock.drafts') ?? '{}')).map((d) => d.html).join(''));
+      const html = await saved();
+      assert.match(html, /<span style="color: ?(#d1242f|rgb\(209, 36, 47\));?">Red words<\/span>/, html);
+      assert.match(html, /<mark [^>]*style="background-color: ?(#fff3a3|rgb\(255, 243, 163\))[^"]*">marked ones<\/mark>/, html);
+      // Default takes the colour off again.
+      await choose('Text colour', 'Default');
+      assert.equal(await editor.locator('span[style*="color"]').count(), 0);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
+  test('--- draws a line and # makes a heading, each styled inline as sent', async () => {
+    const { page, errors, context, close } = await open({ threaded: false });
+    try {
+      const popup = context.waitForEvent('page');
+      await page.keyboard.press('c');
+      const w = await popup;
+      w.on('pageerror', (e) => errors.push(e.message));
+      const editor = w.locator('.cmp-editor .ProseMirror');
+      await editor.waitFor();
+      await editor.click();
+      // --- on a line of its own: a horizontal line.
+      await w.keyboard.type('Above');
+      await w.keyboard.press('Enter');
+      await w.keyboard.type('---');
+      await editor.locator('hr').waitFor();
+      await w.waitForTimeout(900);
+      const html = await w.evaluate(() => Object.values(JSON.parse(localStorage.getItem('mock.drafts') ?? '{}')).map((d) => d.html).join(''));
+      // (The browser writes the border its own way.)
+      assert.match(html, /<p>Above<\/p><hr style="[^"]*border[^"]*">/, html.slice(-600));
+      // A heading: `# ` as in Markdown, the button, its size inline.
+      await w.keyboard.type('# Plan');
+      await editor.locator('h1', { hasText: 'Plan' }).waitFor();
+      assert.equal(await w.locator('.fmt-btn[aria-label="Heading"]').getAttribute('aria-pressed'), 'true');
+      await w.locator('.fmt-btn[aria-label="Heading"]').click();
+      assert.equal(await editor.locator('h1').count(), 0, 'the button turns it back');
+      await w.locator('.fmt-btn[aria-label="Heading"]').click();
+      await w.waitForTimeout(900);
+      const withHeading = await w.evaluate(() => Object.values(JSON.parse(localStorage.getItem('mock.drafts') ?? '{}')).map((d) => d.html).join(''));
+      assert.match(withHeading, /<h1 style="[^"]*font-size: ?20px[^"]*">Plan<\/h1>/, withHeading);
+      assert.deepEqual(errors, []);
+    } finally {
+      await close();
+    }
+  });
+
   test('the outline a compose window shows while loading is laid out like the composer', async () => {
     const context = await browser.newContext({ viewport: { width: 760, height: 400 } });
     try {
